@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "launcher",
+    "session-broker",
+    "tools",
+]
+
+# Abort on panic in release builds. This removes the stack unwinder and
+# its dependency on libgcc_s.so.1, so the binaries run on distroless
+# base-nossl-debian12 with no extra runtime libraries. Server daemons
+# in this workspace are expected to die on panic and be restarted by
+# systemd / the container runtime; we don't rely on Drop running during
+# a panic or on catch_unwind. Dev/debug builds keep the default unwind
+# behaviour for better diagnostics.
+[profile.release]
+panic = "abort"

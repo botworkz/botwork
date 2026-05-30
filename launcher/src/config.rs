@@ -1,0 +1,222 @@
+use std::env;
+use std::ffi::CString;
+
+pub const PREFIX: &str = "[botwork-launcher]";
+pub const DEFAULT_SOCKET_PATH: &str = "/run/botwork/launcher.sock";
+// Override with BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX when needed.
+pub const DEFAULT_IMAGE_ALLOWLIST: &str = r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$";
+pub const DEFAULT_CONTAINER_PIDS_LIMIT: u32 = 256;
+pub const DEFAULT_CONTAINER_MEMORY_LIMIT: &str = "512m";
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub socket_path: String,
+    pub socket_group: Option<u32>,
+    pub allowed_peer_uid: Option<u32>,
+    pub allowed_peer_gid: Option<u32>,
+    pub plugin_uid: u32,
+    pub plugin_gid: u32,
+    pub image_allowlist_regex: String,
+    pub container_pids_limit: u32,
+    pub container_memory_limit: String,
+    pub container_read_only_rootfs: bool,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self, String> {
+        let socket_path = env::var("BOTWORK_LAUNCHER_SOCKET_PATH")
+            .unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
+        let socket_group = env::var("BOTWORK_LAUNCHER_SOCKET_GROUP")
+            .ok()
+            .map(|value| resolve_group_spec(&value))
+            .transpose()?;
+        let allowed_peer_uid = env::var("BOTWORK_LAUNCHER_ALLOWED_UID")
+            .ok()
+            .map(|value| parse_u32_env("BOTWORK_LAUNCHER_ALLOWED_UID", &value))
+            .transpose()?;
+        let allowed_peer_gid = env::var("BOTWORK_LAUNCHER_ALLOWED_GID")
+            .ok()
+            .map(|value| parse_u32_env("BOTWORK_LAUNCHER_ALLOWED_GID", &value))
+            .transpose()?;
+        let (allowed_peer_uid, allowed_peer_gid) =
+            if allowed_peer_uid.is_none() && allowed_peer_gid.is_none() {
+                // Default to our own identity for local dev, but production should still set the
+                // broker uid/gid explicitly so the launcher is not trusting ambient host state.
+                (
+                    Some(unsafe { libc::geteuid() }),
+                    Some(unsafe { libc::getegid() }),
+                )
+            } else {
+                (allowed_peer_uid, allowed_peer_gid)
+            };
+        let plugin_uid = env::var("BOTWORK_PLUGIN_UID")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse::<u32>()
+            .map_err(|err| format!("invalid BOTWORK_PLUGIN_UID: {err}"))?;
+        let plugin_gid = env::var("BOTWORK_PLUGIN_GID")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse::<u32>()
+            .map_err(|err| format!("invalid BOTWORK_PLUGIN_GID: {err}"))?;
+        let image_allowlist_regex = env::var("BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX")
+            .unwrap_or_else(|_| DEFAULT_IMAGE_ALLOWLIST.to_string());
+        let container_pids_limit = env::var("BOTWORK_LAUNCHER_PIDS_LIMIT")
+            .unwrap_or_else(|_| DEFAULT_CONTAINER_PIDS_LIMIT.to_string())
+            .parse::<u32>()
+            .map_err(|err| format!("invalid BOTWORK_LAUNCHER_PIDS_LIMIT: {err}"))?;
+        let container_memory_limit = env::var("BOTWORK_LAUNCHER_MEMORY_LIMIT")
+            .unwrap_or_else(|_| DEFAULT_CONTAINER_MEMORY_LIMIT.to_string());
+        if container_memory_limit.trim().is_empty() {
+            return Err("invalid BOTWORK_LAUNCHER_MEMORY_LIMIT: must not be empty".to_string());
+        }
+        let container_read_only_rootfs =
+            parse_bool_env("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS")?.unwrap_or(false);
+
+        Ok(Self {
+            socket_path,
+            socket_group,
+            allowed_peer_uid,
+            allowed_peer_gid,
+            plugin_uid,
+            plugin_gid,
+            image_allowlist_regex,
+            container_pids_limit,
+            container_memory_limit,
+            container_read_only_rootfs,
+        })
+    }
+}
+
+fn parse_u32_env(name: &str, value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|err| format!("invalid {name}: {err}"))
+}
+
+fn parse_bool_env(name: &str) -> Result<Option<bool>, String> {
+    match env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(Some(true)),
+            "0" | "false" | "no" | "off" => Ok(Some(false)),
+            _ => Err(format!(
+                "invalid {name}: expected one of 1,true,yes,on,0,false,no,off"
+            )),
+        },
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("invalid {name}: not valid unicode")),
+    }
+}
+
+fn resolve_group_spec(spec: &str) -> Result<u32, String> {
+    if let Ok(gid) = spec.parse::<u32>() {
+        return Ok(gid);
+    }
+
+    let c_spec = CString::new(spec.as_bytes())
+        .map_err(|err| format!("invalid BOTWORK_LAUNCHER_SOCKET_GROUP: {err}"))?;
+    let mut buffer_len = group_lookup_buffer_len();
+    for _ in 0..4 {
+        let mut group = std::mem::MaybeUninit::<libc::group>::zeroed();
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0_u8; buffer_len];
+        let rc = unsafe {
+            libc::getgrnam_r(
+                c_spec.as_ptr(),
+                group.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE {
+            buffer_len *= 2;
+            continue;
+        }
+        if rc != 0 {
+            return Err(format!(
+                "failed to resolve BOTWORK_LAUNCHER_SOCKET_GROUP={spec}: {}",
+                std::io::Error::from_raw_os_error(rc)
+            ));
+        }
+        if result.is_null() {
+            return Err(format!(
+                "failed to resolve BOTWORK_LAUNCHER_SOCKET_GROUP={spec}: no such group"
+            ));
+        }
+
+        let group = unsafe { group.assume_init() };
+        return Ok(group.gr_gid);
+    }
+
+    Err(format!(
+        "failed to resolve BOTWORK_LAUNCHER_SOCKET_GROUP={spec}: group entry too large"
+    ))
+}
+
+fn group_lookup_buffer_len() -> usize {
+    let suggested = unsafe { libc::sysconf(libc::_SC_GETGR_R_SIZE_MAX) };
+    if suggested > 0 {
+        suggested as usize
+    } else {
+        16 * 1024
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+
+    use super::{parse_bool_env, resolve_group_spec};
+
+    #[test]
+    fn resolve_group_spec_accepts_numeric_gid() {
+        assert_eq!(resolve_group_spec("1234").expect("numeric gid"), 1234);
+    }
+
+    #[test]
+    fn resolve_group_spec_accepts_existing_group_name() {
+        let current_gid = unsafe { libc::getegid() };
+        let name = current_group_name(current_gid);
+        assert_eq!(resolve_group_spec(&name).expect("group name"), current_gid,);
+    }
+
+    #[test]
+    fn parse_bool_env_accepts_expected_values() {
+        std::env::set_var("BOTWORK_TEST_BOOL_ENV", "yes");
+        assert_eq!(
+            parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect("parse bool"),
+            Some(true)
+        );
+        std::env::set_var("BOTWORK_TEST_BOOL_ENV", "off");
+        assert_eq!(
+            parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect("parse bool"),
+            Some(false)
+        );
+        std::env::remove_var("BOTWORK_TEST_BOOL_ENV");
+        assert_eq!(
+            parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect("missing bool"),
+            None
+        );
+    }
+
+    fn current_group_name(gid: u32) -> String {
+        let mut group = std::mem::MaybeUninit::<libc::group>::zeroed();
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0_u8; 16 * 1024];
+        let rc = unsafe {
+            libc::getgrgid_r(
+                gid,
+                group.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        assert_eq!(rc, 0, "getgrgid_r should succeed");
+        assert!(!result.is_null(), "current gid should resolve");
+        let group = unsafe { group.assume_init() };
+        unsafe { CStr::from_ptr(group.gr_name) }
+            .to_str()
+            .expect("group name utf8")
+            .to_string()
+    }
+}
