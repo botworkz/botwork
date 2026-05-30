@@ -1,0 +1,170 @@
+# Release / publish workflow
+#
+# Version-driven release cycle:
+#   1. A developer sets the root VERSION file to a clean semver (e.g. "1.2.0"),
+#      removes the "-dev" suffix, and merges to main.
+#   2. Job A (publish) detects the clean version, builds and pushes the
+#      session-broker container to GHCR, builds release binaries for
+#      botwork-launcher and botwork-tools, and creates a GitHub Release
+#      v<VERSION> with those binaries attached.
+#   3. Job B (bump) triggers on the published Release event, increments the
+#      minor version, appends "-dev", and commits the new VERSION back to main
+#      (e.g. "1.2.0" → "1.3.0-dev").
+#   4. That "-dev" push to main is a no-op for Job A, completing the loop.
+#
+# How to cut a release:
+#   - Edit VERSION (repo root) to a clean semver, e.g. "1.2.0"
+#   - Open a PR, get it merged to main
+#   - Automation handles everything else
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Default to least-privilege; individual jobs override as needed.
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job A — publish container + binaries + GitHub Release
+  # Runs on every push to main, but exits immediately when VERSION ends in
+  # "-dev" (development snapshots are never published).
+  # ─────────────────────────────────────────────────────────────────────────
+  publish:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create tags and releases, upload assets
+      packages: write   # push images to GHCR
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # ── Read and validate the VERSION file ──────────────────────────────────
+    - name: Read VERSION
+      id: version
+      run: |
+        set -euo pipefail
+        raw="$(tr -d '[:space:]' < VERSION)"
+        echo "version=${raw}" >> "$GITHUB_OUTPUT"
+        # Exit cleanly (skip publish) when the version contains a hyphen
+        # (i.e. any pre-release/dev suffix such as "-dev", "-beta1", "-rc2").
+        # Only a bare "MAJOR.MINOR.PATCH" triggers a publish so that automated
+        # bump commits never cause a double-release.
+        if [[ "${raw}" == *-* ]]; then
+          echo "is_release=false" >> "$GITHUB_OUTPUT"
+          echo "VERSION=${raw} contains a pre-release suffix — skipping publish."
+        else
+          echo "is_release=true" >> "$GITHUB_OUTPUT"
+          echo "VERSION=${raw} is a clean semver — proceeding with publish."
+        fi
+
+    # ── Guard: all subsequent steps are skipped for -dev versions ───────────
+
+    # ── Container: log in to GHCR ───────────────────────────────────────────
+    - name: Log in to GHCR
+      if: steps.version.outputs.is_release == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - uses: docker/setup-buildx-action@v3
+      if: steps.version.outputs.is_release == 'true'
+
+    # ── Container: build and push session-broker ────────────────────────────
+    - name: Build and push session-broker container
+      if: steps.version.outputs.is_release == 'true'
+      run: |
+        set -euo pipefail
+        VERSION="${{ steps.version.outputs.version }}"
+        REPO="ghcr.io/botworkz/botwork/session-broker"
+        docker buildx build \
+          --platform linux/amd64 \
+          --push \
+          -t "${REPO}:${VERSION}" \
+          -t "${REPO}:latest" \
+          -f containers/session-broker/Dockerfile \
+          .
+
+    # ── Binaries: build botwork-launcher and botwork-tools ──────────────────
+    - uses: dtolnay/rust-toolchain@stable
+      if: steps.version.outputs.is_release == 'true'
+    - uses: Swatinem/rust-cache@v2
+      if: steps.version.outputs.is_release == 'true'
+
+    - name: Build release binaries
+      if: steps.version.outputs.is_release == 'true'
+      run: |
+        set -euo pipefail
+        cargo build --release -p botwork-launcher -p botwork-tools
+
+    # ── GitHub Release: create and upload assets ─────────────────────────────
+    # Uses softprops/action-gh-release which creates the tag and release in
+    # one step. If the tag already exists the action will fail with a clear
+    # error, preventing silent overwrites of an existing published release.
+    - name: Create GitHub Release and upload binaries
+      if: steps.version.outputs.is_release == 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: v${{ steps.version.outputs.version }}
+        fail_on_unmatched_files: true
+        files: |
+          target/release/botwork-launcher
+          target/release/botwork-tools
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job B — bump VERSION to the next minor -dev after a Release is published
+  # Triggered by the "release published" webhook so it only fires for real
+  # releases (not drafts, not pre-releases unless promoted to released).
+  # ─────────────────────────────────────────────────────────────────────────
+  bump:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # commit and push VERSION bump to main
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: main
+        # Use the default GITHUB_TOKEN; the resulting push triggers CI but
+        # the new VERSION will end in "-dev" so Job A's publish guard treats
+        # it as a no-op — no infinite loop.
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    # ── Derive released version from the tag (strip leading "v") ─────────────
+    - name: Compute next minor dev version
+      id: bump
+      run: |
+        set -euo pipefail
+        tag="${{ github.event.release.tag_name }}"
+        # Strip leading "v"
+        version="${tag#v}"
+        # Strip any pre-release/build-metadata suffix (e.g. "-rc1") so that
+        # only the core MAJOR.MINOR.PATCH components remain for arithmetic.
+        version="${version%%-*}"
+        IFS='.' read -r major minor patch <<< "${version}"
+        next_minor=$(( minor + 1 ))
+        next_version="${major}.${next_minor}.0-dev"
+        echo "next_version=${next_version}" >> "$GITHUB_OUTPUT"
+        echo "Released: ${version} → next dev: ${next_version}"
+
+    # ── Write bumped VERSION and push to main ────────────────────────────────
+    - name: Bump VERSION and commit
+      run: |
+        set -euo pipefail
+        echo "${{ steps.bump.outputs.next_version }}" > VERSION
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add VERSION
+        git commit -m "chore: bump VERSION to ${{ steps.bump.outputs.next_version }} [skip ci]"
+        git push origin main
