@@ -1,0 +1,20 @@
+[package]
+name = "botwork-tools"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "botwork_tools"
+path = "src/lib.rs"
+
+[[bin]]
+name = "botwork-tools"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
