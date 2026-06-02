@@ -15,7 +15,9 @@ curl -fsSL -o "${tmp}/earth-linux-amd64" "${base}/earth-linux-amd64"
 curl -fsSL -o "${tmp}/checksum.asc" "${base}/checksum.asc"
 ( cd "${tmp}" && grep ' earth-linux-amd64$' checksum.asc | sha256sum -c - )
 sudo install -m 0755 "${tmp}/earth-linux-amd64" /usr/local/bin/earthly
+# Initializes EarthBuild's local buildkit daemon on first use.
 earthly bootstrap
+rm -rf "${tmp}"
 earthly +session-broker-image
 ```
 

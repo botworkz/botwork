@@ -94,6 +94,7 @@ jobs:
         set -euo pipefail
         VERSION="${{ steps.version.outputs.version }}"
         REPO="ghcr.io/botworkz/botwork/session-broker"
+        # Platform is pinned in Earthfile via FROM DOCKERFILE --platform=linux/amd64.
         earthly +session-broker-image
         docker tag botwork/session-broker:local "${REPO}:${VERSION}"
         docker tag botwork/session-broker:local "${REPO}:latest"

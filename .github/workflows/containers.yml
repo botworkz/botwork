@@ -44,6 +44,7 @@ jobs:
     - name: Build session-broker
       run: |
         set -euo pipefail
+        # Platform is pinned in Earthfile via FROM DOCKERFILE --platform=linux/amd64.
         earthly +session-broker-image
     - name: Smoke test session-broker
       run: |
