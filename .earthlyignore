@@ -1,0 +1,14 @@
+*
+!containers/
+containers/*
+!containers/session-broker/
+containers/session-broker/*
+!containers/session-broker/Dockerfile
+!session-broker/
+!session-broker/**
+!launcher/
+!launcher/**
+!tools/
+!tools/**
+!Cargo.toml
+!Cargo.lock
