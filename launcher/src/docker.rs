@@ -3,6 +3,7 @@ use std::fs;
 use crate::cmd::{log_info, run_command};
 use crate::error::LauncherError;
 use crate::mount::{fallback_message, is_not_mounted_or_einval, setup_staging_dir};
+use crate::validate::valid_env_name;
 use crate::validate::Validators;
 
 pub struct ContainerLaunch<'a> {
@@ -16,6 +17,7 @@ pub struct ContainerLaunch<'a> {
     pub pids_limit: u32,
     pub memory_limit: &'a str,
     pub read_only_rootfs: bool,
+    pub env: &'a [(String, String)],
 }
 
 pub fn ensure_container(
@@ -170,6 +172,12 @@ fn docker_run_args(request: &ContainerLaunch<'_>) -> Vec<String> {
         request.memory_limit.to_string(),
     ];
 
+    for (name, value) in request.env {
+        debug_assert!(valid_env_name(name), "invalid env name: {name}");
+        run_cmd.push("-e".to_string());
+        run_cmd.push(format!("{name}={value}"));
+    }
+
     if request.read_only_rootfs {
         // Rootfs writes are disabled only when explicitly requested because some plugins still need
         // writable runtime paths under /tmp or similar until they are cleaned up.
@@ -216,16 +224,80 @@ mod tests {
             pids_limit: 256,
             memory_limit: "512m",
             read_only_rootfs: true,
+            env: &[],
         });
 
         assert!(args.contains(&"--cap-drop=ALL".to_string()));
         assert!(args.contains(&"--security-opt=no-new-privileges".to_string()));
         assert!(args.windows(2).any(|pair| pair == ["--pids-limit", "256"]));
         assert!(args.windows(2).any(|pair| pair == ["--memory", "512m"]));
+        assert!(!args.contains(&"-e".to_string()));
         assert!(args.contains(&"--read-only".to_string()));
         assert!(args.windows(2).any(|pair| pair == ["--user", "1000:1000"]));
         assert!(args.contains(
             &"/var/lib/botwork/tenants/acme/staging/aabbccddeeff:/workspace:rslave".to_string()
         ));
+    }
+
+    #[test]
+    fn docker_run_args_includes_env_in_declaration_order() {
+        let env = vec![
+            ("FOO".to_string(), "one".to_string()),
+            ("BAR".to_string(), "two".to_string()),
+        ];
+        let args = docker_run_args(&ContainerLaunch {
+            name: "mcp_session_aabbccddeeff",
+            image: "botwork/mcp-echo:local",
+            network: "botwork",
+            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            with_workspace: false,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            pids_limit: 256,
+            memory_limit: "512m",
+            read_only_rootfs: false,
+            env: &env,
+        });
+
+        let foo = args
+            .windows(2)
+            .position(|pair| pair == ["-e", "FOO=one"])
+            .expect("FOO env");
+        let bar = args
+            .windows(2)
+            .position(|pair| pair == ["-e", "BAR=two"])
+            .expect("BAR env");
+        let user = args
+            .windows(2)
+            .position(|pair| pair == ["--user", "1000:1000"])
+            .expect("user flag");
+
+        assert!(foo < bar);
+        assert!(bar < user);
+    }
+
+    #[test]
+    fn docker_run_args_env_values_with_special_chars_pass_through() {
+        let env = vec![(
+            "FOO".to_string(),
+            "value with spaces and =equals=".to_string(),
+        )];
+        let args = docker_run_args(&ContainerLaunch {
+            name: "mcp_session_aabbccddeeff",
+            image: "botwork/mcp-echo:local",
+            network: "botwork",
+            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            with_workspace: false,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            pids_limit: 256,
+            memory_limit: "512m",
+            read_only_rootfs: false,
+            env: &env,
+        });
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-e", "FOO=value with spaces and =equals="]));
     }
 }
