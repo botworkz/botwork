@@ -2,6 +2,7 @@ pub mod admin;
 pub mod ext_proc;
 pub mod launcher;
 pub mod plugin_registry;
+pub mod secrets;
 pub mod session_registry;
 
 use std::collections::HashMap;
@@ -47,6 +48,7 @@ pub struct AppState {
     pub transport_sessions: Arc<Mutex<HashMap<String, TransportState>>>,
     pub pending_init: Arc<Mutex<HashMap<String, PendingInit>>>,
     pub launcher_socket_path: String,
+    pub auth_broker_url: String,
 }
 
 pub fn log_info(message: &str) {
@@ -77,6 +79,8 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "0.0.0.0:9001".to_string());
     let launcher_socket_path = std::env::var("BOTWORK_LAUNCHER_SOCKET_PATH")
         .unwrap_or_else(|_| "/run/botwork/launcher.sock".to_string());
+    let auth_broker_url = std::env::var("BOTWORK_AUTH_BROKER_URL")
+        .unwrap_or_else(|_| "http://auth_broker:9100".to_string());
 
     let state = AppState {
         plugin_registry: plugins,
@@ -84,6 +88,7 @@ pub async fn run() -> Result<(), String> {
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
+        auth_broker_url,
     };
 
     log_info(&format!("starting admin HTTP server on {admin_addr}"));
