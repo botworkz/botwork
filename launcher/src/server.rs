@@ -272,6 +272,7 @@ fn parse_launch_payload<'a>(
                 let Value::Object(entry_obj) = entry else {
                     return Err(LauncherError::BadRequest("invalid env entry".to_string()));
                 };
+                // The wire contract requires exactly {"name","value"} with no extra fields.
                 if entry_obj.len() != 2 {
                     return Err(LauncherError::BadRequest("invalid env entry".to_string()));
                 }
@@ -298,7 +299,7 @@ fn parse_launch_payload<'a>(
                         "env value too large".to_string(),
                     ));
                 }
-                if !seen.insert(name.to_string()) {
+                if !seen.insert(name) {
                     return Err(LauncherError::BadRequest(format!(
                         "duplicate env name: {name}"
                     )));
