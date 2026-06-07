@@ -90,17 +90,38 @@ pub async fn launch_session(
     image: &str,
     staging_path: &str,
     network: &str,
+    env: &[(String, String)],
 ) -> Result<Value, LauncherError> {
+    let mut payload = serde_json::Map::from_iter([
+        ("name".to_string(), Value::String(name.to_string())),
+        ("image".to_string(), Value::String(image.to_string())),
+        ("network".to_string(), Value::String(network.to_string())),
+        (
+            "staging_path".to_string(),
+            Value::String(staging_path.to_string()),
+        ),
+    ]);
+    if !env.is_empty() {
+        payload.insert(
+            "env".to_string(),
+            Value::Array(
+                env.iter()
+                    .map(|(name, value)| {
+                        serde_json::json!({
+                            "name": name,
+                            "value": value,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
     let (status, body) = launcher_post(
         socket_path,
         "/launch",
-        serde_json::json!({
-            "name": name,
-            "image": image,
-            "network": network,
-            "staging_path": staging_path,
-        }),
-        Duration::from_secs(5),
+        Value::Object(payload),
+        // Keep extra slack here: launcher work is still the critical path and can be slow on CI hosts.
+        Duration::from_secs(15),
     )
     .await?;
 
@@ -171,4 +192,122 @@ pub async fn probe_ready(
         tokio::time::sleep(PROBE_SLEEP).await;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{UnixListener, UnixStream};
+
+    #[tokio::test]
+    async fn launcher_post_omits_env_when_slice_empty() {
+        let body = capture_launch_body(&[]).await;
+        assert!(!body.contains("\"env\""));
+    }
+
+    #[tokio::test]
+    async fn launcher_post_includes_env_when_slice_non_empty_in_order() {
+        let env = vec![
+            ("BOTWORK_SECRET_A".to_string(), "1".to_string()),
+            ("BOTWORK_SECRET_B".to_string(), "2".to_string()),
+        ];
+        let body = capture_launch_body(&env).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        let names: Vec<&str> = parsed["env"]
+            .as_array()
+            .expect("env array")
+            .iter()
+            .map(|entry| entry["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, vec!["BOTWORK_SECRET_A", "BOTWORK_SECRET_B"]);
+    }
+
+    async fn capture_launch_body(env: &[(String, String)]) -> String {
+        let temp = tempdir().expect("tempdir");
+        let socket_path = temp.path().join("launcher.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut stream).await;
+            let body = request
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("request body")
+                .to_string();
+            let response = r#"HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 20
+Connection: close
+
+{"status":"started"}"#;
+            let response = response.replace('\n', "\r\n");
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            body
+        });
+
+        let _ = launch_session(
+            path_to_string(&socket_path).as_str(),
+            "mcp_session_abc",
+            "botwork/mcp-a:local",
+            "/tmp/staging",
+            "botwork",
+            env,
+        )
+        .await
+        .expect("launch succeeds");
+        server.await.expect("server result")
+    }
+
+    fn path_to_string(path: &Path) -> String {
+        path.to_string_lossy().to_string()
+    }
+
+    async fn read_http_request(stream: &mut UnixStream) -> String {
+        let mut raw = Vec::new();
+        let mut buf = [0_u8; 1024];
+        let mut expected_total = None;
+        loop {
+            let read = stream.read(&mut buf).await.expect("read request");
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..read]);
+            if expected_total.is_none() {
+                if let Some((header_end, content_len)) = parse_header_end_and_length(&raw) {
+                    expected_total = Some(header_end + 4 + content_len);
+                }
+            }
+            if let Some(total) = expected_total {
+                if raw.len() >= total {
+                    break;
+                }
+            }
+        }
+        String::from_utf8(raw).expect("utf8 request")
+    }
+
+    fn parse_header_end_and_length(raw: &[u8]) -> Option<(usize, usize)> {
+        let header_end = raw.windows(4).position(|chunk| chunk == b"\r\n\r\n")?;
+        let headers = String::from_utf8(raw[..header_end].to_vec()).ok()?;
+        let content_length = headers
+            .split("\r\n")
+            .find_map(|line| {
+                line.split_once(": ").and_then(|(name, value)| {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or(0);
+        Some((header_end, content_length))
+    }
 }

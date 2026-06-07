@@ -169,6 +169,7 @@ name = "botwork-session-broker"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "envoy-proto",
  "http",

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -11,6 +12,8 @@ use envoy_proto::envoy::service::ext_proc::v3::{
     processing_response, HttpBody, HttpHeaders, ProcessingResponse,
 };
 use tempfile::tempdir;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 fn session_registry_path() -> &'static str {
@@ -20,6 +23,13 @@ fn session_registry_path() -> &'static str {
 }
 
 fn app_state_with_plugins(launcher_socket_path: String) -> AppState {
+    app_state_with_plugins_and_auth(launcher_socket_path, "http://127.0.0.1:1".to_string())
+}
+
+fn app_state_with_plugins_and_auth(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+) -> AppState {
     let mut plugin_registry = HashMap::new();
     plugin_registry.insert("plugin-a".to_string(), sample_plugin_config());
     AppState {
@@ -28,6 +38,7 @@ fn app_state_with_plugins(launcher_socket_path: String) -> AppState {
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
+        auth_broker_url,
     }
 }
 
@@ -38,6 +49,7 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
+        auth_broker_url: "http://127.0.0.1:1".to_string(),
     }
 }
 
@@ -99,6 +111,19 @@ fn extract_upstream_mutation(response: &ProcessingResponse) -> Option<(String, O
         }
     }
     Some((upstream?, path))
+}
+
+fn extract_removed_headers(response: &ProcessingResponse) -> Vec<String> {
+    let headers = match response.response.as_ref() {
+        Some(processing_response::Response::RequestHeaders(h)) => h,
+        _ => return Vec::new(),
+    };
+    headers
+        .response
+        .as_ref()
+        .and_then(|common| common.header_mutation.as_ref())
+        .map(|mutation| mutation.remove_headers.clone())
+        .unwrap_or_default()
 }
 
 fn sample_transport(tenant: &str, plugin: &str, container: &str) -> TransportState {
@@ -240,6 +265,31 @@ async fn request_headers_get_known_session_routes_to_upstream() {
             Some("/mcp/foo".to_string())
         ))
     );
+}
+
+#[tokio::test]
+async fn request_headers_strips_x_botwork_cap_on_get_route() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "GET"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert!(extract_removed_headers(&response).contains(&"x-botwork-cap".to_string()));
 }
 
 #[tokio::test]
@@ -408,6 +458,31 @@ async fn request_headers_post_known_session_routes_to_upstream() {
             Some("/mcp/foo".to_string())
         ))
     );
+}
+
+#[tokio::test]
+async fn request_headers_strips_x_botwork_cap_on_existing_session_route() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert!(extract_removed_headers(&response).contains(&"x-botwork-cap".to_string()));
 }
 
 #[tokio::test]
@@ -733,4 +808,315 @@ async fn response_headers_pending_missing_session_id_discards() {
     ));
     assert!(state.pending_init.lock().await.get(stream_id).is_none());
     assert!(state.transport_sessions.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn spawn_passes_cap_to_secrets_fetch_and_envs_to_launcher() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let captured_cap = Arc::new(Mutex::new(None));
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[{"service":"github.com","name":"pat","kind":"api-key","value_b64":"Z2hwX3h4eA=="},{"service":"shared","name":"secret","kind":"opaque","value_b64":"YW5vdGhlcg=="}]}"#,
+        Arc::clone(&captured_cap),
+    )
+    .await;
+
+    let state = app_state_with_plugins_and_auth(path_to_string(&socket_path), auth_url);
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+
+    assert_eq!(immediate_status(&response), Some(502));
+    assert_eq!(
+        captured_cap.lock().await.clone().as_deref(),
+        Some("cap-123")
+    );
+
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    let env = launcher_payload["env"].as_array().expect("env array");
+    let env_names: Vec<&str> = env
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        env_names,
+        vec![
+            "BOTWORK_SECRET_GITHUB_COM_PAT",
+            "BOTWORK_SECRET_SHARED_SECRET"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn spawn_without_cap_fetches_no_secrets_and_passes_empty_env() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let state = app_state_with_plugins(path_to_string(&socket_path));
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    assert!(launcher_payload.get("env").is_none());
+}
+
+#[tokio::test]
+async fn spawn_with_cap_but_auth_broker_unreachable_continues_with_empty_env() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+    let state = app_state_with_plugins_and_auth(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+    );
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    assert!(launcher_payload.get("env").is_none());
+}
+
+#[tokio::test]
+async fn spawn_with_cap_but_auth_broker_401_continues_with_empty_env() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+    let auth_url = spawn_auth_broker_capture(401, "{}", Arc::new(Mutex::new(None))).await;
+    let state = app_state_with_plugins_and_auth(path_to_string(&socket_path), auth_url);
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    assert!(launcher_payload.get("env").is_none());
+}
+
+#[tokio::test]
+async fn cap_present_in_per_stream_state_after_request_headers() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    let mut stream = PerStreamState::default();
+    let _ = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "GET"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    assert_eq!(stream.cap.as_deref(), Some("cap-123"));
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+async fn spawn_launcher_capture(
+    socket_path: &Path,
+    status_code: u16,
+    body: &'static str,
+    captured_body: Arc<Mutex<Option<String>>>,
+) -> tokio::task::JoinHandle<()> {
+    let listener = UnixListener::bind(socket_path).expect("bind launcher socket");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept launcher request");
+        let request = read_unix_http_request(&mut stream).await;
+        let request_body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        *captured_body.lock().await = Some(request_body);
+        let reason = if status_code == 200 {
+            "OK"
+        } else {
+            "Internal Server Error"
+        };
+        let response = format!(
+            "HTTP/1.1 {status_code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write launcher response");
+    })
+}
+
+async fn spawn_auth_broker_capture(
+    status_code: u16,
+    body: &'static str,
+    captured_cap: Arc<Mutex<Option<String>>>,
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind auth broker");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept auth request");
+        let request = read_tcp_http_request(&mut stream).await;
+        *captured_cap.lock().await = extract_header_value(&request, "x-botwork-cap");
+        let reason = if status_code == 200 {
+            "OK"
+        } else {
+            "Unauthorized"
+        };
+        let response = format!(
+            "HTTP/1.1 {status_code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write auth response");
+    });
+    format!("http://{addr}")
+}
+
+async fn read_unix_http_request(stream: &mut UnixStream) -> String {
+    read_http_request_impl(stream).await
+}
+
+async fn read_tcp_http_request(stream: &mut tokio::net::TcpStream) -> String {
+    read_http_request_impl(stream).await
+}
+
+async fn read_http_request_impl<S>(stream: &mut S) -> String
+where
+    S: AsyncRead + Unpin,
+{
+    let mut raw = Vec::new();
+    let mut buf = [0_u8; 1024];
+    let mut expected_total = None;
+    loop {
+        let read = stream.read(&mut buf).await.expect("read request");
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..read]);
+        if expected_total.is_none() {
+            if let Some((header_end, content_len)) = parse_header_end_and_length(&raw) {
+                expected_total = Some(header_end + 4 + content_len);
+            }
+        }
+        if let Some(total) = expected_total {
+            if raw.len() >= total {
+                break;
+            }
+        }
+    }
+    String::from_utf8(raw).expect("utf8 request")
+}
+
+fn parse_header_end_and_length(raw: &[u8]) -> Option<(usize, usize)> {
+    let header_end = raw.windows(4).position(|chunk| chunk == b"\r\n\r\n")?;
+    let headers = String::from_utf8(raw[..header_end].to_vec()).ok()?;
+    let content_length = headers
+        .split("\r\n")
+        .find_map(|line| {
+            line.split_once(": ").and_then(|(name, value)| {
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(0);
+    Some((header_end, content_length))
+}
+
+fn extract_header_value(request: &str, header_name: &str) -> Option<String> {
+    request.split("\r\n").find_map(|line| {
+        line.split_once(':').and_then(|(name, value)| {
+            if name.eq_ignore_ascii_case(header_name) {
+                Some(value.trim().to_string())
+            } else {
+                None
+            }
+        })
+    })
 }
