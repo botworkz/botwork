@@ -22,6 +22,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::launcher::{call_bind_agent, launch_session, probe_ready, LauncherError};
 use crate::plugin_registry::PluginConfig;
+use crate::secrets;
 use crate::session_registry::utc_now;
 use crate::{
     log_info, AppState, PendingInit, TransportState, COLD_START_TIMEOUT, TENANT_PLUGIN_PATH_RE,
@@ -53,6 +54,7 @@ pub struct PerStreamState {
     pub request_body: Vec<u8>,
     pub chosen_upstream: Option<String>,
     pub trusted_tenant: String,
+    pub cap: Option<String>,
 }
 
 impl Default for PerStreamState {
@@ -71,6 +73,7 @@ impl Default for PerStreamState {
             request_body: Vec::new(),
             chosen_upstream: None,
             trusted_tenant: String::new(),
+            cap: None,
         }
     }
 }
@@ -192,7 +195,7 @@ pub fn upstream_header_mutation(
 
     HeaderMutation {
         set_headers,
-        ..HeaderMutation::default()
+        remove_headers: vec!["x-botwork-cap".to_string()],
     }
 }
 
@@ -305,6 +308,7 @@ async fn spawn_new_container(
     tenant_name: &str,
     plugin_name: &str,
     plugin_config: &PluginConfig,
+    env: &[(String, String)],
 ) -> Result<PendingInit, LauncherError> {
     let mut token_bytes = [0u8; 6];
     rand::thread_rng().fill_bytes(&mut token_bytes);
@@ -318,6 +322,7 @@ async fn spawn_new_container(
         &plugin_config.image,
         &staging_path,
         &plugin_config.network,
+        env,
     )
     .await?;
     if let Ok(serialized) = serde_json::to_string(&launch_result) {
@@ -398,6 +403,7 @@ impl ExternalProcessorService {
             .get("x-botwork-tenant")
             .map(|v| v.trim().to_string())
             .unwrap_or_default();
+        stream.cap = headers.get("x-botwork-cap").map(|v| v.trim().to_string());
 
         if stream.trusted_tenant.is_empty() {
             return logged_immediate_response(
@@ -645,12 +651,43 @@ impl ExternalProcessorService {
                 );
             };
 
+            // Fail open: secret lookup failures should not break session spawn.
+            let env = match stream.cap.as_deref() {
+                Some(cap) if !cap.is_empty() => {
+                    match secrets::fetch_secrets(
+                        &state.auth_broker_url,
+                        cap,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+                    {
+                        Ok(secrets) => secrets::build_env_entries(&secrets),
+                        Err(err) => {
+                            log_info(&format!(
+                                "spawn_secrets fetch failed tenant={} plugin={} err={err}",
+                                stream.trusted_tenant, plugin_name
+                            ));
+                            Vec::new()
+                        }
+                    }
+                }
+                _ => Vec::new(),
+            };
+            log_info(&format!(
+                "spawn_secrets tenant={} plugin={} cap_present={} secrets_injected={}",
+                stream.trusted_tenant,
+                plugin_name,
+                matches!(stream.cap.as_deref(), Some(cap) if !cap.is_empty()),
+                env.len()
+            ));
+
             let pending = match spawn_new_container(
                 state,
                 &stream.client_addr,
                 &stream.trusted_tenant,
                 &plugin_name,
                 &plugin_config,
+                &env,
             )
             .await
             {
@@ -1033,6 +1070,15 @@ mod tests {
         assert_eq!(first.key, "x-session-upstream");
         let decoded = String::from_utf8(first.raw_value.to_vec()).expect("utf8");
         assert_eq!(decoded, "mcp_session_abc:8000");
+    }
+
+    #[test]
+    fn header_mutation_removes_x_botwork_cap() {
+        let mutation = upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"));
+        assert!(mutation
+            .remove_headers
+            .iter()
+            .any(|name| name == "x-botwork-cap"));
     }
 
     #[test]
