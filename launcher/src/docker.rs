@@ -173,7 +173,7 @@ fn docker_run_args(request: &ContainerLaunch<'_>) -> Vec<String> {
     ];
 
     for (name, value) in request.env {
-        debug_assert!(valid_env_name(name), "invalid env name: {name}");
+        debug_assert!(valid_env_name(name), "invalid env name: {}", name);
         run_cmd.push("-e".to_string());
         run_cmd.push(format!("{name}={value}"));
     }

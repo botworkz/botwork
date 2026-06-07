@@ -115,6 +115,7 @@ pub fn valid_env_name(name: &str) -> bool {
         return false;
     }
 
+    // Block all Docker-related env overrides in addition to specific reserved names.
     !name.starts_with("DOCKER_")
 }
 
