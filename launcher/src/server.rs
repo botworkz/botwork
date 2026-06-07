@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ struct LaunchRequest<'a> {
     network: &'a str,
     staging_path: &'a str,
     with_workspace: bool,
+    env: Vec<(String, String)>,
 }
 
 struct BindAgentRequest<'a> {
@@ -92,13 +94,18 @@ async fn handle_launch(
             pids_limit: state.config.container_pids_limit,
             memory_limit: &state.config.container_memory_limit,
             read_only_rootfs: state.config.container_read_only_rootfs,
+            env: &launch.env,
         },
         &state.validators,
     )?;
 
     log_info(&format!(
-        "launch ok: name={} image={} network={} staging_path={}",
-        launch.name, launch.image, launch.network, launch.staging_path
+        "launch ok: name={} image={} network={} staging_path={} env_count={}",
+        launch.name,
+        launch.image,
+        launch.network,
+        launch.staging_path,
+        launch.env.len()
     ));
 
     Ok(json_response(
@@ -199,6 +206,9 @@ fn parse_launch_payload<'a>(
     payload: &'a Map<String, Value>,
     validators: &Validators,
 ) -> Result<LaunchRequest<'a>, LauncherError> {
+    const MAX_ENV_ENTRIES: usize = 64;
+    const MAX_ENV_VALUE_LEN: usize = 64 * 1024;
+
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -247,12 +257,68 @@ fn parse_launch_payload<'a>(
         }
     };
 
+    let env = match payload.get("env") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(entries)) => {
+            if entries.len() > MAX_ENV_ENTRIES {
+                return Err(LauncherError::PayloadTooLarge(
+                    "too many env entries".to_string(),
+                ));
+            }
+
+            let mut seen = HashSet::new();
+            let mut env = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let Value::Object(entry_obj) = entry else {
+                    return Err(LauncherError::BadRequest("invalid env entry".to_string()));
+                };
+                // The wire contract requires exactly {"name": "...", "value": "..."}.
+                if entry_obj.len() != 2 {
+                    return Err(LauncherError::BadRequest("invalid env entry".to_string()));
+                }
+
+                let name = entry_obj
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| LauncherError::BadRequest("invalid env entry".to_string()))?;
+                let value = entry_obj
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| LauncherError::BadRequest("invalid env entry".to_string()))?;
+
+                if !validators.valid_env_name(name) {
+                    return Err(LauncherError::BadRequest(format!(
+                        "invalid env name: {name}"
+                    )));
+                }
+                if value.contains('\0') {
+                    return Err(LauncherError::BadRequest("invalid env value".to_string()));
+                }
+                if value.len() > MAX_ENV_VALUE_LEN {
+                    return Err(LauncherError::PayloadTooLarge(
+                        "env value too large".to_string(),
+                    ));
+                }
+                if !seen.insert(name) {
+                    return Err(LauncherError::BadRequest(format!(
+                        "duplicate env name: {name}"
+                    )));
+                }
+
+                env.push((name.to_string(), value.to_string()));
+            }
+            env
+        }
+        Some(_) => return Err(LauncherError::BadRequest("invalid env".to_string())),
+    };
+
     Ok(LaunchRequest {
         name,
         image,
         network,
         staging_path,
         with_workspace,
+        env,
     })
 }
 
@@ -353,10 +419,28 @@ mod tests {
 
     use super::{parse_json_bytes, parse_json_object, parse_launch_payload, render_json_object};
     use crate::error::LauncherError;
-    use crate::validate::Validators;
+    use crate::validate::{Validators, RESERVED_ENV_NAMES};
 
     fn validators() -> Validators {
         Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators")
+    }
+
+    fn valid_launch_payload() -> Map<String, Value> {
+        let mut payload = Map::new();
+        payload.insert(
+            "name".to_string(),
+            Value::String("mcp_session_aabbccddeeff".to_string()),
+        );
+        payload.insert(
+            "image".to_string(),
+            Value::String("botwork/mcp-echo:local".to_string()),
+        );
+        payload.insert("network".to_string(), Value::String("botwork".to_string()));
+        payload.insert(
+            "staging_path".to_string(),
+            Value::String("/var/lib/botwork/tenants/acme/staging/aabbccddeeff".to_string()),
+        );
+        payload
     }
 
     #[test]
@@ -381,16 +465,8 @@ mod tests {
     #[test]
     fn launch_payload_missing_or_wrong_type_fields_are_400_errors() {
         let validators = validators();
-        let mut payload = Map::new();
-        payload.insert(
-            "name".to_string(),
-            Value::String("mcp_session_aabbccddeeff".to_string()),
-        );
-        payload.insert(
-            "image".to_string(),
-            Value::String("botwork/mcp-echo:local".to_string()),
-        );
-        payload.insert("network".to_string(), Value::String("botwork".to_string()));
+        let mut payload = valid_launch_payload();
+        payload.remove("staging_path");
 
         assert!(matches!(
             parse_launch_payload(&payload, &validators),
@@ -409,6 +485,195 @@ mod tests {
         assert!(matches!(
             parse_launch_payload(&payload, &validators),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid with_workspace"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_accepts_env_array() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "env".to_string(),
+            serde_json::json!([
+                {"name": "BOTWORK_SECRET_GITHUB_COM_PAT", "value": "ghp_xxx"},
+                {"name": "BOTWORK_SECRET_SHARED_SECRET", "value": "another-value"}
+            ]),
+        );
+
+        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        assert_eq!(
+            parsed.env,
+            vec![
+                (
+                    "BOTWORK_SECRET_GITHUB_COM_PAT".to_string(),
+                    "ghp_xxx".to_string()
+                ),
+                (
+                    "BOTWORK_SECRET_SHARED_SECRET".to_string(),
+                    "another-value".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_payload_env_omitted_is_empty_vec() {
+        let validators = validators();
+        let payload = valid_launch_payload();
+
+        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        assert!(parsed.env.is_empty());
+    }
+
+    #[test]
+    fn launch_payload_env_null_is_empty_vec() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert("env".to_string(), Value::Null);
+
+        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        assert!(parsed.env.is_empty());
+    }
+
+    #[test]
+    fn launch_payload_env_wrong_type_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "env".to_string(),
+            Value::String("BOTWORK_FOO=bar".to_string()),
+        );
+
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid env"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_env_entry_missing_fields_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+
+        for env in [
+            serde_json::json!([{"value": "v"}]),
+            serde_json::json!([{"name": "BOTWORK_FOO"}]),
+            serde_json::json!([{"name": 1, "value": "v"}]),
+            serde_json::json!([{"name": "BOTWORK_FOO", "value": 1}]),
+            serde_json::json!([{"name": "BOTWORK_FOO", "value": "v", "extra": "x"}]),
+        ] {
+            payload.insert("env".to_string(), env);
+            assert!(matches!(
+                parse_launch_payload(&payload, &validators),
+                Err(LauncherError::BadRequest(msg)) if msg == "invalid env entry"
+            ));
+        }
+    }
+
+    #[test]
+    fn launch_payload_env_invalid_name_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+
+        for invalid_name in [
+            "botwork_secret",
+            "BOTWORK-SECRET",
+            "1BOTWORK_SECRET",
+            "BOTWORK=SECRET",
+            "BOTWORK_\0_SECRET",
+        ] {
+            payload.insert(
+                "env".to_string(),
+                serde_json::json!([{"name": invalid_name, "value": "x"}]),
+            );
+            assert!(matches!(
+                parse_launch_payload(&payload, &validators),
+                Err(LauncherError::BadRequest(msg)) if msg == format!("invalid env name: {invalid_name}")
+            ));
+        }
+
+        for reserved in RESERVED_ENV_NAMES {
+            payload.insert(
+                "env".to_string(),
+                serde_json::json!([{"name": reserved, "value": "x"}]),
+            );
+            assert!(matches!(
+                parse_launch_payload(&payload, &validators),
+                Err(LauncherError::BadRequest(msg)) if msg == format!("invalid env name: {reserved}")
+            ));
+        }
+
+        payload.insert(
+            "env".to_string(),
+            serde_json::json!([{"name": "DOCKER_FOO", "value": "x"}]),
+        );
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid env name: DOCKER_FOO"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_env_invalid_value_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "env".to_string(),
+            serde_json::json!([{"name": "BOTWORK_SECRET", "value": "bad\0value"}]),
+        );
+
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid env value"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_env_duplicate_name_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "env".to_string(),
+            serde_json::json!([
+                {"name": "BOTWORK_SECRET", "value": "one"},
+                {"name": "BOTWORK_SECRET", "value": "two"}
+            ]),
+        );
+
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::BadRequest(msg)) if msg == "duplicate env name: BOTWORK_SECRET"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_env_too_many_entries_is_413() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        let entries: Vec<Value> = (0..65)
+            .map(|i| serde_json::json!({"name": format!("BOTWORK_SECRET_{i}"), "value": "v"}))
+            .collect();
+        payload.insert("env".to_string(), Value::Array(entries));
+
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::PayloadTooLarge(msg)) if msg == "too many env entries"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_env_value_too_large_is_413() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        let oversized = "x".repeat(64 * 1024 + 1);
+        payload.insert(
+            "env".to_string(),
+            serde_json::json!([{"name": "BOTWORK_SECRET", "value": oversized}]),
+        );
+
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::PayloadTooLarge(msg)) if msg == "env value too large"
         ));
     }
 
