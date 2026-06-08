@@ -15,6 +15,7 @@ pub struct PluginConfig {
     pub image: String,
     pub port: u16,
     pub network: String,
+    pub path: String,
 }
 
 #[derive(Debug, Error)]
@@ -116,15 +117,115 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
                 .to_string()
         };
 
+        let path = if config_val["path"].is_null() {
+            "/".to_string()
+        } else {
+            let path = config_val["path"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    PluginRegistryError::Invalid(format!(
+                        "plugin '{name}' has invalid 'path': expected non-empty string"
+                    ))
+                })?
+                .trim()
+                .to_string();
+            if !path.starts_with('/') {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{name}' has invalid 'path': must start with '/'"
+                )));
+            }
+            if path.chars().any(|c| c.is_whitespace()) {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{name}' has invalid 'path': must not contain whitespace"
+                )));
+            }
+            if path.contains('?') || path.contains('#') {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{name}' has invalid 'path': must not contain '?' or '#'"
+                )));
+            }
+            if path != "/" && path.ends_with('/') {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{name}' has invalid 'path': must not end with '/' unless path is exactly '/'"
+                )));
+            }
+            path
+        };
+
         result.insert(
             name.to_string(),
             PluginConfig {
                 image,
                 port,
                 network,
+                path,
             },
         );
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_plugins(dir: &std::path::Path, content: &str) -> String {
+        let path = dir.join("plugins.yaml");
+        std::fs::write(&path, content).expect("write plugins");
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn load_path_defaults_and_explicit_values() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  a:
+    image: botwork/mcp-a:local
+  b:
+    image: botwork/mcp-b:local
+    path: /mcp
+  c:
+    image: botwork/mcp-c:local
+    path: /api/v1
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert_eq!(loaded["a"].path, "/");
+        assert_eq!(loaded["b"].path, "/mcp");
+        assert_eq!(loaded["c"].path, "/api/v1");
+    }
+
+    #[test]
+    fn load_rejects_invalid_path_values() {
+        let cases = [
+            ("/mcp/", "must not end with '/'"),
+            ("mcp", "must start with '/'"),
+            ("", "expected non-empty string"),
+            ("   ", "expected non-empty string"),
+            ("/mcp?x=1", "must not contain '?' or '#'"),
+            ("/mcp#v1", "must not contain '?' or '#'"),
+            ("/m cp", "must not contain whitespace"),
+        ];
+
+        for (bad_path, expected) in cases {
+            let dir = tempdir().expect("tempdir");
+            let path = write_plugins(
+                dir.path(),
+                &format!(
+                    "plugins:\n  p:\n    image: botwork/mcp-p:local\n    path: \"{bad_path}\"\n"
+                ),
+            );
+            let err = load(&path).expect_err("invalid path should fail");
+            let err = err.to_string();
+            assert!(
+                err.contains("plugin 'p' has invalid 'path'") && err.contains(expected),
+                "error '{err}' should mention '{expected}'"
+            );
+        }
+    }
 }
