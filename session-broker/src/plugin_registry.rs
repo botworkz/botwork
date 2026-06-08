@@ -120,16 +120,17 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
         let path = if config_val["path"].is_null() {
             "/".to_string()
         } else {
-            let path = config_val["path"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| {
-                    PluginRegistryError::Invalid(format!(
-                        "plugin '{name}' has invalid 'path': expected non-empty string"
-                    ))
-                })?
-                .trim()
-                .to_string();
+            let raw_path = config_val["path"].as_str().ok_or_else(|| {
+                PluginRegistryError::Invalid(format!(
+                    "plugin '{name}' has invalid 'path': expected non-empty string"
+                ))
+            })?;
+            let path = raw_path.trim();
+            if path.is_empty() {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{name}' has invalid 'path': expected non-empty string"
+                )));
+            }
             if !path.starts_with('/') {
                 return Err(PluginRegistryError::Invalid(format!(
                     "plugin '{name}' has invalid 'path': must start with '/'"
@@ -150,7 +151,7 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
                     "plugin '{name}' has invalid 'path': must not end with '/' unless path is exactly '/'"
                 )));
             }
-            path
+            path.to_string()
         };
 
         result.insert(

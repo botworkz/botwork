@@ -101,11 +101,11 @@ pub fn parse_plugin_path(path: &str, plugin_path: &str) -> Option<(String, Strin
     let plugin = captures.get(2)?.as_str().to_string();
     let remainder = captures.get(3).map_or("", |m| m.as_str());
     let prefix = if plugin_path == "/" { "" } else { plugin_path };
-    let body = format!("{prefix}{remainder}");
-    let body = if body.is_empty() {
+    let body_raw = format!("{prefix}{remainder}");
+    let body = if body_raw.is_empty() {
         "/".to_string()
     } else {
-        body
+        body_raw
     };
     Some((tenant, plugin, format!("{body}{query}")))
 }
