@@ -30,8 +30,19 @@ fn app_state_with_plugins_and_auth(
     launcher_socket_path: String,
     auth_broker_url: String,
 ) -> AppState {
+    app_state_with_plugins_and_auth_and_path(launcher_socket_path, auth_broker_url, "/mcp")
+}
+
+fn app_state_with_plugins_and_auth_and_path(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+    plugin_path: &str,
+) -> AppState {
     let mut plugin_registry = HashMap::new();
-    plugin_registry.insert("plugin-a".to_string(), sample_plugin_config());
+    plugin_registry.insert(
+        "plugin-a".to_string(),
+        sample_plugin_config_with_path(plugin_path),
+    );
     AppState {
         plugin_registry,
         session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
@@ -127,21 +138,36 @@ fn extract_removed_headers(response: &ProcessingResponse) -> Vec<String> {
 }
 
 fn sample_transport(tenant: &str, plugin: &str, container: &str) -> TransportState {
+    sample_transport_with_path(tenant, plugin, container, "/mcp")
+}
+
+fn sample_transport_with_path(
+    tenant: &str,
+    plugin: &str,
+    container: &str,
+    plugin_path: &str,
+) -> TransportState {
     TransportState {
         container_name: container.to_string(),
         staging_token: "abcdef".to_string(),
         tenant_name: tenant.to_string(),
         plugin_name: plugin.to_string(),
         port: 8000,
+        path: plugin_path.to_string(),
         agent_id: None,
     }
 }
 
 fn sample_plugin_config() -> PluginConfig {
+    sample_plugin_config_with_path("/mcp")
+}
+
+fn sample_plugin_config_with_path(path: &str) -> PluginConfig {
     PluginConfig {
         image: "botwork/plugin-a:local".to_string(),
         port: 8000,
         network: "botwork".to_string(),
+        path: path.to_string(),
     }
 }
 
@@ -264,6 +290,38 @@ async fn request_headers_get_known_session_routes_to_upstream() {
             "mcp_session_abc:8000".to_string(),
             Some("/mcp/foo".to_string())
         ))
+    );
+}
+
+#[tokio::test]
+async fn request_headers_get_known_session_routes_to_upstream_root_path() {
+    let state = app_state_with_plugins_and_auth_and_path(
+        "/tmp/no-launcher.sock".to_string(),
+        "http://127.0.0.1:1".to_string(),
+        "/",
+    );
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport_with_path("tenant1", "plugin-a", "mcp_session_abc", "/"),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "GET"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(
+        extract_upstream_mutation(&response),
+        Some(("mcp_session_abc:8000".to_string(), Some("/foo".to_string())))
     );
 }
 
@@ -779,6 +837,7 @@ async fn response_headers_pending_with_session_id_creates_transport() {
     assert_eq!(transport.container_name, "mcp_session_abc");
     assert_eq!(transport.plugin_name, "plugin-a");
     assert_eq!(transport.port, 8000);
+    assert_eq!(transport.path, "/mcp");
 }
 
 #[tokio::test]
