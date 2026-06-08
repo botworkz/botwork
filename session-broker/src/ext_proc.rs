@@ -86,17 +86,32 @@ pub fn split_path_and_query(path: &str) -> (&str, &str) {
     }
 }
 
-pub fn parse_plugin_path(path: &str) -> Option<(String, String, String)> {
+pub fn parse_tenant_plugin(path: &str) -> Option<(String, String)> {
+    let (base_path, _) = split_path_and_query(path);
+    let captures = tenant_plugin_path_pattern().captures(base_path)?;
+    let tenant = captures.get(1)?.as_str().to_string();
+    let plugin = captures.get(2)?.as_str().to_string();
+    Some((tenant, plugin))
+}
+
+pub fn parse_plugin_path(path: &str, plugin_path: &str) -> Option<(String, String, String)> {
     let (base_path, query) = split_path_and_query(path);
     let captures = tenant_plugin_path_pattern().captures(base_path)?;
     let tenant = captures.get(1)?.as_str().to_string();
     let plugin = captures.get(2)?.as_str().to_string();
     let remainder = captures.get(3).map_or("", |m| m.as_str());
-    Some((tenant, plugin, format!("/mcp{remainder}{query}")))
+    let prefix = if plugin_path == "/" { "" } else { plugin_path };
+    let body_raw = format!("{prefix}{remainder}");
+    let body = if body_raw.is_empty() {
+        "/".to_string()
+    } else {
+        body_raw
+    };
+    Some((tenant, plugin, format!("{body}{query}")))
 }
 
-pub fn forward_path(path: &str) -> String {
-    if let Some((_, _, rewritten)) = parse_plugin_path(path) {
+pub fn forward_path(path: &str, plugin_path: &str) -> String {
+    if let Some((_, _, rewritten)) = parse_plugin_path(path, plugin_path) {
         rewritten
     } else if path.is_empty() {
         "/".to_string()
@@ -455,7 +470,7 @@ impl ExternalProcessorService {
                     "session tenant mismatch",
                 );
             }
-            if let Some((path_tenant_name, path_plugin_name, _)) = parse_plugin_path(&stream.path) {
+            if let Some((path_tenant_name, path_plugin_name)) = parse_tenant_plugin(&stream.path) {
                 if path_tenant_name != stream.trusted_tenant {
                     return logged_immediate_response(
                         stream,
@@ -473,7 +488,7 @@ impl ExternalProcessorService {
                     ));
                 }
             }
-            let rewritten_path = forward_path(&stream.path);
+            let rewritten_path = forward_path(&stream.path, &transport.path);
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
             log_phase(
                 stream,
@@ -521,7 +536,7 @@ impl ExternalProcessorService {
                     "session tenant mismatch",
                 );
             }
-            if let Some((path_tenant_name, path_plugin_name, _)) = parse_plugin_path(&stream.path) {
+            if let Some((path_tenant_name, path_plugin_name)) = parse_tenant_plugin(&stream.path) {
                 if path_tenant_name != stream.trusted_tenant {
                     return logged_immediate_response(
                         stream,
@@ -539,7 +554,7 @@ impl ExternalProcessorService {
                     ));
                 }
             }
-            let rewritten_path = forward_path(&stream.path);
+            let rewritten_path = forward_path(&stream.path, &transport.path);
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
             log_phase(
                 stream,
@@ -571,8 +586,8 @@ impl ExternalProcessorService {
                             "session tenant mismatch",
                         );
                     }
-                    if let Some((path_tenant_name, path_plugin_name, _)) =
-                        parse_plugin_path(&stream.path)
+                    if let Some((path_tenant_name, path_plugin_name)) =
+                        parse_tenant_plugin(&stream.path)
                     {
                         if path_tenant_name != stream.trusted_tenant {
                             return logged_immediate_response(
@@ -589,7 +604,7 @@ impl ExternalProcessorService {
                             ));
                         }
                     }
-                    let rewritten_path = forward_path(&stream.path);
+                    let rewritten_path = forward_path(&stream.path, &transport.path);
                     stream.chosen_upstream =
                         Some(upstream(&transport.container_name, transport.port));
                     log_phase(
@@ -615,9 +630,7 @@ impl ExternalProcessorService {
                 );
             }
 
-            let Some((path_tenant_name, plugin_name, rewritten_path)) =
-                parse_plugin_path(&stream.path)
-            else {
+            let Some((path_tenant_name, plugin_name)) = parse_tenant_plugin(&stream.path) else {
                 return logged_immediate_response(
                     stream,
                     "request_headers",
@@ -650,6 +663,7 @@ impl ExternalProcessorService {
                     &format!("unknown plugin: {plugin_name}"),
                 );
             };
+            let rewritten_path = forward_path(&stream.path, &plugin_config.path);
 
             // Fail open: secret lookup failures should not break session spawn.
             let env = match stream.cap.as_deref() {
@@ -903,6 +917,7 @@ impl ExternalProcessorService {
                     tenant_name: pending.tenant_name.clone(),
                     plugin_name: pending.plugin_name.clone(),
                     port: pending.plugin_config.port,
+                    path: pending.plugin_config.path.clone(),
                     agent_id: None,
                 },
             );
@@ -1009,19 +1024,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_plugin_path_valid_and_invalid() {
-        let parsed = parse_plugin_path("/tenant/plugin").expect("valid path");
+    fn parse_plugin_path_legacy_mcp() {
+        let parsed = parse_plugin_path("/tenant/plugin", "/mcp").expect("valid path");
         assert_eq!(parsed.0, "tenant");
         assert_eq!(parsed.1, "plugin");
         assert_eq!(parsed.2, "/mcp");
 
-        let parsed_with_extra =
-            parse_plugin_path("/tenant/plugin/extra?query=1").expect("valid path with extra");
+        let parsed_with_extra = parse_plugin_path("/tenant/plugin/extra?query=1", "/mcp")
+            .expect("valid path with extra");
         assert_eq!(parsed_with_extra.2, "/mcp/extra?query=1");
 
-        assert!(parse_plugin_path("/tenant").is_none());
-        assert!(parse_plugin_path("/Tenant/plugin").is_none());
-        assert!(parse_plugin_path("/tenant/").is_none());
+        assert!(parse_plugin_path("/tenant", "/mcp").is_none());
+        assert!(parse_plugin_path("/Tenant/plugin", "/mcp").is_none());
+        assert!(parse_plugin_path("/tenant/", "/mcp").is_none());
+    }
+
+    #[test]
+    fn parse_plugin_path_root_default() {
+        let parsed = parse_plugin_path("/tenant/plugin", "/").expect("valid path");
+        assert_eq!(parsed.2, "/");
+
+        let parsed_with_extra =
+            parse_plugin_path("/tenant/plugin/extra?query=1", "/").expect("valid path with extra");
+        assert_eq!(parsed_with_extra.2, "/extra?query=1");
+    }
+
+    #[test]
+    fn parse_plugin_path_custom_prefix() {
+        let parsed = parse_plugin_path("/tenant/plugin/foo", "/api/v1").expect("valid path");
+        assert_eq!(parsed.2, "/api/v1/foo");
     }
 
     #[test]
@@ -1090,8 +1121,20 @@ mod tests {
 
     #[test]
     fn forward_path_passes_through_non_plugin_paths() {
-        assert_eq!(forward_path("/sessions"), "/sessions");
-        assert_eq!(forward_path(""), "/");
+        assert_eq!(forward_path("/sessions", "/mcp"), "/sessions");
+        assert_eq!(forward_path("", "/mcp"), "/");
+    }
+
+    #[test]
+    fn forward_path_uses_plugin_path() {
+        assert_eq!(forward_path("/tenant/plugin", "/"), "/");
+        assert_eq!(forward_path("/tenant/plugin/foo?x=1", "/"), "/foo?x=1");
+        assert_eq!(forward_path("/tenant/plugin", "/mcp"), "/mcp");
+        assert_eq!(
+            forward_path("/tenant/plugin/foo?x=1", "/mcp"),
+            "/mcp/foo?x=1"
+        );
+        assert_eq!(forward_path("/tenant/plugin/foo", "/api/v1"), "/api/v1/foo");
     }
 
     #[test]

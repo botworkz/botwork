@@ -26,7 +26,7 @@ fn plugin_registry_valid_load() {
     let dir = tempdir().unwrap();
     let path = write_plugins(
         dir.path(),
-        "plugins:\n  fs:\n    image: botwork/mcp-fs:local\n  echo:\n    image: botwork/mcp-echo:local\n    port: 9000\n    network: custom\n",
+        "plugins:\n  fs:\n    image: botwork/mcp-fs:local\n  echo:\n    image: botwork/mcp-echo:local\n    port: 9000\n    network: custom\n    path: /mcp\n",
     );
 
     let loaded = plugin_registry::load(path.to_str().unwrap()).unwrap();
@@ -37,10 +37,12 @@ fn plugin_registry_valid_load() {
     assert_eq!(fs.image, "botwork/mcp-fs:local");
     assert_eq!(fs.port, 8000);
     assert_eq!(fs.network, "botwork");
+    assert_eq!(fs.path, "/");
 
     let echo = loaded.get("echo").unwrap();
     assert_eq!(echo.port, 9000);
     assert_eq!(echo.network, "custom");
+    assert_eq!(echo.path, "/mcp");
 }
 
 #[test]

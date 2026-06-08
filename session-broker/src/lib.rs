@@ -28,6 +28,7 @@ pub struct TransportState {
     pub tenant_name: String,
     pub plugin_name: String,
     pub port: u16,
+    pub path: String,
     pub agent_id: Option<String>,
 }
 
