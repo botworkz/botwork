@@ -373,7 +373,10 @@ mod tests {
             "missing success summary log: {logs}"
         );
         assert!(
-            logs.contains("secrets/fetch: calling auth-broker cap=cap-12…"),
+            logs.contains(&format!(
+                "secrets/fetch: calling auth-broker cap={}",
+                redact_token("cap-123")
+            )),
             "missing call log with redacted cap: {logs}"
         );
         assert!(
