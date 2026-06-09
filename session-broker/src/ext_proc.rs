@@ -25,8 +25,8 @@ use crate::plugin_registry::{PluginConfig, UpstreamAuth};
 use crate::secrets;
 use crate::session_registry::utc_now;
 use crate::{
-    log_info, AppState, PendingInit, TransportState, COLD_START_TIMEOUT, TENANT_PLUGIN_PATH_RE,
-    TENANT_RE,
+    log_info, redact_token, AppState, PendingInit, TransportState, COLD_START_TIMEOUT,
+    TENANT_PLUGIN_PATH_RE, TENANT_RE,
 };
 
 static TENANT_PATTERN: OnceLock<Regex> = OnceLock::new();
@@ -310,19 +310,39 @@ fn route_authorization_for_transport(
     mcp_session_id: Option<&str>,
     transport: &TransportState,
 ) -> (Option<String>, bool) {
+    let session_id = mcp_session_id.unwrap_or("");
     match state.plugin_registry.get(&transport.plugin_name) {
         Some(plugin_config) => match (
             &plugin_config.upstream_auth,
             &transport.upstream_authorization,
         ) {
-            (UpstreamAuth::Bearer { .. }, Some(value)) => (Some(value.clone()), false),
-            _ => (None, true),
+            (UpstreamAuth::Bearer { service }, Some(value)) => {
+                log_info(&format!(
+                    "route auth: session={session_id} plugin={} upstream_auth=bearer/{service} set (token={})",
+                    transport.plugin_name,
+                    redact_token(value)
+                ));
+                (Some(value.clone()), false)
+            }
+            (UpstreamAuth::None, _) => {
+                log_info(&format!(
+                    "route auth: session={session_id} plugin={} upstream_auth=none stripped",
+                    transport.plugin_name
+                ));
+                (None, true)
+            }
+            (UpstreamAuth::Bearer { service }, None) => {
+                log_info(&format!(
+                    "route auth: session={session_id} plugin={} upstream_auth=bearer/{service} configured but no resolved token on transport — stripped",
+                    transport.plugin_name
+                ));
+                (None, true)
+            }
         },
         None => {
             log_info(&format!(
-                "session={} plugin '{}' missing from registry during route decision; defaulting upstream_auth=none",
-                mcp_session_id.unwrap_or(""),
-                transport.plugin_name
+                "session={} plugin '{}' missing from registry during route decision; defaulting upstream_auth=none; upstream auth: stripped",
+                session_id, transport.plugin_name
             ));
             (None, true)
         }
@@ -336,6 +356,9 @@ fn resolve_spawn_upstream_authorization(
     secrets: &[secrets::FetchedSecret],
 ) -> Result<Option<String>, String> {
     let UpstreamAuth::Bearer { service } = upstream_auth else {
+        log_info(&format!(
+            "tenant={tenant_name} plugin={plugin_name} upstream_auth: none — no upstream authorization header will be set"
+        ));
         return Ok(None);
     };
 
@@ -346,13 +369,21 @@ fn resolve_spawn_upstream_authorization(
 
     match matching.as_slice() {
         [] => {
+            let available_services = secret_services(secrets);
             log_info(&format!(
-                "upstream_auth: bearer/{service} configured but no matching secret in vault for tenant={tenant_name} plugin={plugin_name}"
+                "upstream_auth: bearer/{service} configured but no matching secret in vault for tenant={tenant_name} plugin={plugin_name} available_services=[{}]",
+                available_services.join(",")
             ));
             Err("configured upstream authorization secret was not found".to_string())
         }
         [secret] => std::str::from_utf8(&secret.value)
-            .map(|value| Some(value.to_string()))
+            .map(|value| {
+                log_info(&format!(
+                    "upstream_auth: bearer/{service} resolved (token={}) tenant={tenant_name} plugin={plugin_name}",
+                    redact_token(value)
+                ));
+                Some(value.to_string())
+            })
             .map_err(|_| {
                 log_info(&format!(
                     "upstream_auth: bearer/{service} matched non-UTF-8 secret for tenant={tenant_name} plugin={plugin_name}"
@@ -360,15 +391,29 @@ fn resolve_spawn_upstream_authorization(
                 "configured upstream authorization secret must be valid UTF-8".to_string()
             }),
         matches => {
+            let mut matching_names: Vec<String> =
+                matches.iter().map(|secret| secret.name.clone()).collect();
+            matching_names.sort();
             log_info(&format!(
-                "upstream_auth: bearer/{service} ambiguous for tenant={tenant_name} plugin={plugin_name}: {} secrets match service '{service}'",
-                matches.len()
+                "upstream_auth: bearer/{service} matched {} secrets (expected exactly 1) — spawn will fail tenant={tenant_name} plugin={plugin_name} names=[{}]",
+                matches.len(),
+                matching_names.join(",")
             ));
             Err(format!(
                 "ambiguous upstream authorization secret for service '{service}'"
             ))
         }
     }
+}
+
+fn secret_services(secrets: &[secrets::FetchedSecret]) -> Vec<String> {
+    let mut services: Vec<String> = secrets
+        .iter()
+        .map(|secret| secret.service.clone())
+        .collect();
+    services.sort();
+    services.dedup();
+    services
 }
 
 fn immediate_response(status: u32, body: &str) -> ProcessingResponse {
@@ -1164,6 +1209,52 @@ pub async fn serve_grpc(state: AppState, addr: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin_registry::PluginRegistry;
+    use crate::session_registry::SessionRegistry;
+    use crate::test_support::{start_log_capture, take_log_capture};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock};
+    use tokio::sync::Mutex;
+
+    fn test_plugin_config(upstream_auth: UpstreamAuth) -> PluginConfig {
+        PluginConfig {
+            image: "ghcr.io/botworkz/plugin:test".to_string(),
+            port: 8000,
+            network: "botwork".to_string(),
+            path: "/mcp".to_string(),
+            upstream_auth,
+        }
+    }
+
+    fn test_app_state(plugin_name: &str, upstream_auth: UpstreamAuth) -> AppState {
+        let mut plugin_registry = PluginRegistry::new();
+        plugin_registry.insert(plugin_name.to_string(), test_plugin_config(upstream_auth));
+        AppState {
+            plugin_registry,
+            session_registry: Arc::new(SessionRegistry::new("/tmp/ext-proc-unit-sessions.json")),
+            transport_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_init: Arc::new(Mutex::new(HashMap::new())),
+            launcher_socket_path: "/tmp/ext-proc-unit-launcher.sock".to_string(),
+            auth_broker_url: "http://127.0.0.1:1".to_string(),
+        }
+    }
+
+    fn test_secret(service: &str, name: &str, value: &[u8]) -> secrets::FetchedSecret {
+        secrets::FetchedSecret {
+            service: service.to_string(),
+            name: name.to_string(),
+            kind: "api-key".to_string(),
+            value: value.to_vec(),
+        }
+    }
+
+    fn log_capture_guard() -> MutexGuard<'static, ()> {
+        static LOG_CAPTURE_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOG_CAPTURE_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .expect("lock log capture guard")
+    }
 
     #[test]
     fn parse_plugin_path_legacy_mcp() {
@@ -1360,5 +1451,209 @@ mod tests {
     fn content_type_is_json_post_case_insensitive() {
         assert!(content_type_is_json("POST", "APPLICATION/JSON"));
         assert!(content_type_is_json("POST", "  application/json  "));
+    }
+
+    #[test]
+    fn resolve_spawn_upstream_authorization_none_logs_no_auth() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let resolved =
+            resolve_spawn_upstream_authorization("tenant1", "plugin-a", &UpstreamAuth::None, &[])
+                .expect("none should resolve");
+        let logs = take_log_capture().join("\n");
+
+        assert_eq!(resolved, None);
+        assert!(
+            logs.contains("upstream_auth: none — no upstream authorization header will be set"),
+            "missing upstream_auth none log: {logs}"
+        );
+        assert!(
+            !logs.contains("ghp_SECRET"),
+            "logs should not contain secret tokens: {logs}"
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_upstream_authorization_bearer_match_one_logs_redacted_token() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let resolved = resolve_spawn_upstream_authorization(
+            "tenant1",
+            "plugin-a",
+            &UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+            &[test_secret("github.com", "pat", b"ghp_SECRET")],
+        )
+        .expect("single match should resolve");
+        let logs = take_log_capture().join("\n");
+
+        assert_eq!(resolved.as_deref(), Some("ghp_SECRET"));
+        assert!(
+            logs.contains("upstream_auth: bearer/github.com resolved"),
+            "missing bearer resolution log: {logs}"
+        );
+        assert!(
+            logs.contains(&redact_token("ghp_SECRET")),
+            "missing redacted token in logs: {logs}"
+        );
+        assert!(
+            !logs.contains("ghp_SECRET"),
+            "logs should not contain raw bearer token: {logs}"
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_upstream_authorization_bearer_match_zero_logs_available_services() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let err = resolve_spawn_upstream_authorization(
+            "tenant1",
+            "plugin-a",
+            &UpstreamAuth::Bearer {
+                service: "github".to_string(),
+            },
+            &[
+                test_secret("github.com", "pat", b"ghp_one"),
+                test_secret("shared", "token", b"shh"),
+            ],
+        )
+        .expect_err("no match should fail");
+        let logs = take_log_capture().join("\n");
+
+        assert!(err.contains("not found"));
+        assert!(
+            logs.contains("available_services=[github.com,shared]"),
+            "missing available_services log: {logs}"
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_upstream_authorization_bearer_match_many_logs_names() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let err = resolve_spawn_upstream_authorization(
+            "tenant1",
+            "plugin-a",
+            &UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+            &[
+                test_secret("github.com", "pat-a", b"ghp_one"),
+                test_secret("github.com", "pat-b", b"ghp_two"),
+            ],
+        )
+        .expect_err("multiple matches should fail");
+        let logs = take_log_capture().join("\n");
+
+        assert!(err.contains("ambiguous"));
+        assert!(
+            logs.contains("matched 2 secrets (expected exactly 1) — spawn will fail"),
+            "missing multiple match log: {logs}"
+        );
+        assert!(
+            logs.contains("names=[pat-a,pat-b]"),
+            "missing matching names in log: {logs}"
+        );
+        assert!(
+            !logs.contains("ghp_one"),
+            "logs should not contain raw token values: {logs}"
+        );
+        assert!(
+            !logs.contains("ghp_two"),
+            "logs should not contain raw token values: {logs}"
+        );
+    }
+
+    #[test]
+    fn route_authorization_for_transport_logs_each_outcome() {
+        let _guard = log_capture_guard();
+        let transport = TransportState {
+            container_name: "mcp_session_123".to_string(),
+            staging_token: "stage".to_string(),
+            tenant_name: "tenant1".to_string(),
+            plugin_name: "plugin-a".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_authorization: Some("ghp_SECRET".to_string()),
+            agent_id: None,
+        };
+
+        start_log_capture();
+        let state_forward = test_app_state(
+            "plugin-a",
+            UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+        );
+        let (upstream_auth, strip) =
+            route_authorization_for_transport(&state_forward, Some("sid-1"), &transport);
+        let logs_forward = take_log_capture().join("\n");
+        assert_eq!(upstream_auth.as_deref(), Some("ghp_SECRET"));
+        assert!(!strip);
+        assert!(
+            logs_forward.contains(
+                "route auth: session=sid-1 plugin=plugin-a upstream_auth=bearer/github.com set"
+            ),
+            "missing route set log: {logs_forward}"
+        );
+        assert!(
+            !logs_forward.contains("ghp_SECRET"),
+            "logs should not contain raw route token: {logs_forward}"
+        );
+
+        start_log_capture();
+        let state_missing = test_app_state(
+            "other-plugin",
+            UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+        );
+        let (upstream_auth, strip) =
+            route_authorization_for_transport(&state_missing, Some("sid-2"), &transport);
+        let logs_missing = take_log_capture().join("\n");
+        assert_eq!(upstream_auth, None);
+        assert!(strip);
+        assert!(
+            logs_missing.contains("missing from registry during route decision; defaulting upstream_auth=none; upstream auth: stripped"),
+            "missing registry-strip log: {logs_missing}"
+        );
+
+        start_log_capture();
+        let state_none = test_app_state("plugin-a", UpstreamAuth::None);
+        let (upstream_auth, strip) =
+            route_authorization_for_transport(&state_none, Some("sid-3"), &transport);
+        let logs_none = take_log_capture().join("\n");
+        assert_eq!(upstream_auth, None);
+        assert!(strip);
+        assert!(
+            logs_none
+                .contains("route auth: session=sid-3 plugin=plugin-a upstream_auth=none stripped"),
+            "missing upstream_auth none stripped log: {logs_none}"
+        );
+
+        start_log_capture();
+        let state_bearer_no_token = test_app_state(
+            "plugin-a",
+            UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+        );
+        let mut transport_no_token = transport.clone();
+        transport_no_token.upstream_authorization = None;
+        let (upstream_auth, strip) = route_authorization_for_transport(
+            &state_bearer_no_token,
+            Some("sid-4"),
+            &transport_no_token,
+        );
+        let logs_bearer_no_token = take_log_capture().join("\n");
+        assert_eq!(upstream_auth, None);
+        assert!(strip);
+        assert!(
+            logs_bearer_no_token.contains(
+                "route auth: session=sid-4 plugin=plugin-a upstream_auth=bearer/github.com configured but no resolved token on transport — stripped"
+            ),
+            "missing bearer configured stripped log: {logs_bearer_no_token}"
+        );
     }
 }
