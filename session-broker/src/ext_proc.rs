@@ -21,7 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::launcher::{call_bind_agent, launch_session, probe_ready, LauncherError};
-use crate::plugin_registry::PluginConfig;
+use crate::plugin_registry::{PluginConfig, UpstreamAuth};
 use crate::secrets;
 use crate::session_registry::utc_now;
 use crate::{
@@ -182,6 +182,7 @@ fn upstream(container_name: &str, port: u16) -> String {
 pub fn upstream_header_mutation(
     upstream_name: &str,
     rewritten_path: Option<&str>,
+    upstream_auth: UpstreamAuth,
 ) -> HeaderMutation {
     let mut set_headers = vec![HeaderValueOption {
         header: Some(HeaderValue {
@@ -208,15 +209,28 @@ pub fn upstream_header_mutation(
         });
     }
 
+    let mut remove_headers = vec!["x-botwork-cap".to_string()];
+    if upstream_auth == UpstreamAuth::None {
+        remove_headers.push("authorization".to_string());
+    }
+
     HeaderMutation {
         set_headers,
-        remove_headers: vec!["x-botwork-cap".to_string()],
+        remove_headers,
     }
 }
 
-fn upstream_common_response(upstream_name: &str, rewritten_path: Option<&str>) -> CommonResponse {
+fn upstream_common_response(
+    upstream_name: &str,
+    rewritten_path: Option<&str>,
+    upstream_auth: UpstreamAuth,
+) -> CommonResponse {
     CommonResponse {
-        header_mutation: Some(upstream_header_mutation(upstream_name, rewritten_path)),
+        header_mutation: Some(upstream_header_mutation(
+            upstream_name,
+            rewritten_path,
+            upstream_auth,
+        )),
         clear_route_cache: true,
         status: common_response::ResponseStatus::Continue as i32,
         ..CommonResponse::default()
@@ -254,14 +268,40 @@ fn response_headers_continue() -> ProcessingResponse {
     }
 }
 
-fn request_headers_route(upstream_name: &str, rewritten_path: Option<&str>) -> ProcessingResponse {
+fn request_headers_route(
+    upstream_name: &str,
+    rewritten_path: Option<&str>,
+    upstream_auth: UpstreamAuth,
+) -> ProcessingResponse {
     ProcessingResponse {
         response: Some(processing_response::Response::RequestHeaders(
             HeadersResponse {
-                response: Some(upstream_common_response(upstream_name, rewritten_path)),
+                response: Some(upstream_common_response(
+                    upstream_name,
+                    rewritten_path,
+                    upstream_auth,
+                )),
             },
         )),
         ..ProcessingResponse::default()
+    }
+}
+
+fn upstream_auth_for_transport(
+    state: &AppState,
+    mcp_session_id: Option<&str>,
+    transport: &TransportState,
+) -> UpstreamAuth {
+    match state.plugin_registry.get(&transport.plugin_name) {
+        Some(plugin_config) => plugin_config.upstream_auth,
+        None => {
+            log_info(&format!(
+                "session={} plugin '{}' missing from registry during route decision; defaulting upstream_auth=none",
+                mcp_session_id.unwrap_or(""),
+                transport.plugin_name
+            ));
+            UpstreamAuth::None
+        }
     }
 }
 
@@ -489,6 +529,8 @@ impl ExternalProcessorService {
                 }
             }
             let rewritten_path = forward_path(&stream.path, &transport.path);
+            let upstream_auth =
+                upstream_auth_for_transport(state, stream.mcp_session_id.as_deref(), &transport);
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
             log_phase(
                 stream,
@@ -502,6 +544,7 @@ impl ExternalProcessorService {
             return request_headers_route(
                 stream.chosen_upstream.as_deref().unwrap_or(""),
                 Some(&rewritten_path),
+                upstream_auth,
             );
         }
 
@@ -555,6 +598,8 @@ impl ExternalProcessorService {
                 }
             }
             let rewritten_path = forward_path(&stream.path, &transport.path);
+            let upstream_auth =
+                upstream_auth_for_transport(state, stream.mcp_session_id.as_deref(), &transport);
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
             log_phase(
                 stream,
@@ -568,6 +613,7 @@ impl ExternalProcessorService {
             return request_headers_route(
                 stream.chosen_upstream.as_deref().unwrap_or(""),
                 Some(&rewritten_path),
+                upstream_auth,
             );
         }
 
@@ -605,6 +651,8 @@ impl ExternalProcessorService {
                         }
                     }
                     let rewritten_path = forward_path(&stream.path, &transport.path);
+                    let upstream_auth =
+                        upstream_auth_for_transport(state, Some(mcp_session_id), &transport);
                     stream.chosen_upstream =
                         Some(upstream(&transport.container_name, transport.port));
                     log_phase(
@@ -620,6 +668,7 @@ impl ExternalProcessorService {
                     return request_headers_route(
                         stream.chosen_upstream.as_deref().unwrap_or(""),
                         Some(&rewritten_path),
+                        upstream_auth,
                     );
                 }
                 return logged_immediate_response(
@@ -749,6 +798,7 @@ impl ExternalProcessorService {
             return request_headers_route(
                 stream.chosen_upstream.as_deref().unwrap_or(""),
                 Some(&rewritten_path),
+                plugin_config.upstream_auth,
             );
         }
 
@@ -1092,7 +1142,8 @@ mod tests {
 
     #[test]
     fn header_mutation_uses_raw_value() {
-        let mutation = upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"));
+        let mutation =
+            upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), UpstreamAuth::None);
         let first = mutation
             .set_headers
             .first()
@@ -1105,11 +1156,32 @@ mod tests {
 
     #[test]
     fn header_mutation_removes_x_botwork_cap() {
-        let mutation = upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"));
+        let mutation =
+            upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), UpstreamAuth::None);
         assert!(mutation
             .remove_headers
             .iter()
             .any(|name| name == "x-botwork-cap"));
+    }
+
+    #[test]
+    fn header_mutation_removes_authorization_for_upstream_auth_none() {
+        let mutation =
+            upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), UpstreamAuth::None);
+        assert!(mutation
+            .remove_headers
+            .iter()
+            .any(|name| name == "authorization"));
+    }
+
+    #[test]
+    fn header_mutation_keeps_authorization_for_upstream_auth_bearer() {
+        let mutation =
+            upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), UpstreamAuth::Bearer);
+        assert!(!mutation
+            .remove_headers
+            .iter()
+            .any(|name| name == "authorization"));
     }
 
     #[test]
@@ -1161,7 +1233,7 @@ mod tests {
 
     #[test]
     fn upstream_header_mutation_without_path_only_sets_upstream() {
-        let mutation = upstream_header_mutation("mcp_session_abc:8000", None);
+        let mutation = upstream_header_mutation("mcp_session_abc:8000", None, UpstreamAuth::None);
         assert_eq!(mutation.set_headers.len(), 1);
         assert_eq!(
             mutation.set_headers[0]
@@ -1174,7 +1246,7 @@ mod tests {
 
     #[test]
     fn upstream_header_mutation_overwrites_existing_upstream_header() {
-        let mutation = upstream_header_mutation("mcp_session_abc:8000", None);
+        let mutation = upstream_header_mutation("mcp_session_abc:8000", None, UpstreamAuth::None);
         assert_eq!(
             mutation.set_headers[0].append_action,
             header_value_option::HeaderAppendAction::OverwriteIfExistsOrAdd as i32
