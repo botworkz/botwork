@@ -182,7 +182,8 @@ fn upstream(container_name: &str, port: u16) -> String {
 pub fn upstream_header_mutation(
     upstream_name: &str,
     rewritten_path: Option<&str>,
-    upstream_auth: UpstreamAuth,
+    upstream_authorization: Option<&str>,
+    strip_authorization: bool,
 ) -> HeaderMutation {
     let mut set_headers = vec![HeaderValueOption {
         header: Some(HeaderValue {
@@ -209,8 +210,21 @@ pub fn upstream_header_mutation(
         });
     }
 
+    if let Some(upstream_authorization) = upstream_authorization {
+        let bearer = format!("Bearer {upstream_authorization}");
+        set_headers.push(HeaderValueOption {
+            header: Some(HeaderValue {
+                key: "authorization".to_string(),
+                value: String::new(),
+                raw_value: bearer.into_bytes(),
+            }),
+            append_action: header_value_option::HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
+            ..HeaderValueOption::default()
+        });
+    }
+
     let mut remove_headers = vec!["x-botwork-cap".to_string()];
-    if upstream_auth == UpstreamAuth::None {
+    if strip_authorization {
         remove_headers.push("authorization".to_string());
     }
 
@@ -223,13 +237,15 @@ pub fn upstream_header_mutation(
 fn upstream_common_response(
     upstream_name: &str,
     rewritten_path: Option<&str>,
-    upstream_auth: UpstreamAuth,
+    upstream_authorization: Option<&str>,
+    strip_authorization: bool,
 ) -> CommonResponse {
     CommonResponse {
         header_mutation: Some(upstream_header_mutation(
             upstream_name,
             rewritten_path,
-            upstream_auth,
+            upstream_authorization,
+            strip_authorization,
         )),
         clear_route_cache: true,
         status: common_response::ResponseStatus::Continue as i32,
@@ -271,7 +287,8 @@ fn response_headers_continue() -> ProcessingResponse {
 fn request_headers_route(
     upstream_name: &str,
     rewritten_path: Option<&str>,
-    upstream_auth: UpstreamAuth,
+    upstream_authorization: Option<&str>,
+    strip_authorization: bool,
 ) -> ProcessingResponse {
     ProcessingResponse {
         response: Some(processing_response::Response::RequestHeaders(
@@ -279,7 +296,8 @@ fn request_headers_route(
                 response: Some(upstream_common_response(
                     upstream_name,
                     rewritten_path,
-                    upstream_auth,
+                    upstream_authorization,
+                    strip_authorization,
                 )),
             },
         )),
@@ -287,20 +305,68 @@ fn request_headers_route(
     }
 }
 
-fn upstream_auth_for_transport(
+fn route_authorization_for_transport(
     state: &AppState,
     mcp_session_id: Option<&str>,
     transport: &TransportState,
-) -> UpstreamAuth {
+) -> (Option<String>, bool) {
     match state.plugin_registry.get(&transport.plugin_name) {
-        Some(plugin_config) => plugin_config.upstream_auth,
+        Some(plugin_config) => match (
+            &plugin_config.upstream_auth,
+            &transport.upstream_authorization,
+        ) {
+            (UpstreamAuth::Bearer { .. }, Some(value)) => (Some(value.clone()), false),
+            _ => (None, true),
+        },
         None => {
             log_info(&format!(
                 "session={} plugin '{}' missing from registry during route decision; defaulting upstream_auth=none",
                 mcp_session_id.unwrap_or(""),
                 transport.plugin_name
             ));
-            UpstreamAuth::None
+            (None, true)
+        }
+    }
+}
+
+fn resolve_spawn_upstream_authorization(
+    tenant_name: &str,
+    plugin_name: &str,
+    upstream_auth: &UpstreamAuth,
+    secrets: &[secrets::FetchedSecret],
+) -> Result<Option<String>, String> {
+    let UpstreamAuth::Bearer { service } = upstream_auth else {
+        return Ok(None);
+    };
+
+    let matching: Vec<&secrets::FetchedSecret> = secrets
+        .iter()
+        .filter(|secret| secret.service == *service)
+        .collect();
+
+    match matching.as_slice() {
+        [] => {
+            log_info(&format!(
+                "upstream_auth: bearer/{service} configured but no matching secret in vault for tenant={tenant_name} plugin={plugin_name}"
+            ));
+            Err("configured upstream authorization secret was not found".to_string())
+        }
+        [secret] => std::str::from_utf8(&secret.value)
+            .map(|value| Some(value.to_string()))
+            .map_err(|_| {
+                log_info(&format!(
+                    "upstream_auth: bearer/{service} matched non-UTF-8 secret for tenant={tenant_name} plugin={plugin_name}"
+                ));
+                "configured upstream authorization secret must be valid UTF-8".to_string()
+            }),
+        matches => {
+            log_info(&format!(
+                "upstream_auth: bearer/{service} ambiguous for tenant={tenant_name} plugin={plugin_name}: {} secrets match service '{service}': use bearer/{service}/<name>",
+                matches.len()
+            ));
+            Err(format!(
+                "ambiguous upstream authorization secret for service '{service}': use bearer/{service}/<name>"
+            ))
         }
     }
 }
@@ -363,6 +429,7 @@ async fn spawn_new_container(
     tenant_name: &str,
     plugin_name: &str,
     plugin_config: &PluginConfig,
+    upstream_authorization: Option<String>,
     env: &[(String, String)],
 ) -> Result<PendingInit, LauncherError> {
     let mut token_bytes = [0u8; 6];
@@ -409,6 +476,7 @@ async fn spawn_new_container(
         tenant_name: tenant_name.to_string(),
         plugin_name: plugin_name.to_string(),
         plugin_config: plugin_config.clone(),
+        upstream_authorization,
         created_at: utc_now(),
     })
 }
@@ -529,8 +597,11 @@ impl ExternalProcessorService {
                 }
             }
             let rewritten_path = forward_path(&stream.path, &transport.path);
-            let upstream_auth =
-                upstream_auth_for_transport(state, stream.mcp_session_id.as_deref(), &transport);
+            let (upstream_authorization, strip_authorization) = route_authorization_for_transport(
+                state,
+                stream.mcp_session_id.as_deref(),
+                &transport,
+            );
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
             log_phase(
                 stream,
@@ -544,7 +615,8 @@ impl ExternalProcessorService {
             return request_headers_route(
                 stream.chosen_upstream.as_deref().unwrap_or(""),
                 Some(&rewritten_path),
-                upstream_auth,
+                upstream_authorization.as_deref(),
+                strip_authorization,
             );
         }
 
@@ -598,8 +670,11 @@ impl ExternalProcessorService {
                 }
             }
             let rewritten_path = forward_path(&stream.path, &transport.path);
-            let upstream_auth =
-                upstream_auth_for_transport(state, stream.mcp_session_id.as_deref(), &transport);
+            let (upstream_authorization, strip_authorization) = route_authorization_for_transport(
+                state,
+                stream.mcp_session_id.as_deref(),
+                &transport,
+            );
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
             log_phase(
                 stream,
@@ -613,7 +688,8 @@ impl ExternalProcessorService {
             return request_headers_route(
                 stream.chosen_upstream.as_deref().unwrap_or(""),
                 Some(&rewritten_path),
-                upstream_auth,
+                upstream_authorization.as_deref(),
+                strip_authorization,
             );
         }
 
@@ -651,8 +727,8 @@ impl ExternalProcessorService {
                         }
                     }
                     let rewritten_path = forward_path(&stream.path, &transport.path);
-                    let upstream_auth =
-                        upstream_auth_for_transport(state, Some(mcp_session_id), &transport);
+                    let (upstream_authorization, strip_authorization) =
+                        route_authorization_for_transport(state, Some(mcp_session_id), &transport);
                     stream.chosen_upstream =
                         Some(upstream(&transport.container_name, transport.port));
                     log_phase(
@@ -668,7 +744,8 @@ impl ExternalProcessorService {
                     return request_headers_route(
                         stream.chosen_upstream.as_deref().unwrap_or(""),
                         Some(&rewritten_path),
-                        upstream_auth,
+                        upstream_authorization.as_deref(),
+                        strip_authorization,
                     );
                 }
                 return logged_immediate_response(
@@ -714,8 +791,8 @@ impl ExternalProcessorService {
             };
             let rewritten_path = forward_path(&stream.path, &plugin_config.path);
 
-            // Fail open: secret lookup failures should not break session spawn.
-            let env = match stream.cap.as_deref() {
+            // Fail open for env injection; upstream bearer resolution below fails closed.
+            let fetched_secrets = match stream.cap.as_deref() {
                 Some(cap) if !cap.is_empty() => {
                     match secrets::fetch_secrets(
                         &state.auth_broker_url,
@@ -724,7 +801,7 @@ impl ExternalProcessorService {
                     )
                     .await
                     {
-                        Ok(secrets) => secrets::build_env_entries(&secrets),
+                        Ok(secrets) => secrets,
                         Err(err) => {
                             log_info(&format!(
                                 "spawn_secrets fetch failed tenant={} plugin={} err={err}",
@@ -736,6 +813,7 @@ impl ExternalProcessorService {
                 }
                 _ => Vec::new(),
             };
+            let env = secrets::build_env_entries(&fetched_secrets);
             log_info(&format!(
                 "spawn_secrets tenant={} plugin={} cap_present={} secrets_injected={}",
                 stream.trusted_tenant,
@@ -743,6 +821,17 @@ impl ExternalProcessorService {
                 matches!(stream.cap.as_deref(), Some(cap) if !cap.is_empty()),
                 env.len()
             ));
+            let upstream_authorization = match resolve_spawn_upstream_authorization(
+                &stream.trusted_tenant,
+                &plugin_name,
+                &plugin_config.upstream_auth,
+                &fetched_secrets,
+            ) {
+                Ok(value) => value,
+                Err(message) => {
+                    return logged_immediate_response(stream, "request_headers", 500, &message)
+                }
+            };
 
             let pending = match spawn_new_container(
                 state,
@@ -750,6 +839,7 @@ impl ExternalProcessorService {
                 &stream.trusted_tenant,
                 &plugin_name,
                 &plugin_config,
+                upstream_authorization.clone(),
                 &env,
             )
             .await
@@ -798,7 +888,8 @@ impl ExternalProcessorService {
             return request_headers_route(
                 stream.chosen_upstream.as_deref().unwrap_or(""),
                 Some(&rewritten_path),
-                plugin_config.upstream_auth,
+                upstream_authorization.as_deref(),
+                upstream_authorization.is_none(),
             );
         }
 
@@ -968,6 +1059,7 @@ impl ExternalProcessorService {
                     plugin_name: pending.plugin_name.clone(),
                     port: pending.plugin_config.port,
                     path: pending.plugin_config.path.clone(),
+                    upstream_authorization: pending.upstream_authorization.clone(),
                     agent_id: None,
                 },
             );
@@ -1142,8 +1234,7 @@ mod tests {
 
     #[test]
     fn header_mutation_uses_raw_value() {
-        let mutation =
-            upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), UpstreamAuth::None);
+        let mutation = upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), None, true);
         let first = mutation
             .set_headers
             .first()
@@ -1156,8 +1247,7 @@ mod tests {
 
     #[test]
     fn header_mutation_removes_x_botwork_cap() {
-        let mutation =
-            upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), UpstreamAuth::None);
+        let mutation = upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), None, true);
         assert!(mutation
             .remove_headers
             .iter()
@@ -1166,8 +1256,7 @@ mod tests {
 
     #[test]
     fn header_mutation_removes_authorization_for_upstream_auth_none() {
-        let mutation =
-            upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), UpstreamAuth::None);
+        let mutation = upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), None, true);
         assert!(mutation
             .remove_headers
             .iter()
@@ -1175,13 +1264,27 @@ mod tests {
     }
 
     #[test]
-    fn header_mutation_keeps_authorization_for_upstream_auth_bearer() {
-        let mutation =
-            upstream_header_mutation("mcp_session_abc:8000", Some("/mcp"), UpstreamAuth::Bearer);
+    fn header_mutation_sets_authorization_for_cached_bearer() {
+        let mutation = upstream_header_mutation(
+            "mcp_session_abc:8000",
+            Some("/mcp"),
+            Some("ghp_cached"),
+            false,
+        );
         assert!(!mutation
             .remove_headers
             .iter()
             .any(|name| name == "authorization"));
+        let authorization = mutation
+            .set_headers
+            .iter()
+            .filter_map(|header| header.header.as_ref())
+            .find(|header| header.key == "authorization")
+            .expect("authorization header");
+        assert_eq!(
+            String::from_utf8(authorization.raw_value.clone()).expect("utf8"),
+            "Bearer ghp_cached"
+        );
     }
 
     #[test]
@@ -1233,7 +1336,7 @@ mod tests {
 
     #[test]
     fn upstream_header_mutation_without_path_only_sets_upstream() {
-        let mutation = upstream_header_mutation("mcp_session_abc:8000", None, UpstreamAuth::None);
+        let mutation = upstream_header_mutation("mcp_session_abc:8000", None, None, true);
         assert_eq!(mutation.set_headers.len(), 1);
         assert_eq!(
             mutation.set_headers[0]
@@ -1246,7 +1349,7 @@ mod tests {
 
     #[test]
     fn upstream_header_mutation_overwrites_existing_upstream_header() {
-        let mutation = upstream_header_mutation("mcp_session_abc:8000", None, UpstreamAuth::None);
+        let mutation = upstream_header_mutation("mcp_session_abc:8000", None, None, true);
         assert_eq!(
             mutation.set_headers[0].append_action,
             header_value_option::HeaderAppendAction::OverwriteIfExistsOrAdd as i32

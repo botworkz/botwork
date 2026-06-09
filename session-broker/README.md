@@ -21,35 +21,53 @@ plane.
 
 ## Plugin registry: `upstream_auth`
 
-`/etc/botwork/plugins.yaml` supports `upstream_auth` per plugin:
+`/etc/botwork/plugins.yaml` supports `upstream_auth` per plugin with this
+string grammar:
 
 - `none` (default): broker strips `Authorization` before routing to the
   per-session container.
-- `bearer`: broker forwards the incoming `Authorization` header to the
-  per-session container unchanged.
+- `bearer/<service>`: broker resolves the single cap-visible vault secret tagged
+  with `<service>` and sets `Authorization: Bearer <value>` on the upstream
+  request.
 
-If `upstream_auth` is omitted or `null`, it defaults to `none`.
-Unknown values are rejected at registry-load time.
+`upstream_auth: bearer` without a service is a parse-time error. If the field is
+omitted or `null`, it defaults to `none`.
 
-### Security implication of `bearer`
+### Security model
 
-When `upstream_auth: bearer` is enabled, whatever the client sent in
-`Authorization` reaches the per-session container untouched.
-With the current seam this is typically the tenant vault password bearer, so
-this mode effectively requires one value to satisfy both seam auth and upstream
-auth. This can be an acceptable single-tenant dev/test stopgap, but it is not
-an acceptable general production model.
+The client's seam bearer never reaches the per-session container.
 
-### Future work
+These are two different credentials by design:
 
-A future `vault` mode is planned where auth-broker mints a per-request upstream
-`Authorization` from a vault-stored secret. The parser is intentionally strict
-about unknown `upstream_auth` values so this can be added later as an additive
-change.
+- vault password bearer authenticates **client -> seam**
+- vault secret authenticates **seam -> upstream**
 
-### Ops note for downstream consumers
+When `upstream_auth: bearer/<service>` is enabled, `session-broker` exchanges
+`x-botwork-cap` with auth-broker, finds the single visible vault secret whose
+`service` matches `<service>`, and mints the upstream `Authorization` header
+from that secret.
 
-Downstream listeners that strip `authorization` unconditionally in Lua must be
-updated for `upstream_auth: bearer` to work end-to-end. `session-broker` is the
-authority for this decision; downstream consumers (for example
-`botworkz/space`) need a follow-up change to remove unconditional stripping.
+### Operator workflow
+
+Add the upstream credential to the tenant vault with the service tag that the
+plugin references:
+
+```bash
+botwork-vault add --root .vault/ \
+  --tenant <tenant> \
+  --service github.com \
+  --name pat \
+  --value '<token>'
+```
+
+Then set the plugin config, for example:
+
+```yaml
+plugins:
+  mcp-github:
+    image: botwork/mcp-github:local
+    upstream_auth: bearer/github.com
+```
+
+If zero secrets match, or more than one secret matches the configured service,
+spawn fails with a 5xx so operators can fix vault state explicitly.
