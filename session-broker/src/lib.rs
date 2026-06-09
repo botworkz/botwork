@@ -6,6 +6,7 @@ pub mod secrets;
 pub mod session_registry;
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -21,7 +22,38 @@ pub const PROBE_SLEEP: Duration = Duration::from_millis(100);
 pub const TENANT_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
 pub const TENANT_PLUGIN_PATH_RE: &str = r"^/([a-z][a-z0-9-]{0,30})/([a-z][a-z0-9-]{0,30})(/.*)?$";
 
-#[derive(Debug, Clone)]
+pub fn redact_token(value: &str) -> String {
+    let prefix: String = value.chars().take(6).collect();
+    format!("{prefix}…")
+}
+
+/// Test-only helpers. Not part of the stable public API; required at module
+/// scope (rather than `#[cfg(test)]`) because integration tests under `tests/`
+/// compile against the crate's public surface and cannot see `cfg(test)` items.
+#[doc(hidden)]
+pub mod test_support {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    static LOG_CAPTURE: OnceLock<StdMutex<Option<Vec<String>>>> = OnceLock::new();
+
+    pub(crate) fn log_capture() -> &'static StdMutex<Option<Vec<String>>> {
+        LOG_CAPTURE.get_or_init(|| StdMutex::new(None))
+    }
+
+    pub fn start_log_capture() {
+        *log_capture().lock().expect("lock log capture") = Some(Vec::new());
+    }
+
+    pub fn take_log_capture() -> Vec<String> {
+        log_capture()
+            .lock()
+            .expect("lock log capture")
+            .take()
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone)]
 pub struct TransportState {
     pub container_name: String,
     pub staging_token: String,
@@ -29,17 +61,54 @@ pub struct TransportState {
     pub plugin_name: String,
     pub port: u16,
     pub path: String,
+    pub upstream_authorization: Option<String>,
     pub agent_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for TransportState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransportState")
+            .field("container_name", &self.container_name)
+            .field("staging_token", &self.staging_token)
+            .field("tenant_name", &self.tenant_name)
+            .field("plugin_name", &self.plugin_name)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .field(
+                "upstream_authorization",
+                &self.upstream_authorization.as_deref().map(redact_token),
+            )
+            .field("agent_id", &self.agent_id)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct PendingInit {
     pub container_name: String,
     pub staging_token: String,
     pub tenant_name: String,
     pub plugin_name: String,
     pub plugin_config: PluginConfig,
+    pub upstream_authorization: Option<String>,
     pub created_at: String,
+}
+
+impl fmt::Debug for PendingInit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingInit")
+            .field("container_name", &self.container_name)
+            .field("staging_token", &self.staging_token)
+            .field("tenant_name", &self.tenant_name)
+            .field("plugin_name", &self.plugin_name)
+            .field("plugin_config", &self.plugin_config)
+            .field(
+                "upstream_authorization",
+                &self.upstream_authorization.as_deref().map(redact_token),
+            )
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -53,7 +122,15 @@ pub struct AppState {
 }
 
 pub fn log_info(message: &str) {
-    println!("{PREFIX} {message}");
+    let formatted = format!("{PREFIX} {message}");
+    println!("{formatted}");
+    if let Some(entries) = test_support::log_capture()
+        .lock()
+        .expect("lock log capture")
+        .as_mut()
+    {
+        entries.push(formatted);
+    }
 }
 
 pub async fn run() -> Result<(), String> {

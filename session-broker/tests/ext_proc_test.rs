@@ -8,6 +8,7 @@ use botwork_session_broker::ext_proc::{
 };
 use botwork_session_broker::plugin_registry::{PluginConfig, UpstreamAuth};
 use botwork_session_broker::session_registry::SessionRegistry;
+use botwork_session_broker::test_support::{start_log_capture, take_log_capture};
 use botwork_session_broker::{AppState, PendingInit, TransportState};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use envoy_proto::envoy::service::ext_proc::v3::{
@@ -153,7 +154,24 @@ fn extract_removed_headers(response: &ProcessingResponse) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn response_with_removed_headers_for_auth(upstream_auth: UpstreamAuth) -> ProcessingResponse {
+fn extract_set_header(response: &ProcessingResponse, name: &str) -> Option<String> {
+    let headers = match response.response.as_ref()? {
+        processing_response::Response::RequestHeaders(h) => h,
+        _ => return None,
+    };
+    let mutation = headers.response.as_ref()?.header_mutation.as_ref()?;
+    mutation
+        .set_headers
+        .iter()
+        .filter_map(|option| option.header.as_ref())
+        .find(|header| header.key == name)
+        .and_then(|header| String::from_utf8(header.raw_value.clone()).ok())
+}
+
+fn response_with_auth_mutation(
+    upstream_authorization: Option<&str>,
+    strip_authorization: bool,
+) -> ProcessingResponse {
     ProcessingResponse {
         response: Some(processing_response::Response::RequestHeaders(
             HeadersResponse {
@@ -161,7 +179,8 @@ fn response_with_removed_headers_for_auth(upstream_auth: UpstreamAuth) -> Proces
                     header_mutation: Some(upstream_header_mutation(
                         "mcp_session_abc:8000",
                         Some("/mcp"),
-                        upstream_auth,
+                        upstream_authorization,
+                        strip_authorization,
                     )),
                     ..CommonResponse::default()
                 }),
@@ -188,6 +207,7 @@ fn sample_transport_with_path(
         plugin_name: plugin.to_string(),
         port: 8000,
         path: plugin_path.to_string(),
+        upstream_authorization: None,
         agent_id: None,
     }
 }
@@ -220,6 +240,7 @@ fn sample_pending(tenant: &str, plugin: &str, container: &str) -> PendingInit {
         tenant_name: tenant.to_string(),
         plugin_name: plugin.to_string(),
         plugin_config: sample_plugin_config(),
+        upstream_authorization: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
     }
 }
@@ -613,12 +634,49 @@ async fn request_headers_strips_authorization_when_upstream_auth_none_existing_s
 }
 
 #[tokio::test]
-async fn request_headers_forwards_authorization_when_upstream_auth_bearer_existing_session() {
+async fn request_headers_existing_session_with_cached_bearer_emits_set_authorization() {
     let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
         "/tmp/no-launcher.sock".to_string(),
         "http://127.0.0.1:1".to_string(),
         "/mcp",
-        UpstreamAuth::Bearer,
+        UpstreamAuth::Bearer {
+            service: "github.com".to_string(),
+        },
+    );
+    let mut transport = sample_transport("tenant1", "plugin-a", "mcp_session_abc");
+    transport.upstream_authorization = Some("ghp_CACHED".to_string());
+    insert_transport(&state, "sess-1", transport).await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(
+        extract_set_header(&response, "authorization").as_deref(),
+        Some("Bearer ghp_CACHED")
+    );
+    let removed = extract_removed_headers(&response);
+    assert!(!removed.contains(&"authorization".to_string()));
+    assert!(removed.contains(&"x-botwork-cap".to_string()));
+}
+
+#[tokio::test]
+async fn request_headers_existing_session_without_cached_bearer_strips_authorization() {
+    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+        "/tmp/no-launcher.sock".to_string(),
+        "http://127.0.0.1:1".to_string(),
+        "/mcp",
+        UpstreamAuth::Bearer {
+            service: "github.com".to_string(),
+        },
     );
     insert_transport(
         &state,
@@ -639,20 +697,18 @@ async fn request_headers_forwards_authorization_when_upstream_auth_bearer_existi
     )
     .await;
 
+    assert_eq!(extract_set_header(&response, "authorization"), None);
     let removed = extract_removed_headers(&response);
-    assert!(!removed.contains(&"authorization".to_string()));
+    assert!(removed.contains(&"authorization".to_string()));
     assert!(removed.contains(&"x-botwork-cap".to_string()));
 }
 
 #[tokio::test]
 async fn request_headers_existing_session_missing_from_registry_falls_back_to_strip() {
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
-    insert_transport(
-        &state,
-        "sess-1",
-        sample_transport("tenant1", "plugin-missing", "mcp_session_abc"),
-    )
-    .await;
+    let mut transport = sample_transport("tenant1", "plugin-missing", "mcp_session_abc");
+    transport.upstream_authorization = Some("ghp_CACHED".to_string());
+    insert_transport(&state, "sess-1", transport).await;
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -939,12 +995,9 @@ async fn response_headers_no_pending_returns_continue() {
 async fn response_headers_pending_with_session_id_creates_transport() {
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     let stream_id = "stream-1";
-    insert_pending(
-        &state,
-        stream_id,
-        sample_pending("tenant1", "plugin-a", "mcp_session_abc"),
-    )
-    .await;
+    let mut pending = sample_pending("tenant1", "plugin-a", "mcp_session_abc");
+    pending.upstream_authorization = Some("ghp_PENDING".to_string());
+    insert_pending(&state, stream_id, pending).await;
     let mut stream = PerStreamState {
         stream_id: stream_id.to_string(),
         ..PerStreamState::default()
@@ -967,6 +1020,10 @@ async fn response_headers_pending_with_session_id_creates_transport() {
     assert_eq!(transport.plugin_name, "plugin-a");
     assert_eq!(transport.port, 8000);
     assert_eq!(transport.path, "/mcp");
+    assert_eq!(
+        transport.upstream_authorization.as_deref(),
+        Some("ghp_PENDING")
+    );
 }
 
 #[tokio::test]
@@ -1122,29 +1179,38 @@ async fn request_headers_strips_authorization_when_upstream_auth_none_spawn_path
     launcher_task.await.unwrap();
 
     assert_eq!(immediate_status(&response), Some(502));
-    let removed =
-        extract_removed_headers(&response_with_removed_headers_for_auth(UpstreamAuth::None));
+    let removed = extract_removed_headers(&response_with_auth_mutation(None, true));
     assert!(removed.contains(&"authorization".to_string()));
     assert!(removed.contains(&"x-botwork-cap".to_string()));
 }
 
 #[tokio::test]
-async fn request_headers_forwards_authorization_when_upstream_auth_bearer_spawn_path() {
-    let temp = tempdir().unwrap();
-    let socket_path = temp.path().join("launcher.sock");
-    let launcher_body = Arc::new(Mutex::new(None));
-    let launcher_task = spawn_launcher_capture(
-        &socket_path,
-        500,
-        r#"{"error":"boom"}"#,
-        Arc::clone(&launcher_body),
+async fn request_headers_bearer_one_match_emits_set_authorization() {
+    let response = response_with_auth_mutation(Some("ghp_TEST"), false);
+    assert_eq!(
+        extract_set_header(&response, "authorization").as_deref(),
+        Some("Bearer ghp_TEST")
+    );
+    let removed = extract_removed_headers(&response);
+    assert!(!removed.contains(&"authorization".to_string()));
+    assert!(removed.contains(&"x-botwork-cap".to_string()));
+}
+
+#[tokio::test]
+async fn request_headers_bearer_no_match_returns_5xx_no_spawn() {
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[{"service":"shared","name":"secret","kind":"opaque","value_b64":"YWJj"}]}"#,
+        Arc::new(Mutex::new(None)),
     )
     .await;
     let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
-        path_to_string(&socket_path),
-        "http://127.0.0.1:1".to_string(),
+        "/tmp/missing-launcher.sock".to_string(),
+        auth_url,
         "/mcp",
-        UpstreamAuth::Bearer,
+        UpstreamAuth::Bearer {
+            service: "github.com".to_string(),
+        },
     );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -1154,17 +1220,85 @@ async fn request_headers_forwards_authorization_when_upstream_auth_bearer_spawn_
             (":method", "POST"),
             (":path", "/tenant1/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
         ]),
     )
     .await;
-    launcher_task.await.unwrap();
 
-    assert_eq!(immediate_status(&response), Some(502));
-    let removed = extract_removed_headers(&response_with_removed_headers_for_auth(
-        UpstreamAuth::Bearer,
-    ));
-    assert!(!removed.contains(&"authorization".to_string()));
-    assert!(removed.contains(&"x-botwork-cap".to_string()));
+    assert_eq!(immediate_status(&response), Some(500));
+    assert!(immediate_body(&response)
+        .unwrap_or_default()
+        .contains("configured upstream authorization secret was not found"));
+}
+
+#[tokio::test]
+async fn request_headers_bearer_multiple_matches_returns_5xx() {
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[{"service":"github.com","name":"pat","kind":"api-key","value_b64":"Z2hwX09ORQ=="},{"service":"github.com","name":"pat2","kind":"api-key","value_b64":"Z2hwX1RXTw=="}]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+        "/tmp/missing-launcher.sock".to_string(),
+        auth_url,
+        "/mcp",
+        UpstreamAuth::Bearer {
+            service: "github.com".to_string(),
+        },
+    );
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), Some(500));
+    assert!(immediate_body(&response)
+        .unwrap_or_default()
+        .contains("ambiguous upstream authorization secret"));
+}
+
+#[tokio::test]
+async fn request_headers_bearer_non_utf8_secret_returns_5xx() {
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[{"service":"github.com","name":"pat","kind":"api-key","value_b64":"//4="}]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+        "/tmp/missing-launcher.sock".to_string(),
+        auth_url,
+        "/mcp",
+        UpstreamAuth::Bearer {
+            service: "github.com".to_string(),
+        },
+    );
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), Some(500));
+    assert!(immediate_body(&response)
+        .unwrap_or_default()
+        .contains("must be valid UTF-8"));
 }
 
 #[tokio::test]
@@ -1253,6 +1387,44 @@ async fn cap_present_in_per_stream_state_after_request_headers() {
     )
     .await;
     assert_eq!(stream.cap.as_deref(), Some("cap-123"));
+}
+
+#[tokio::test]
+async fn bearer_value_not_logged_in_clear() {
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[{"service":"github.com","name":"pat","kind":"api-key","value_b64":"Z2hwX1NFQ1JFVA=="}]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+        "/tmp/missing-launcher.sock".to_string(),
+        auth_url,
+        "/mcp",
+        UpstreamAuth::Bearer {
+            service: "github.com".to_string(),
+        },
+    );
+
+    start_log_capture();
+    let mut stream = PerStreamState::default();
+    let _ = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    let logs = take_log_capture().join("\n");
+
+    assert!(
+        !logs.contains("ghp_SECRET"),
+        "logs should redact bearer values: {logs}"
+    );
 }
 
 fn path_to_string(path: &Path) -> String {
