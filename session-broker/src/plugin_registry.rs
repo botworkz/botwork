@@ -16,6 +16,43 @@ pub struct PluginConfig {
     pub port: u16,
     pub network: String,
     pub path: String,
+    pub upstream_auth: UpstreamAuth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpstreamAuth {
+    #[default]
+    None,
+    Bearer,
+}
+
+impl UpstreamAuth {
+    fn from_yaml_value(name: &str, value: &serde_yaml::Value) -> Result<Self, PluginRegistryError> {
+        if value.is_null() {
+            return Ok(Self::None);
+        }
+
+        let Some(raw_value) = value.as_str() else {
+            return Err(PluginRegistryError::Invalid(format!(
+                "plugin '{name}' has invalid 'upstream_auth': expected non-empty string; accepted values: none, bearer"
+            )));
+        };
+
+        let value = raw_value.trim();
+        if value.is_empty() {
+            return Err(PluginRegistryError::Invalid(format!(
+                "plugin '{name}' has invalid 'upstream_auth': expected non-empty string; accepted values: none, bearer"
+            )));
+        }
+
+        match value {
+            "none" => Ok(Self::None),
+            "bearer" => Ok(Self::Bearer),
+            _ => Err(PluginRegistryError::Invalid(format!(
+                "plugin '{name}' has invalid 'upstream_auth': expected one of none, bearer; got '{value}'"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -55,6 +92,7 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
         })?;
 
     let mut result = PluginRegistry::new();
+    let mut bearer_plugins = Vec::new();
 
     for (name_val, config_val) in plugins {
         let name = name_val.as_str().ok_or_else(|| {
@@ -153,6 +191,10 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
             }
             path.to_string()
         };
+        let upstream_auth = UpstreamAuth::from_yaml_value(name, &config_val["upstream_auth"])?;
+        if upstream_auth == UpstreamAuth::Bearer {
+            bearer_plugins.push(name.to_string());
+        }
 
         result.insert(
             name.to_string(),
@@ -161,8 +203,16 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
                 port,
                 network,
                 path,
+                upstream_auth,
             },
         );
+    }
+
+    for plugin_name in bearer_plugins {
+        crate::log_info(&format!(
+            "WARN: plugin '{}' is configured with upstream_auth=bearer; client Authorization will be forwarded to upstream",
+            plugin_name
+        ));
     }
 
     Ok(result)
@@ -226,6 +276,83 @@ mod tests {
             assert!(
                 err.contains("plugin 'p' has invalid 'path'") && err.contains(expected),
                 "error '{err}' should mention '{expected}'"
+            );
+        }
+    }
+
+    #[test]
+    fn load_upstream_auth_defaults_when_absent() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+",
+        );
+
+        let loaded = load(&path).expect("load plugins");
+        assert_eq!(loaded["p"].upstream_auth, UpstreamAuth::None);
+    }
+
+    #[test]
+    fn load_upstream_auth_explicit_none() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    upstream_auth: none
+",
+        );
+
+        let loaded = load(&path).expect("load plugins");
+        assert_eq!(loaded["p"].upstream_auth, UpstreamAuth::None);
+    }
+
+    #[test]
+    fn load_upstream_auth_bearer() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    upstream_auth: bearer
+",
+        );
+
+        let loaded = load(&path).expect("load plugins");
+        assert_eq!(loaded["p"].upstream_auth, UpstreamAuth::Bearer);
+    }
+
+    #[test]
+    fn load_rejects_unknown_upstream_auth() {
+        let cases = [
+            "upstream_auth: vault",
+            "upstream_auth: None",
+            "upstream_auth: \"\"",
+            "upstream_auth: \"   \"",
+            "upstream_auth: 42",
+            "upstream_auth:\n      mode: bearer",
+        ];
+
+        for upstream_auth in cases {
+            let dir = tempdir().expect("tempdir");
+            let path = write_plugins(
+                dir.path(),
+                &format!("plugins:\n  p:\n    image: botwork/mcp-p:local\n    {upstream_auth}\n"),
+            );
+            let err = load(&path).expect_err("invalid upstream_auth should fail");
+            let err = err.to_string();
+            assert!(
+                err.contains("plugin 'p' has invalid 'upstream_auth'"),
+                "error '{err}' should mention upstream_auth invalid"
+            );
+            assert!(
+                err.contains("none") && err.contains("bearer"),
+                "error '{err}' should list accepted values"
             );
         }
     }

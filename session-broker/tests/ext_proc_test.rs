@@ -3,13 +3,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use botwork_session_broker::ext_proc::{ExternalProcessorService, PerStreamState};
-use botwork_session_broker::plugin_registry::PluginConfig;
+use botwork_session_broker::ext_proc::{
+    upstream_header_mutation, ExternalProcessorService, PerStreamState,
+};
+use botwork_session_broker::plugin_registry::{PluginConfig, UpstreamAuth};
 use botwork_session_broker::session_registry::SessionRegistry;
 use botwork_session_broker::{AppState, PendingInit, TransportState};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use envoy_proto::envoy::service::ext_proc::v3::{
-    processing_response, HttpBody, HttpHeaders, ProcessingResponse,
+    processing_response, CommonResponse, HeadersResponse, HttpBody, HttpHeaders, ProcessingResponse,
 };
 use tempfile::tempdir;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -38,10 +40,24 @@ fn app_state_with_plugins_and_auth_and_path(
     auth_broker_url: String,
     plugin_path: &str,
 ) -> AppState {
+    app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+        launcher_socket_path,
+        auth_broker_url,
+        plugin_path,
+        UpstreamAuth::None,
+    )
+}
+
+fn app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+    plugin_path: &str,
+    upstream_auth: UpstreamAuth,
+) -> AppState {
     let mut plugin_registry = HashMap::new();
     plugin_registry.insert(
         "plugin-a".to_string(),
-        sample_plugin_config_with_path(plugin_path),
+        sample_plugin_config_with_path_and_auth(plugin_path, upstream_auth),
     );
     AppState {
         plugin_registry,
@@ -137,6 +153,24 @@ fn extract_removed_headers(response: &ProcessingResponse) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn response_with_removed_headers_for_auth(upstream_auth: UpstreamAuth) -> ProcessingResponse {
+    ProcessingResponse {
+        response: Some(processing_response::Response::RequestHeaders(
+            HeadersResponse {
+                response: Some(CommonResponse {
+                    header_mutation: Some(upstream_header_mutation(
+                        "mcp_session_abc:8000",
+                        Some("/mcp"),
+                        upstream_auth,
+                    )),
+                    ..CommonResponse::default()
+                }),
+            },
+        )),
+        ..ProcessingResponse::default()
+    }
+}
+
 fn sample_transport(tenant: &str, plugin: &str, container: &str) -> TransportState {
     sample_transport_with_path(tenant, plugin, container, "/mcp")
 }
@@ -163,11 +197,19 @@ fn sample_plugin_config() -> PluginConfig {
 }
 
 fn sample_plugin_config_with_path(path: &str) -> PluginConfig {
+    sample_plugin_config_with_path_and_auth(path, UpstreamAuth::None)
+}
+
+fn sample_plugin_config_with_path_and_auth(
+    path: &str,
+    upstream_auth: UpstreamAuth,
+) -> PluginConfig {
     PluginConfig {
         image: "botwork/plugin-a:local".to_string(),
         port: 8000,
         network: "botwork".to_string(),
         path: path.to_string(),
+        upstream_auth,
     }
 }
 
@@ -541,6 +583,93 @@ async fn request_headers_strips_x_botwork_cap_on_existing_session_route() {
     .await;
 
     assert!(extract_removed_headers(&response).contains(&"x-botwork-cap".to_string()));
+}
+
+#[tokio::test]
+async fn request_headers_strips_authorization_when_upstream_auth_none_existing_session() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    let removed = extract_removed_headers(&response);
+    assert!(removed.contains(&"authorization".to_string()));
+    assert!(removed.contains(&"x-botwork-cap".to_string()));
+}
+
+#[tokio::test]
+async fn request_headers_forwards_authorization_when_upstream_auth_bearer_existing_session() {
+    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+        "/tmp/no-launcher.sock".to_string(),
+        "http://127.0.0.1:1".to_string(),
+        "/mcp",
+        UpstreamAuth::Bearer,
+    );
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    let removed = extract_removed_headers(&response);
+    assert!(!removed.contains(&"authorization".to_string()));
+    assert!(removed.contains(&"x-botwork-cap".to_string()));
+}
+
+#[tokio::test]
+async fn request_headers_existing_session_missing_from_registry_falls_back_to_strip() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-missing", "mcp_session_abc"),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), None);
+    let removed = extract_removed_headers(&response);
+    assert!(removed.contains(&"authorization".to_string()));
+    assert!(removed.contains(&"x-botwork-cap".to_string()));
 }
 
 #[tokio::test]
@@ -959,6 +1088,83 @@ async fn spawn_without_cap_fetches_no_secrets_and_passes_empty_env() {
         serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
             .expect("launcher json");
     assert!(launcher_payload.get("env").is_none());
+}
+
+#[tokio::test]
+async fn request_headers_strips_authorization_when_upstream_auth_none_spawn_path() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+        "/mcp",
+        UpstreamAuth::None,
+    );
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+
+    assert_eq!(immediate_status(&response), Some(502));
+    let removed =
+        extract_removed_headers(&response_with_removed_headers_for_auth(UpstreamAuth::None));
+    assert!(removed.contains(&"authorization".to_string()));
+    assert!(removed.contains(&"x-botwork-cap".to_string()));
+}
+
+#[tokio::test]
+async fn request_headers_forwards_authorization_when_upstream_auth_bearer_spawn_path() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+        "/mcp",
+        UpstreamAuth::Bearer,
+    );
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+
+    assert_eq!(immediate_status(&response), Some(502));
+    let removed = extract_removed_headers(&response_with_removed_headers_for_auth(
+        UpstreamAuth::Bearer,
+    ));
+    assert!(!removed.contains(&"authorization".to_string()));
+    assert!(removed.contains(&"x-botwork-cap".to_string()));
 }
 
 #[tokio::test]
