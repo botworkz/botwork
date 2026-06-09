@@ -45,30 +45,21 @@ impl UpstreamAuth {
             "bearer" | "bearer/" => Err(PluginRegistryError::Invalid(format!(
                 "plugin '{name}' has invalid 'upstream_auth': bearer requires a service: use bearer/<service>"
             ))),
-            _ if value.starts_with("bearer/") => {
-                let service = &value["bearer/".len()..];
-                if service.is_empty() {
-                    return Err(PluginRegistryError::Invalid(format!(
-                        "plugin '{name}' has invalid 'upstream_auth': bearer requires a service: use bearer/<service>"
-                    )));
+            _ => {
+                if let Some(service) = value.strip_prefix("bearer/") {
+                    if !service.is_empty()
+                        && !service.contains('/')
+                        && !service.chars().any(char::is_whitespace)
+                    {
+                        return Ok(Self::Bearer {
+                            service: service.to_string(),
+                        });
+                    }
                 }
-                if service.contains('/') {
-                    return Err(PluginRegistryError::Invalid(format!(
-                        "plugin '{name}' has invalid 'upstream_auth': unknown form '{value}'"
-                    )));
-                }
-                if service.chars().any(char::is_whitespace) {
-                    return Err(PluginRegistryError::Invalid(format!(
-                        "plugin '{name}' has invalid 'upstream_auth': expected 'none' or 'bearer/<service>'"
-                    )));
-                }
-                Ok(Self::Bearer {
-                    service: service.to_string(),
-                })
+                Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{name}' has invalid 'upstream_auth': expected 'none' or 'bearer/<service>'"
+                )))
             }
-            _ => Err(PluginRegistryError::Invalid(format!(
-                "plugin '{name}' has invalid 'upstream_auth': expected 'none' or 'bearer/<service>'"
-            ))),
         }
     }
 }
@@ -383,24 +374,6 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_bearer_three_segment() {
-        let dir = tempdir().expect("tempdir");
-        let path = write_plugins(
-            dir.path(),
-            "plugins:
-  p:
-    image: botwork/mcp-p:local
-    upstream_auth: bearer/github.com/pat
-",
-        );
-
-        let err = load(&path).expect_err("invalid upstream_auth should fail");
-        let err = err.to_string();
-        assert!(err.contains("plugin 'p' has invalid 'upstream_auth'"));
-        assert!(err.contains("unknown form 'bearer/github.com/pat'"));
-    }
-
-    #[test]
     fn load_rejects_bearer_empty_service() {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
@@ -427,6 +400,8 @@ mod tests {
             "upstream_auth: \"   \"",
             "upstream_auth: 42",
             "upstream_auth:\n      mode: bearer",
+            "upstream_auth: bearer/github.com/pat",
+            "upstream_auth: \"bearer/foo bar\"",
         ];
 
         for upstream_auth in cases {

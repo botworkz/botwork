@@ -7,7 +7,7 @@ pub mod session_registry;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -27,22 +27,30 @@ pub fn redact_token(value: &str) -> String {
     format!("{prefix}…")
 }
 
-static LOG_CAPTURE: OnceLock<StdMutex<Option<Vec<String>>>> = OnceLock::new();
+/// Test-only helpers. Not part of the stable public API; required at module
+/// scope (rather than `#[cfg(test)]`) because integration tests under `tests/`
+/// compile against the crate's public surface and cannot see `cfg(test)` items.
+#[doc(hidden)]
+pub mod test_support {
+    use std::sync::{Mutex as StdMutex, OnceLock};
 
-fn log_capture() -> &'static StdMutex<Option<Vec<String>>> {
-    LOG_CAPTURE.get_or_init(|| StdMutex::new(None))
-}
+    static LOG_CAPTURE: OnceLock<StdMutex<Option<Vec<String>>>> = OnceLock::new();
 
-pub fn start_log_capture() {
-    *log_capture().lock().expect("lock log capture") = Some(Vec::new());
-}
+    pub(crate) fn log_capture() -> &'static StdMutex<Option<Vec<String>>> {
+        LOG_CAPTURE.get_or_init(|| StdMutex::new(None))
+    }
 
-pub fn take_log_capture() -> Vec<String> {
-    log_capture()
-        .lock()
-        .expect("lock log capture")
-        .take()
-        .unwrap_or_default()
+    pub fn start_log_capture() {
+        *log_capture().lock().expect("lock log capture") = Some(Vec::new());
+    }
+
+    pub fn take_log_capture() -> Vec<String> {
+        log_capture()
+            .lock()
+            .expect("lock log capture")
+            .take()
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone)]
@@ -116,7 +124,11 @@ pub struct AppState {
 pub fn log_info(message: &str) {
     let formatted = format!("{PREFIX} {message}");
     println!("{formatted}");
-    if let Some(entries) = log_capture().lock().expect("lock log capture").as_mut() {
+    if let Some(entries) = test_support::log_capture()
+        .lock()
+        .expect("lock log capture")
+        .as_mut()
+    {
         entries.push(formatted);
     }
 }
