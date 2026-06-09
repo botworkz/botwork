@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use crate::log_info;
+use crate::{log_info, redact_token};
 
 const MAX_ENV_ENTRIES: usize = 64;
 const MAX_ENV_VALUE_BYTES: usize = 64 * 1024;
@@ -55,91 +55,135 @@ pub async fn fetch_secrets(
     request_timeout: Duration,
 ) -> Result<Vec<FetchedSecret>, SecretsError> {
     let endpoint = format!("{}/secrets/fetch", broker_url.trim_end_matches('/'));
-    let uri: Uri = endpoint
-        .parse()
-        .map_err(|e| SecretsError::Transport(format!("invalid auth broker URL: {e}")))?;
-    let host = uri
-        .host()
-        .ok_or_else(|| SecretsError::Transport("missing host in auth broker URL".to_string()))?
-        .to_string();
-    let port = uri.port_u16().unwrap_or(80);
-    let authority = if let Some(explicit_port) = uri.port_u16() {
-        format!("{host}:{explicit_port}")
-    } else {
-        host.clone()
-    };
-    let path = uri
-        .path_and_query()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| "/secrets/fetch".to_string());
+    log_info(&format!(
+        "secrets/fetch: calling auth-broker cap={} url={endpoint}",
+        redact_token(cap)
+    ));
 
-    let mut sender = timeout(request_timeout, async {
-        let stream = TcpStream::connect((host.as_str(), port))
-            .await
-            .map_err(|e| SecretsError::Transport(e.to_string()))?;
-        let io = TokioIo::new(stream);
-        let (sender, conn) = http1::handshake(io)
-            .await
-            .map_err(|e| SecretsError::Transport(e.to_string()))?;
-        tokio::spawn(async move {
-            if let Err(err) = conn.await {
-                log_info(&format!("auth-broker HTTP connection error: {err}"));
-            }
-        });
-        Ok::<_, SecretsError>(sender)
-    })
-    .await
-    .map_err(|e| SecretsError::Transport(e.to_string()))??;
+    let result = async {
+        let uri: Uri = endpoint
+            .parse()
+            .map_err(|e| SecretsError::Transport(format!("invalid auth broker URL: {e}")))?;
+        let host = uri
+            .host()
+            .ok_or_else(|| SecretsError::Transport("missing host in auth broker URL".to_string()))?
+            .to_string();
+        let port = uri.port_u16().unwrap_or(80);
+        let authority = if let Some(explicit_port) = uri.port_u16() {
+            format!("{host}:{explicit_port}")
+        } else {
+            host.clone()
+        };
+        let path = uri
+            .path_and_query()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_else(|| "/secrets/fetch".to_string());
 
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(format!("http://{authority}{path}"))
-        .header("Host", authority)
-        .header("x-botwork-cap", cap)
-        .header("Content-Length", "0")
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| SecretsError::Transport(e.to_string()))?;
-
-    let response = timeout(request_timeout, sender.send_request(request))
-        .await
-        .map_err(|e| SecretsError::Transport(e.to_string()))?
-        .map_err(|e| SecretsError::Transport(e.to_string()))?;
-    let status = response.status().as_u16();
-    let response_body = response
-        .into_body()
-        .collect()
-        .await
-        .map_err(|e| SecretsError::Transport(e.to_string()))?
-        .to_bytes()
-        .to_vec();
-
-    if status == 401 {
-        return Err(SecretsError::Unauthorized);
-    }
-    if status != 200 {
-        return Err(SecretsError::BadResponse(format!(
-            "HTTP {status}: {}",
-            String::from_utf8_lossy(&response_body).trim()
-        )));
-    }
-
-    let parsed: FetchSecretsResponse = serde_json::from_slice(&response_body)
-        .map_err(|e| SecretsError::BadResponse(format!("invalid JSON: {e}")))?;
-    parsed
-        .secrets
-        .into_iter()
-        .map(|secret| {
-            let value = STANDARD
-                .decode(secret.value_b64.as_bytes())
-                .map_err(|e| SecretsError::BadResponse(format!("invalid base64 value: {e}")))?;
-            Ok(FetchedSecret {
-                service: secret.service,
-                name: secret.name,
-                kind: secret.kind,
-                value,
-            })
+        let mut sender = timeout(request_timeout, async {
+            let stream = TcpStream::connect((host.as_str(), port))
+                .await
+                .map_err(|e| SecretsError::Transport(e.to_string()))?;
+            let io = TokioIo::new(stream);
+            let (sender, conn) = http1::handshake(io)
+                .await
+                .map_err(|e| SecretsError::Transport(e.to_string()))?;
+            tokio::spawn(async move {
+                if let Err(err) = conn.await {
+                    log_info(&format!("auth-broker HTTP connection error: {err}"));
+                }
+            });
+            Ok::<_, SecretsError>(sender)
         })
-        .collect()
+        .await
+        .map_err(|e| SecretsError::Transport(e.to_string()))??;
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("http://{authority}{path}"))
+            .header("Host", authority)
+            .header("x-botwork-cap", cap)
+            .header("Content-Length", "0")
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| SecretsError::Transport(e.to_string()))?;
+
+        let response = timeout(request_timeout, sender.send_request(request))
+            .await
+            .map_err(|e| SecretsError::Transport(e.to_string()))?
+            .map_err(|e| SecretsError::Transport(e.to_string()))?;
+        let status = response.status().as_u16();
+        let response_body = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| SecretsError::Transport(e.to_string()))?
+            .to_bytes()
+            .to_vec();
+
+        if status == 401 {
+            return Err(SecretsError::Unauthorized);
+        }
+        if status != 200 {
+            return Err(SecretsError::BadResponse(format!(
+                "HTTP {status}: {}",
+                String::from_utf8_lossy(&response_body).trim()
+            )));
+        }
+
+        let parsed: FetchSecretsResponse = serde_json::from_slice(&response_body)
+            .map_err(|e| SecretsError::BadResponse(format!("invalid JSON: {e}")))?;
+        parsed
+            .secrets
+            .into_iter()
+            .map(|secret| {
+                let value = STANDARD
+                    .decode(secret.value_b64.as_bytes())
+                    .map_err(|e| SecretsError::BadResponse(format!("invalid base64 value: {e}")))?;
+                Ok(FetchedSecret {
+                    service: secret.service,
+                    name: secret.name,
+                    kind: secret.kind,
+                    value,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+    .await;
+
+    match &result {
+        Ok(secrets) => {
+            let services = secret_services(secrets);
+            log_info(&format!(
+                "secrets/fetch: ok secrets={} services=[{}]",
+                secrets.len(),
+                services.join(",")
+            ));
+        }
+        Err(SecretsError::Unauthorized) => {
+            log_info("secrets/fetch: error variant=SecretsError::Unauthorized");
+        }
+        Err(SecretsError::Transport(err)) => {
+            log_info(&format!(
+                "secrets/fetch: error variant=SecretsError::Transport err={err}"
+            ));
+        }
+        Err(SecretsError::BadResponse(err)) => {
+            log_info(&format!(
+                "secrets/fetch: error variant=SecretsError::BadResponse err={err}"
+            ));
+        }
+    }
+
+    result
+}
+
+fn secret_services(secrets: &[FetchedSecret]) -> Vec<String> {
+    let mut services: Vec<String> = secrets
+        .iter()
+        .map(|secret| secret.service.clone())
+        .collect();
+    services.sort();
+    services.dedup();
+    services
 }
 
 /// Maps auth-broker secrets to launcher env entries:
@@ -210,7 +254,8 @@ fn sanitize_segment(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use crate::test_support::{start_log_capture, take_log_capture};
+    use std::sync::{Arc, OnceLock};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
@@ -222,6 +267,11 @@ mod tests {
             kind: "api-key".to_string(),
             value: value.to_vec(),
         }
+    }
+
+    fn log_capture_lock() -> &'static Mutex<()> {
+        static LOG_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOG_CAPTURE_LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -295,6 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_secrets_decodes_value_b64() {
+        let _guard = log_capture_lock().lock().await;
         let captured_cap = Arc::new(Mutex::new(None));
         let url = spawn_http_server(
             200,
@@ -302,9 +353,13 @@ mod tests {
             Arc::clone(&captured_cap),
         )
         .await;
+
+        start_log_capture();
         let secrets = fetch_secrets(&url, "cap-123", Duration::from_secs(2))
             .await
             .expect("fetch succeeds");
+        let logs = take_log_capture().join("\n");
+
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].service, "github.com");
         assert_eq!(secrets[0].name, "pat");
@@ -313,32 +368,73 @@ mod tests {
             captured_cap.lock().await.clone().as_deref(),
             Some("cap-123")
         );
+        assert!(
+            logs.contains("secrets/fetch: ok secrets=1 services=[github.com]"),
+            "missing success summary log: {logs}"
+        );
+        assert!(
+            logs.contains("secrets/fetch: calling auth-broker cap=cap-12…"),
+            "missing call log with redacted cap: {logs}"
+        );
+        assert!(
+            !logs.contains("ghp_xxx"),
+            "logs should not contain decoded secret values: {logs}"
+        );
+        assert!(
+            !logs.contains("Z2hwX3h4eA=="),
+            "logs should not contain value_b64: {logs}"
+        );
+        assert!(
+            !logs.contains("cap-123"),
+            "logs should not contain full capability token: {logs}"
+        );
     }
 
     #[tokio::test]
     async fn fetch_secrets_returns_unauthorized_for_401() {
+        let _guard = log_capture_lock().lock().await;
         let url = spawn_http_server(401, "{}", Arc::new(Mutex::new(None))).await;
+        start_log_capture();
         let err = fetch_secrets(&url, "cap", Duration::from_secs(2))
             .await
             .expect_err("expected unauthorized");
+        let logs = take_log_capture().join("\n");
         assert!(matches!(err, SecretsError::Unauthorized));
+        assert!(
+            logs.contains("variant=SecretsError::Unauthorized"),
+            "missing unauthorized variant log: {logs}"
+        );
     }
 
     #[tokio::test]
     async fn fetch_secrets_returns_bad_response_for_non_json() {
+        let _guard = log_capture_lock().lock().await;
         let url = spawn_http_server(200, "not-json", Arc::new(Mutex::new(None))).await;
+        start_log_capture();
         let err = fetch_secrets(&url, "cap", Duration::from_secs(2))
             .await
             .expect_err("expected bad response");
+        let logs = take_log_capture().join("\n");
         assert!(matches!(err, SecretsError::BadResponse(_)));
+        assert!(
+            logs.contains("variant=SecretsError::BadResponse"),
+            "missing bad response variant log: {logs}"
+        );
     }
 
     #[tokio::test]
     async fn fetch_secrets_returns_transport_for_unreachable_url() {
+        let _guard = log_capture_lock().lock().await;
+        start_log_capture();
         let err = fetch_secrets("http://127.0.0.1:1", "cap", Duration::from_secs(1))
             .await
             .expect_err("expected transport error");
+        let logs = take_log_capture().join("\n");
         assert!(matches!(err, SecretsError::Transport(_)));
+        assert!(
+            logs.contains("variant=SecretsError::Transport"),
+            "missing transport variant log: {logs}"
+        );
     }
 
     async fn spawn_http_server(
