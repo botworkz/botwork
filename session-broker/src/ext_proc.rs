@@ -25,7 +25,7 @@ use crate::plugin_registry::{PluginConfig, UpstreamAuth};
 use crate::secrets;
 use crate::session_registry::utc_now;
 use crate::{
-    log_info, redact_token, AppState, PendingInit, TransportState, COLD_START_TIMEOUT,
+    log_info, log_warn, redact_token, AppState, PendingInit, TransportState, COLD_START_TIMEOUT,
     TENANT_PLUGIN_PATH_RE, TENANT_RE,
 };
 
@@ -380,12 +380,12 @@ fn resolve_spawn_upstream_authorization(
             Ok(value) => {
                 let trimmed = value.trim_end();
                 if trimmed.len() != value.len() {
-                    log_info(&format!(
+                    log_warn(&format!(
                         "upstream_auth: bearer/{service} warning: trimmed trailing whitespace from resolved secret tenant={tenant_name} plugin={plugin_name}"
                     ));
                 }
                 if trimmed.is_empty() {
-                    log_info(&format!(
+                    log_warn(&format!(
                         "upstream_auth: bearer/{service} warning: resolved secret is empty after trimming — spawn will fail tenant={tenant_name} plugin={plugin_name}"
                     ));
                     return Err(
@@ -393,7 +393,7 @@ fn resolve_spawn_upstream_authorization(
                     );
                 }
                 if trimmed.chars().any(|ch| ch.is_control()) {
-                    log_info(&format!(
+                    log_warn(&format!(
                         "upstream_auth: bearer/{service} warning: resolved secret contains control characters — spawn will fail tenant={tenant_name} plugin={plugin_name}"
                     ));
                     return Err(
