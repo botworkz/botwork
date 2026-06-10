@@ -376,20 +376,44 @@ fn resolve_spawn_upstream_authorization(
             ));
             Err("configured upstream authorization secret was not found".to_string())
         }
-        [secret] => std::str::from_utf8(&secret.value)
-            .map(|value| {
+        [secret] => match std::str::from_utf8(&secret.value) {
+            Ok(value) => {
+                let trimmed = value.trim_end();
+                if trimmed.len() != value.len() {
+                    log_info(&format!(
+                        "upstream_auth: bearer/{service} warning: trimmed trailing whitespace from resolved secret tenant={tenant_name} plugin={plugin_name}"
+                    ));
+                }
+                if trimmed.is_empty() {
+                    log_info(&format!(
+                        "upstream_auth: bearer/{service} warning: resolved secret is empty after trimming — spawn will fail tenant={tenant_name} plugin={plugin_name}"
+                    ));
+                    return Err(
+                        "configured upstream authorization secret must not be empty".to_string()
+                    );
+                }
+                if trimmed.chars().any(|ch| ch.is_control()) {
+                    log_info(&format!(
+                        "upstream_auth: bearer/{service} warning: resolved secret contains control characters — spawn will fail tenant={tenant_name} plugin={plugin_name}"
+                    ));
+                    return Err(
+                        "configured upstream authorization secret contains control characters"
+                            .to_string(),
+                    );
+                }
                 log_info(&format!(
                     "upstream_auth: bearer/{service} resolved (token={}) tenant={tenant_name} plugin={plugin_name}",
-                    redact_token(value)
+                    redact_token(trimmed)
                 ));
-                Some(value.to_string())
-            })
-            .map_err(|_| {
+                Ok(Some(trimmed.to_string()))
+            }
+            Err(_) => {
                 log_info(&format!(
                     "upstream_auth: bearer/{service} matched non-UTF-8 secret for tenant={tenant_name} plugin={plugin_name}"
                 ));
-                "configured upstream authorization secret must be valid UTF-8".to_string()
-            }),
+                Err("configured upstream authorization secret must be valid UTF-8".to_string())
+            }
+        },
         matches => {
             let mut matching_names: Vec<String> =
                 matches.iter().map(|secret| secret.name.clone()).collect();
@@ -1500,6 +1524,80 @@ mod tests {
         assert!(
             !logs.contains("ghp_SECRET"),
             "logs should not contain raw bearer token: {logs}"
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_upstream_authorization_bearer_trims_trailing_whitespace() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let resolved = resolve_spawn_upstream_authorization(
+            "tenant1",
+            "plugin-a",
+            &UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+            &[test_secret("github.com", "pat", b"ghp_SECRET\n\r\t ")],
+        )
+        .expect("single match should resolve");
+        let logs = take_log_capture().join("\n");
+
+        assert_eq!(resolved.as_deref(), Some("ghp_SECRET"));
+        assert!(
+            logs.contains("warning: trimmed trailing whitespace from resolved secret"),
+            "missing trailing whitespace warning log: {logs}"
+        );
+        assert!(
+            logs.contains(&redact_token("ghp_SECRET")),
+            "missing redacted trimmed token in logs: {logs}"
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_upstream_authorization_bearer_rejects_control_characters() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let err = resolve_spawn_upstream_authorization(
+            "tenant1",
+            "plugin-a",
+            &UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+            &[test_secret("github.com", "pat", b"ghp_SE\nCRET")],
+        )
+        .expect_err("control characters should fail");
+        let logs = take_log_capture().join("\n");
+
+        assert!(err.contains("control characters"));
+        assert!(
+            logs.contains("warning: resolved secret contains control characters"),
+            "missing control character warning log: {logs}"
+        );
+        assert!(
+            !logs.contains("ghp_SE\nCRET"),
+            "logs should not contain raw bearer token: {logs}"
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_upstream_authorization_bearer_rejects_empty_after_trim() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let err = resolve_spawn_upstream_authorization(
+            "tenant1",
+            "plugin-a",
+            &UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+            &[test_secret("github.com", "pat", b"\n\t ")],
+        )
+        .expect_err("empty after trim should fail");
+        let logs = take_log_capture().join("\n");
+
+        assert!(err.contains("must not be empty"));
+        assert!(
+            logs.contains("warning: resolved secret is empty after trimming"),
+            "missing empty-after-trim warning log: {logs}"
         );
     }
 
