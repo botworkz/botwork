@@ -133,6 +133,18 @@ pub fn log_info(message: &str) {
     }
 }
 
+pub fn log_warn(message: &str) {
+    let formatted = format!("{PREFIX} WARN {message}");
+    println!("{formatted}");
+    if let Some(entries) = test_support::log_capture()
+        .lock()
+        .expect("lock log capture")
+        .as_mut()
+    {
+        entries.push(formatted);
+    }
+}
+
 pub async fn run() -> Result<(), String> {
     let plugin_registry_path = std::env::var("BOTWORK_PLUGIN_REGISTRY_PATH")
         .unwrap_or_else(|_| "/etc/botwork/plugins.yaml".to_string());
