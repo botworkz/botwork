@@ -95,7 +95,18 @@ jobs:
         VERSION="${{ steps.version.outputs.version }}"
         REPO="ghcr.io/botworkz/botwork/session-broker"
         # Platform is pinned in Earthfile via FROM DOCKERFILE --platform=linux/amd64.
-        earthly +session-broker-image
+        earthly --no-cache --build-arg GIT_SHA="${GITHUB_SHA}" +session-broker-image
+        expected="${GITHUB_SHA}"
+        actual="$(docker image inspect botwork/session-broker:local \
+          --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+        if [[ "${actual}" != "${expected}" ]]; then
+          echo "ERROR: built image has revision label '${actual}' but workflow was triggered by commit '${expected}'." >&2
+          echo "Refusing to push a release container whose provenance does not match the triggering commit." >&2
+          echo "Also dumping all labels on the built image for diagnosis:" >&2
+          docker image inspect botwork/session-broker:local --format '{{ json .Config.Labels }}' >&2
+          exit 1
+        fi
+        echo "verified: image revision label matches GITHUB_SHA (${expected})"
         docker tag botwork/session-broker:local "${REPO}:${VERSION}"
         docker tag botwork/session-broker:local "${REPO}:latest"
         docker push "${REPO}:${VERSION}"
