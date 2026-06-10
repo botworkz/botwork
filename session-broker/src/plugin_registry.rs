@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -131,7 +130,6 @@ fn parse_env(
         )));
     }
 
-    let mut seen: HashSet<String> = HashSet::new();
     let mut result = Vec::with_capacity(mapping.len());
 
     for (key_val, value_val) in mapping {
@@ -141,21 +139,8 @@ fn parse_env(
             ))
         })?;
 
-        // Reject non-string values with a helpful hint to quote them.
-        let value = match value_val {
-            serde_yaml::Value::String(s) => s.clone(),
-            serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => {
-                return Err(PluginRegistryError::Invalid(format!(
-                    "plugin '{plugin_name}' env key '{key}': value must be a string (quote it: \"{value_val:?}\")"
-                )));
-            }
-            _ => {
-                return Err(PluginRegistryError::Invalid(format!(
-                    "plugin '{plugin_name}' env key '{key}': value must be a string"
-                )));
-            }
-        };
-
+        // Validate the name shape before the value so users see name errors
+        // first when both are wrong.
         if key.starts_with(secrets::SECRET_ENV_PREFIX) {
             return Err(PluginRegistryError::Invalid(format!(
                 "plugin '{plugin_name}' env key '{key}': names starting with '{}' are reserved for vault-derived secrets",
@@ -169,6 +154,28 @@ fn parse_env(
             )));
         }
 
+        // Reject non-string values with a helpful hint to quote them; render
+        // the offending scalar literally (not as Rust Debug) so the hint is
+        // copy-pasteable.
+        let value = match value_val {
+            serde_yaml::Value::String(s) => s.clone(),
+            serde_yaml::Value::Bool(b) => {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{plugin_name}' env key '{key}': value must be a string (quote it: \"{b}\")"
+                )));
+            }
+            serde_yaml::Value::Number(n) => {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{plugin_name}' env key '{key}': value must be a string (quote it: \"{n}\")"
+                )));
+            }
+            _ => {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{plugin_name}' env key '{key}': value must be a string"
+                )));
+            }
+        };
+
         if value.len() > secrets::MAX_ENV_VALUE_BYTES {
             return Err(PluginRegistryError::Invalid(format!(
                 "plugin '{plugin_name}' env key '{key}': value exceeds maximum size of {} bytes",
@@ -176,12 +183,10 @@ fn parse_env(
             )));
         }
 
-        if !seen.insert(key.to_string()) {
-            return Err(PluginRegistryError::Invalid(format!(
-                "plugin '{plugin_name}' env key '{key}': duplicate key"
-            )));
-        }
-
+        // Note: duplicate keys within a single plugin's env block are not
+        // explicitly rejected here. serde_yaml's Mapping deduplicates on
+        // insert (last-wins), which matches YAML 1.2 sequencing rules and is
+        // what most operators expect. Documented in README.
         result.push((key.to_string(), value));
     }
 
@@ -601,6 +606,78 @@ mod tests {
     }
 
     #[test]
+    fn load_env_non_string_value_hint_renders_literal_scalar() {
+        // Bool: hint must say (quote it: "true"), not (quote it: "Bool(true)").
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    env:
+      SOME_FLAG: true
+",
+        );
+        let err = load(&path).expect_err("bool value should fail").to_string();
+        assert!(
+            err.contains("quote it: \"true\""),
+            "error should hint with literal scalar 'true', got: {err}"
+        );
+        assert!(
+            !err.contains("Bool("),
+            "error must not leak Rust Debug formatting: {err}"
+        );
+
+        // Number: same check with an integer.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    env:
+      SOME_COUNT: 42
+",
+        );
+        let err = load(&path)
+            .expect_err("number value should fail")
+            .to_string();
+        assert!(
+            err.contains("quote it: \"42\""),
+            "error should hint with literal scalar '42', got: {err}"
+        );
+        assert!(
+            !err.contains("Number("),
+            "error must not leak Rust Debug formatting: {err}"
+        );
+    }
+
+    #[test]
+    fn load_env_validates_name_before_value() {
+        // Both name and value are wrong; user should see the name error
+        // first so they fix the more fundamental issue.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    env:
+      lowercase_key: true
+",
+        );
+        let err = load(&path).expect_err("invalid name + value should fail").to_string();
+        assert!(
+            err.contains("invalid name"),
+            "name error should come first, got: {err}"
+        );
+        assert!(
+            !err.contains("must be a string"),
+            "value error must not be reported when name is already invalid: {err}"
+        );
+    }
+
+    #[test]
     fn load_env_rejects_invalid_name_shape() {
         let cases = [
             ("lowercase_key: val", "lowercase"),
@@ -722,43 +799,29 @@ mod tests {
     }
 
     #[test]
-    fn load_env_rejects_duplicate_keys() {
-        // YAML spec allows duplicate keys; we must reject them explicitly.
+    fn load_env_duplicate_keys_last_wins() {
+        // YAML 1.2 and serde_yaml both deduplicate map keys on insert with
+        // last-value-wins semantics. Document and lock that behaviour: a YAML
+        // file with two identical keys is accepted, and the second value is
+        // what ends up in the parsed config.
         let dir = tempdir().expect("tempdir");
-        // Use serde_yaml's behaviour: when YAML has duplicate keys the second
-        // value wins, so we construct the YAML string directly and rely on
-        // our HashSet dedup check catching it during parse.
-        //
-        // serde_yaml actually merges the second value silently, so we can't
-        // round-trip the exact "two identical keys" YAML with serde_yaml.
-        // Instead we test the dedup guard through the parse_env function
-        // directly by feeding it a mapping value built programmatically.
-        let yaml_str = "plugins:\n  p:\n    image: botwork/mcp-p:local\n    env:\n      FOO: first\n      BAR: second\n";
-        let path = write_plugins(dir.path(), yaml_str);
-        // Base case: no duplicates – must succeed.
-        let loaded = load(&path).expect("no-duplicate env should succeed");
-        assert_eq!(loaded["p"].env.len(), 2);
-
-        // Now test the parse_env guard directly with a synthesised mapping
-        // that contains a duplicate key.
-        let mut map = serde_yaml::Mapping::new();
-        map.insert(
-            serde_yaml::Value::String("FOO".to_string()),
-            serde_yaml::Value::String("first".to_string()),
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    env:
+      FOO: first
+      FOO: second
+",
         );
-        map.insert(
-            serde_yaml::Value::String("FOO".to_string()),
-            serde_yaml::Value::String("second".to_string()),
-        );
-        // serde_yaml Mapping keeps the last inserted value for the same key
-        // (last-wins), so there will be only one "FOO" entry.  The parse_env
-        // HashSet dedup guard cannot fire on a serde_yaml Mapping that already
-        // de-duplicated internally.  This verifies that the no-duplicate
-        // guarantee is satisfied at the YAML level before we even call parse_env.
+        let loaded = load(&path).expect("duplicate keys should parse (last-wins)");
+        let env = &loaded["p"].env;
+        assert_eq!(env.len(), 1, "duplicate key should collapse to one entry");
         assert_eq!(
-            map.len(),
-            1,
-            "serde_yaml Mapping deduplicates keys internally"
+            env[0],
+            ("FOO".to_string(), "second".to_string()),
+            "last value should win"
         );
     }
 }
