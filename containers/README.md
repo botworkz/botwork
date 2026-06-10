@@ -23,6 +23,11 @@ earthly +session-broker-image
 
 This produces `botwork/session-broker:local`.
 
+> **Release builds** stamp the image with `org.opencontainers.image.revision` set to `$GITHUB_SHA`
+> and verify the label matches before pushing to GHCR — if there is ever a mismatch the workflow
+> fails rather than silently shipping the wrong image. Local builds (and PR builds) do not pass
+> `GIT_SHA`, so the label will be empty, which is fine — the check only runs in the release path.
+
 `botworkz/vm` consumes this cross-repo in sibling/local mode
 via `FROM ../botwork+session-broker-image`, so the `+session-broker-image` target
 name and `botwork/session-broker:local` tag are a stable contract.

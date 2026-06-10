@@ -25,6 +25,10 @@ RUN cargo build --release --package botwork-session-broker
 # Runtime
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
 
+ARG GIT_SHA=""
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
+LABEL org.opencontainers.image.source="https://github.com/botworkz/botwork"
+
 # Rust's precompiled std links libgcc_s.so.1 as NEEDED (stack unwinder),
 # and panic = "abort" doesn't drop it because std itself was built
 # upstream with panic = "unwind". base-nossl doesn't ship libgcc_s,
