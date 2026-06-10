@@ -46,7 +46,9 @@ plugins:
   with a clear error suggesting the user quote the value.
 - Values are capped at 64 KiB.
 - At most 32 entries per plugin.
-- Duplicate keys within a single plugin's `env:` are rejected.
+- Duplicate keys within a single plugin's `env:` follow YAML 1.2 semantics:
+  the last value wins. This matches how `serde_yaml` and most other YAML
+  loaders behave, so the file's surface meaning is preserved.
 
 Bad config causes broker startup to fail immediately with a message naming the
 offending plugin and field.
