@@ -230,6 +230,7 @@ fn sample_plugin_config_with_path_and_auth(
         network: "botwork".to_string(),
         path: path.to_string(),
         upstream_auth,
+        env: vec![],
     }
 }
 
@@ -1429,6 +1430,189 @@ async fn bearer_value_not_logged_in_clear() {
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn app_state_with_plugin_env(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+    static_env: Vec<(String, String)>,
+) -> AppState {
+    let mut plugin_registry = HashMap::new();
+    plugin_registry.insert(
+        "plugin-a".to_string(),
+        PluginConfig {
+            image: "botwork/plugin-a:local".to_string(),
+            port: 8000,
+            network: "botwork".to_string(),
+            path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::None,
+            env: static_env,
+        },
+    );
+    AppState {
+        plugin_registry,
+        session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
+        transport_sessions: Arc::new(Mutex::new(HashMap::new())),
+        pending_init: Arc::new(Mutex::new(HashMap::new())),
+        launcher_socket_path,
+        auth_broker_url,
+    }
+}
+
+#[tokio::test]
+async fn spawn_static_env_appears_in_launcher_payload() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let state = app_state_with_plugin_env(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+        vec![
+            ("GITHUB_TOOLSETS".to_string(), "default,actions".to_string()),
+            ("GITHUB_TERSE_DESCRIPTIONS".to_string(), "true".to_string()),
+        ],
+    );
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    let env = launcher_payload["env"].as_array().expect("env array");
+    let env_names: Vec<&str> = env
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name"))
+        .collect();
+    assert!(
+        env_names.contains(&"GITHUB_TOOLSETS"),
+        "expected GITHUB_TOOLSETS in env: {env_names:?}"
+    );
+    assert!(
+        env_names.contains(&"GITHUB_TERSE_DESCRIPTIONS"),
+        "expected GITHUB_TERSE_DESCRIPTIONS in env: {env_names:?}"
+    );
+    let toolsets_entry = env
+        .iter()
+        .find(|e| e["name"] == "GITHUB_TOOLSETS")
+        .expect("GITHUB_TOOLSETS entry");
+    assert_eq!(toolsets_entry["value"], "default,actions");
+}
+
+#[tokio::test]
+async fn spawn_static_env_appears_before_secrets() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[{"service":"github.com","name":"pat","kind":"api-key","value_b64":"Z2hwX3h4eA=="}]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+
+    let state = app_state_with_plugin_env(
+        path_to_string(&socket_path),
+        auth_url,
+        vec![("GITHUB_TOOLSETS".to_string(), "default,actions".to_string())],
+    );
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    let env = launcher_payload["env"].as_array().expect("env array");
+    let env_names: Vec<&str> = env
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name"))
+        .collect();
+    // Static env first, then secrets.
+    assert_eq!(
+        env_names,
+        vec!["GITHUB_TOOLSETS", "BOTWORK_SECRET_GITHUB_COM_PAT"],
+        "static env must precede secrets"
+    );
+}
+
+#[tokio::test]
+async fn spawn_static_env_present_when_no_cap() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let state = app_state_with_plugin_env(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+        vec![("GITHUB_TOOLSETS".to_string(), "default,actions".to_string())],
+    );
+    let mut stream = PerStreamState::default();
+    // No x-botwork-cap header — no secrets fetch.
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    let env = launcher_payload["env"].as_array().expect("env array");
+    assert_eq!(env.len(), 1);
+    assert_eq!(env[0]["name"], "GITHUB_TOOLSETS");
+    assert_eq!(env[0]["value"], "default,actions");
 }
 
 async fn spawn_launcher_capture(

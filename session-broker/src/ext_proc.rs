@@ -858,13 +858,38 @@ impl ExternalProcessorService {
                 }
                 _ => Vec::new(),
             };
-            let env = secrets::build_env_entries(&fetched_secrets);
+            let secret_env = secrets::build_env_entries(&fetched_secrets);
+            let static_env_count = plugin_config.env.len();
+            let mut env: Vec<(String, String)> = Vec::with_capacity(
+                static_env_count + secret_env.len(),
+            );
+            // Static plugin env first (deterministic config), secrets appended after.
+            env.extend(plugin_config.env.iter().cloned());
+            for entry in &secret_env {
+                if env.len() >= secrets::MAX_ENV_ENTRIES {
+                    log_info(&format!(
+                        "spawn_secrets tenant={} plugin={} total env cap reached; truncating secrets",
+                        stream.trusted_tenant, plugin_name
+                    ));
+                    break;
+                }
+                // Defensive: BOTWORK_SECRET_ prefix is reserved; static env cannot collide.
+                if entry.0.starts_with(secrets::SECRET_ENV_PREFIX) {
+                    env.push(entry.clone());
+                } else {
+                    log_info(&format!(
+                        "spawn_secrets unexpected non-secret env name from secrets: {}; skipping",
+                        entry.0
+                    ));
+                }
+            }
             log_info(&format!(
-                "spawn_secrets tenant={} plugin={} cap_present={} secrets_injected={}",
+                "spawn_secrets tenant={} plugin={} cap_present={} static_env={} secrets_injected={}",
                 stream.trusted_tenant,
                 plugin_name,
                 matches!(stream.cap.as_deref(), Some(cap) if !cap.is_empty()),
-                env.len()
+                static_env_count,
+                secret_env.len()
             ));
             let upstream_authorization = match resolve_spawn_upstream_authorization(
                 &stream.trusted_tenant,
@@ -1223,6 +1248,7 @@ mod tests {
             network: "botwork".to_string(),
             path: "/mcp".to_string(),
             upstream_auth,
+            env: vec![],
         }
     }
 
