@@ -575,10 +575,7 @@ mod tests {
         let env = &loaded["p"].env;
         assert_eq!(env.len(), 2);
         assert!(env.contains(&("GITHUB_TOOLSETS".to_string(), "default,actions".to_string())));
-        assert!(env.contains(&(
-            "GITHUB_TERSE_DESCRIPTIONS".to_string(),
-            "true".to_string()
-        )));
+        assert!(env.contains(&("GITHUB_TERSE_DESCRIPTIONS".to_string(), "true".to_string())));
     }
 
     #[test]
@@ -666,7 +663,9 @@ mod tests {
       lowercase_key: true
 ",
         );
-        let err = load(&path).expect_err("invalid name + value should fail").to_string();
+        let err = load(&path)
+            .expect_err("invalid name + value should fail")
+            .to_string();
         assert!(
             err.contains("invalid name"),
             "name error should come first, got: {err}"
@@ -734,7 +733,10 @@ mod tests {
         );
         let err = load(&path).expect_err("BOTWORK_SECRET_ prefix should fail");
         let err = err.to_string();
-        assert!(err.contains("plugin 'p'"), "error should mention plugin: {err}");
+        assert!(
+            err.contains("plugin 'p'"),
+            "error should mention plugin: {err}"
+        );
         assert!(
             err.contains("BOTWORK_SECRET_"),
             "error should mention the reserved prefix: {err}"
@@ -772,7 +774,10 @@ mod tests {
         );
         let err = load(&path).expect_err("oversized value should fail");
         let err = err.to_string();
-        assert!(err.contains("plugin 'p'"), "error should mention plugin: {err}");
+        assert!(
+            err.contains("plugin 'p'"),
+            "error should mention plugin: {err}"
+        );
         assert!(
             err.contains("exceeds maximum size"),
             "error should mention size: {err}"
@@ -781,9 +786,7 @@ mod tests {
 
     #[test]
     fn load_env_rejects_more_than_32_entries() {
-        let entries: String = (0..33)
-            .map(|i| format!("      KEY_{i}: value\n"))
-            .collect();
+        let entries: String = (0..33).map(|i| format!("      KEY_{i}: value\n")).collect();
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
@@ -791,7 +794,10 @@ mod tests {
         );
         let err = load(&path).expect_err("more than 32 entries should fail");
         let err = err.to_string();
-        assert!(err.contains("plugin 'p'"), "error should mention plugin: {err}");
+        assert!(
+            err.contains("plugin 'p'"),
+            "error should mention plugin: {err}"
+        );
         assert!(
             err.contains("too many"),
             "error should mention count: {err}"
