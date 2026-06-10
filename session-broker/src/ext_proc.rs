@@ -1580,6 +1580,28 @@ mod tests {
     }
 
     #[test]
+    fn resolve_spawn_upstream_authorization_bearer_rejects_leading_control_characters() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let err = resolve_spawn_upstream_authorization(
+            "tenant1",
+            "plugin-a",
+            &UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+            &[test_secret("github.com", "pat", b"\nghp_SECRET")],
+        )
+        .expect_err("leading control characters should fail");
+        let logs = take_log_capture().join("\n");
+
+        assert!(err.contains("control characters"));
+        assert!(
+            logs.contains("warning: resolved secret contains control characters"),
+            "missing control character warning log: {logs}"
+        );
+    }
+
+    #[test]
     fn resolve_spawn_upstream_authorization_bearer_rejects_empty_after_trim() {
         let _guard = log_capture_guard();
         start_log_capture();
