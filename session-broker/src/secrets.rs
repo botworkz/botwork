@@ -14,9 +14,9 @@ use tokio::time::timeout;
 
 use crate::{log_info, redact_token};
 
-const MAX_ENV_ENTRIES: usize = 64;
-const MAX_ENV_VALUE_BYTES: usize = 64 * 1024;
-const SECRET_ENV_PREFIX: &str = "BOTWORK_SECRET_";
+pub(crate) const MAX_ENV_ENTRIES: usize = 64;
+pub(crate) const MAX_ENV_VALUE_BYTES: usize = 64 * 1024;
+pub(crate) const SECRET_ENV_PREFIX: &str = "BOTWORK_SECRET_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedSecret {

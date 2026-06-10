@@ -19,6 +19,46 @@ Auth-broker fetch errors are fail-open: spawn continues with no injected
 secrets, so control-plane/auth-broker issues do not take down the MCP data
 plane.
 
+## Plugin registry: `env`
+
+Each plugin in `/etc/botwork/plugins.yaml` may declare a static, non-secret
+`env:` mapping. These env vars are injected into every spawned container for
+that plugin, regardless of whether a `x-botwork-cap` header is present.
+
+```yaml
+plugins:
+  github:
+    image: botwork/mcp-github:local
+    upstream_auth: bearer/github.com
+    env:
+      GITHUB_TOOLSETS: default,actions
+      GITHUB_TERSE_DESCRIPTIONS: "true"
+```
+
+### Rules
+
+- The field is optional and defaults to empty.
+- Keys must match `[A-Z_][A-Z0-9_]*`, must not be in the reserved set
+  (`PATH`, `HOME`, `USER`, `LD_PRELOAD`, `LD_LIBRARY_PATH`), must not start
+  with `DOCKER_`, and must not start with `BOTWORK_SECRET_` (reserved for
+  vault-derived entries).
+- Non-string YAML scalars (booleans, integers) are **rejected at parse time**
+  with a clear error suggesting the user quote the value.
+- Values are capped at 64 KiB.
+- At most 32 entries per plugin.
+- Duplicate keys within a single plugin's `env:` are rejected.
+
+Bad config causes broker startup to fail immediately with a message naming the
+offending plugin and field.
+
+### Merge order
+
+When a container is spawned the final `env` array sent to the launcher is
+built as: **static plugin env first, then vault-derived secrets**. This keeps
+the `BOTWORK_SECRET_*` block contiguous at the end for easy scanning in logs.
+The combined list is capped at 64 entries; if `static + secrets > 64`,
+secrets are truncated (not static env).
+
 ## Plugin registry: `upstream_auth`
 
 `/etc/botwork/plugins.yaml` supports `upstream_auth` per plugin with this
