@@ -29,6 +29,9 @@ struct LaunchRequest<'a> {
     network: &'a str,
     staging_path: &'a str,
     with_workspace: bool,
+    pids_limit: Option<u32>,
+    cpu_limit: Option<&'a str>,
+    memory_limit: Option<&'a str>,
     env: Vec<(String, String)>,
 }
 
@@ -91,8 +94,15 @@ async fn handle_launch(
             with_workspace: launch.with_workspace,
             plugin_uid: state.config.plugin_uid,
             plugin_gid: state.config.plugin_gid,
-            pids_limit: state.config.container_pids_limit,
-            memory_limit: &state.config.container_memory_limit,
+            pids_limit: launch
+                .pids_limit
+                .unwrap_or(state.config.container_pids_limit),
+            cpu_limit: launch
+                .cpu_limit
+                .unwrap_or(&state.config.container_cpu_limit),
+            memory_limit: launch
+                .memory_limit
+                .unwrap_or(&state.config.container_memory_limit),
             read_only_rootfs: state.config.container_read_only_rootfs,
             env: &launch.env,
         },
@@ -256,6 +266,55 @@ fn parse_launch_payload<'a>(
             ))
         }
     };
+    let (cpu_limit, memory_limit, pids_limit) = match payload.get("resources") {
+        None | Some(Value::Null) => (None, None, None),
+        Some(Value::Object(resources)) => {
+            for key in resources.keys() {
+                if key != "cpus" && key != "memory" && key != "pids" {
+                    return Err(LauncherError::BadRequest("invalid resources".to_string()));
+                }
+            }
+
+            let cpu_limit = match resources.get("cpus") {
+                None => None,
+                Some(Value::String(limit)) if !limit.is_empty() => Some(limit.as_str()),
+                _ => {
+                    return Err(LauncherError::BadRequest(
+                        "invalid resources.cpus".to_string(),
+                    ))
+                }
+            };
+            let memory_limit = match resources.get("memory") {
+                None => None,
+                Some(Value::String(limit)) if !limit.is_empty() => Some(limit.as_str()),
+                _ => {
+                    return Err(LauncherError::BadRequest(
+                        "invalid resources.memory".to_string(),
+                    ))
+                }
+            };
+            let pids_limit = match resources.get("pids") {
+                None => None,
+                Some(Value::Number(value)) => Some(
+                    value
+                        .as_u64()
+                        .filter(|value| *value >= 1 && *value <= u32::MAX as u64)
+                        .map(|value| value as u32)
+                        .ok_or_else(|| {
+                            LauncherError::BadRequest("invalid resources.pids".to_string())
+                        })?,
+                ),
+                _ => {
+                    return Err(LauncherError::BadRequest(
+                        "invalid resources.pids".to_string(),
+                    ))
+                }
+            };
+
+            (cpu_limit, memory_limit, pids_limit)
+        }
+        Some(_) => return Err(LauncherError::BadRequest("invalid resources".to_string())),
+    };
 
     let env = match payload.get("env") {
         None | Some(Value::Null) => Vec::new(),
@@ -318,6 +377,9 @@ fn parse_launch_payload<'a>(
         network,
         staging_path,
         with_workspace,
+        pids_limit,
+        cpu_limit,
+        memory_limit,
         env,
     })
 }
@@ -675,6 +737,105 @@ mod tests {
             parse_launch_payload(&payload, &validators),
             Err(LauncherError::PayloadTooLarge(msg)) if msg == "env value too large"
         ));
+    }
+
+    #[test]
+    fn launch_payload_resources_omitted_or_null_defaults_to_none() {
+        let validators = validators();
+        let payload = valid_launch_payload();
+        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        assert_eq!(parsed.cpu_limit, None);
+        assert_eq!(parsed.memory_limit, None);
+        assert_eq!(parsed.pids_limit, None);
+
+        let mut payload = valid_launch_payload();
+        payload.insert("resources".to_string(), Value::Null);
+        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        assert_eq!(parsed.cpu_limit, None);
+        assert_eq!(parsed.memory_limit, None);
+        assert_eq!(parsed.pids_limit, None);
+    }
+
+    #[test]
+    fn launch_payload_resources_accepts_partial_overrides() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "resources".to_string(),
+            serde_json::json!({
+                "memory": "4g",
+                "pids": 1024
+            }),
+        );
+
+        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        assert_eq!(parsed.cpu_limit, None);
+        assert_eq!(parsed.memory_limit, Some("4g"));
+        assert_eq!(parsed.pids_limit, Some(1024));
+    }
+
+    #[test]
+    fn launch_payload_resources_rejects_invalid_shape_and_unknown_keys() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert("resources".to_string(), Value::String("4g".to_string()));
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid resources"
+        ));
+
+        payload.insert(
+            "resources".to_string(),
+            serde_json::json!({
+                "memory": "4g",
+                "memory_limit": "4g"
+            }),
+        );
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid resources"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_resources_rejects_invalid_fields() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+
+        for resources in [
+            serde_json::json!({"cpus": ""}),
+            serde_json::json!({"cpus": 1}),
+        ] {
+            payload.insert("resources".to_string(), resources);
+            assert!(matches!(
+                parse_launch_payload(&payload, &validators),
+                Err(LauncherError::BadRequest(msg)) if msg == "invalid resources.cpus"
+            ));
+        }
+
+        for resources in [
+            serde_json::json!({"memory": ""}),
+            serde_json::json!({"memory": 1}),
+        ] {
+            payload.insert("resources".to_string(), resources);
+            assert!(matches!(
+                parse_launch_payload(&payload, &validators),
+                Err(LauncherError::BadRequest(msg)) if msg == "invalid resources.memory"
+            ));
+        }
+
+        for resources in [
+            serde_json::json!({"pids": 0}),
+            serde_json::json!({"pids": -1}),
+            serde_json::json!({"pids": 1.5}),
+            serde_json::json!({"pids": "1"}),
+        ] {
+            payload.insert("resources".to_string(), resources);
+            assert!(matches!(
+                parse_launch_payload(&payload, &validators),
+                Err(LauncherError::BadRequest(msg)) if msg == "invalid resources.pids"
+            ));
+        }
     }
 
     #[tokio::test]

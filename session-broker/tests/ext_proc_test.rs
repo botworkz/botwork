@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use botwork_session_broker::ext_proc::{
     upstream_header_mutation, ExternalProcessorService, PerStreamState,
 };
-use botwork_session_broker::plugin_registry::{PluginConfig, UpstreamAuth};
+use botwork_session_broker::plugin_registry::{PluginConfig, PluginResources, UpstreamAuth};
 use botwork_session_broker::session_registry::SessionRegistry;
 use botwork_session_broker::test_support::{start_log_capture, take_log_capture};
 use botwork_session_broker::{AppState, PendingInit, TransportState};
@@ -231,6 +231,7 @@ fn sample_plugin_config_with_path_and_auth(
         path: path.to_string(),
         upstream_auth,
         env: vec![],
+        resources: PluginResources::default(),
     }
 }
 
@@ -1437,6 +1438,20 @@ fn app_state_with_plugin_env(
     auth_broker_url: String,
     static_env: Vec<(String, String)>,
 ) -> AppState {
+    app_state_with_plugin_env_and_resources(
+        launcher_socket_path,
+        auth_broker_url,
+        static_env,
+        PluginResources::default(),
+    )
+}
+
+fn app_state_with_plugin_env_and_resources(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+    static_env: Vec<(String, String)>,
+    resources: PluginResources,
+) -> AppState {
     let mut plugin_registry = HashMap::new();
     plugin_registry.insert(
         "plugin-a".to_string(),
@@ -1447,6 +1462,7 @@ fn app_state_with_plugin_env(
             path: "/mcp".to_string(),
             upstream_auth: UpstreamAuth::None,
             env: static_env,
+            resources,
         },
     );
     AppState {
@@ -1515,6 +1531,51 @@ async fn spawn_static_env_appears_in_launcher_payload() {
         .find(|e| e["name"] == "GITHUB_TOOLSETS")
         .expect("GITHUB_TOOLSETS entry");
     assert_eq!(toolsets_entry["value"], "default,actions");
+}
+
+#[tokio::test]
+async fn spawn_plugin_resources_appear_in_launcher_payload() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let state = app_state_with_plugin_env_and_resources(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+        vec![],
+        PluginResources {
+            cpus: Some("4.0".to_string()),
+            memory: Some("4g".to_string()),
+            pids: Some(1024),
+        },
+    );
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    assert_eq!(launcher_payload["resources"]["cpus"], "4.0");
+    assert_eq!(launcher_payload["resources"]["memory"], "4g");
+    assert_eq!(launcher_payload["resources"]["pids"], 1024);
 }
 
 #[tokio::test]

@@ -41,6 +41,7 @@ async fn wire_contract_validation_paths() {
         plugin_gid: 1000,
         image_allowlist_regex: r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$".to_string(),
         container_pids_limit: 256,
+        container_cpu_limit: "1.0".to_string(),
         container_memory_limit: "512m".to_string(),
         container_read_only_rootfs: false,
     };
@@ -143,6 +144,7 @@ async fn wire_contract_rejects_large_request_bodies() {
         plugin_gid: 1000,
         image_allowlist_regex: r"^(botspace|botwork)/[a-z0-9_-]+:[a-z0-9._-]+$".to_string(),
         container_pids_limit: 256,
+        container_cpu_limit: "1.0".to_string(),
         container_memory_limit: "512m".to_string(),
         container_read_only_rootfs: false,
     };

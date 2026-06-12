@@ -490,6 +490,7 @@ async fn spawn_new_container(
         &staging_path,
         &plugin_config.network,
         env,
+        &plugin_config.resources,
     )
     .await?;
     if let Ok(serialized) = serde_json::to_string(&launch_result) {
@@ -1233,7 +1234,7 @@ pub async fn serve_grpc(state: AppState, addr: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_registry::PluginRegistry;
+    use crate::plugin_registry::{PluginRegistry, PluginResources};
     use crate::session_registry::SessionRegistry;
     use crate::test_support::{start_log_capture, take_log_capture};
     use std::collections::HashMap;
@@ -1248,6 +1249,7 @@ mod tests {
             path: "/mcp".to_string(),
             upstream_auth,
             env: vec![],
+            resources: PluginResources::default(),
         }
     }
 

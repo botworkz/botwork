@@ -4,7 +4,9 @@ use tokio::sync::Mutex;
 
 use axum::body::Body;
 use botwork_session_broker::admin::build_router;
-use botwork_session_broker::plugin_registry::{self, PluginRegistryError, UpstreamAuth};
+use botwork_session_broker::plugin_registry::{
+    self, PluginRegistryError, PluginResources, UpstreamAuth,
+};
 use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
 use botwork_session_broker::AppState;
 use http::Request;
@@ -39,12 +41,14 @@ fn plugin_registry_valid_load() {
     assert_eq!(fs.network, "botwork");
     assert_eq!(fs.path, "/");
     assert_eq!(fs.upstream_auth, UpstreamAuth::None);
+    assert_eq!(fs.resources, PluginResources::default());
 
     let echo = loaded.get("echo").unwrap();
     assert_eq!(echo.port, 9000);
     assert_eq!(echo.network, "custom");
     assert_eq!(echo.path, "/mcp");
     assert_eq!(echo.upstream_auth, UpstreamAuth::None);
+    assert_eq!(echo.resources, PluginResources::default());
 }
 
 #[test]
