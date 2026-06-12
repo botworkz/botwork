@@ -28,6 +28,7 @@ pub struct PluginConfig {
     pub path: String,
     pub upstream_auth: UpstreamAuth,
     pub env: Vec<(String, String)>,
+    pub resources: PluginResources,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -37,6 +38,13 @@ pub enum UpstreamAuth {
     Bearer {
         service: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginResources {
+    pub cpus: Option<String>,
+    pub memory: Option<String>,
+    pub pids: Option<u32>,
 }
 
 impl UpstreamAuth {
@@ -188,6 +196,78 @@ fn parse_env(
     Ok(result)
 }
 
+fn parse_resources(
+    plugin_name: &str,
+    config_val: &serde_yaml::Value,
+) -> Result<PluginResources, PluginRegistryError> {
+    let resources_val = &config_val["resources"];
+    if resources_val.is_null() {
+        return Ok(PluginResources::default());
+    }
+    let mapping = resources_val.as_mapping().ok_or_else(|| {
+        PluginRegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'resources': expected a mapping"
+        ))
+    })?;
+
+    let mut resources = PluginResources::default();
+    for (key_val, value_val) in mapping {
+        let key = key_val.as_str().ok_or_else(|| {
+            PluginRegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'resources' key: expected string"
+            ))
+        })?;
+        match key {
+            "cpus" => {
+                let value = value_val.as_str().ok_or_else(|| {
+                    PluginRegistryError::Invalid(format!(
+                        "plugin '{plugin_name}' has invalid 'resources.cpus': expected non-empty string"
+                    ))
+                })?;
+                if value.is_empty() {
+                    return Err(PluginRegistryError::Invalid(format!(
+                        "plugin '{plugin_name}' has invalid 'resources.cpus': expected non-empty string"
+                    )));
+                }
+                resources.cpus = Some(value.to_string());
+            }
+            "memory" => {
+                let value = value_val.as_str().ok_or_else(|| {
+                    PluginRegistryError::Invalid(format!(
+                        "plugin '{plugin_name}' has invalid 'resources.memory': expected non-empty string"
+                    ))
+                })?;
+                if value.is_empty() {
+                    return Err(PluginRegistryError::Invalid(format!(
+                        "plugin '{plugin_name}' has invalid 'resources.memory': expected non-empty string"
+                    )));
+                }
+                resources.memory = Some(value.to_string());
+            }
+            "pids" => {
+                let value = value_val.as_u64().ok_or_else(|| {
+                    PluginRegistryError::Invalid(format!(
+                        "plugin '{plugin_name}' has invalid 'resources.pids': expected integer 1-4294967295"
+                    ))
+                })?;
+                if value == 0 || value > u32::MAX as u64 {
+                    return Err(PluginRegistryError::Invalid(format!(
+                        "plugin '{plugin_name}' has invalid 'resources.pids': expected integer 1-4294967295"
+                    )));
+                }
+                resources.pids = Some(value as u32);
+            }
+            _ => {
+                return Err(PluginRegistryError::Invalid(format!(
+                    "plugin '{plugin_name}' has invalid 'resources' key: {key}"
+                )))
+            }
+        }
+    }
+
+    Ok(resources)
+}
+
 pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
     if !std::path::Path::new(path).exists() {
         return Err(PluginRegistryError::NotFound(path.to_string()));
@@ -315,6 +395,7 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
         };
         let upstream_auth = UpstreamAuth::from_yaml_value(name, &config_val["upstream_auth"])?;
         let env = parse_env(name, config_val)?;
+        let resources = parse_resources(name, config_val)?;
 
         result.insert(
             name.to_string(),
@@ -325,6 +406,7 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
                 path,
                 upstream_auth,
                 env,
+                resources,
             },
         );
     }
@@ -551,6 +633,104 @@ mod tests {
         );
         let loaded = load(&path).expect("load plugins");
         assert!(loaded["p"].env.is_empty());
+    }
+
+    #[test]
+    fn load_resources_defaults_when_absent() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert_eq!(loaded["p"].resources, PluginResources::default());
+    }
+
+    #[test]
+    fn load_resources_accepts_partial_overrides() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    resources:
+      memory: 4g
+      pids: 1024
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert_eq!(
+            loaded["p"].resources,
+            PluginResources {
+                cpus: None,
+                memory: Some("4g".to_string()),
+                pids: Some(1024),
+            }
+        );
+    }
+
+    #[test]
+    fn load_resources_rejects_invalid_shape_and_unknown_keys() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    resources: 123
+",
+        );
+        let err = load(&path).expect_err("invalid resources");
+        assert!(err
+            .to_string()
+            .contains("invalid 'resources': expected a mapping"));
+
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    resources:
+      memory_limit: 4g
+",
+        );
+        let err = load(&path).expect_err("unknown resources key");
+        assert!(err
+            .to_string()
+            .contains("invalid 'resources' key: memory_limit"));
+    }
+
+    #[test]
+    fn load_resources_rejects_invalid_values() {
+        let cases = [
+            ("cpus: \"\"", "resources.cpus"),
+            ("cpus: 1", "resources.cpus"),
+            ("memory: \"\"", "resources.memory"),
+            ("memory: 1", "resources.memory"),
+            ("pids: 0", "resources.pids"),
+            ("pids: -1", "resources.pids"),
+            ("pids: 1.5", "resources.pids"),
+            ("pids: \"1\"", "resources.pids"),
+        ];
+        for (entry, expected) in cases {
+            let dir = tempdir().expect("tempdir");
+            let path = write_plugins(
+                dir.path(),
+                &format!(
+                    "plugins:\n  p:\n    image: botwork/mcp-p:local\n    resources:\n      {entry}\n"
+                ),
+            );
+            let err = load(&path).expect_err("invalid resources value");
+            assert!(
+                err.to_string().contains(expected),
+                "error should mention {expected}: {err}"
+            );
+        }
     }
 
     #[test]
