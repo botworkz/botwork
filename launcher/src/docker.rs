@@ -15,6 +15,7 @@ pub struct ContainerLaunch<'a> {
     pub plugin_uid: u32,
     pub plugin_gid: u32,
     pub pids_limit: u32,
+    pub cpu_limit: &'a str,
     pub memory_limit: &'a str,
     pub read_only_rootfs: bool,
     pub env: &'a [(String, String)],
@@ -170,6 +171,8 @@ fn docker_run_args(request: &ContainerLaunch<'_>) -> Vec<String> {
         request.pids_limit.to_string(),
         "--memory".to_string(),
         request.memory_limit.to_string(),
+        "--cpus".to_string(),
+        request.cpu_limit.to_string(),
     ];
 
     for (name, value) in request.env {
@@ -222,6 +225,7 @@ mod tests {
             plugin_uid: 1000,
             plugin_gid: 1000,
             pids_limit: 256,
+            cpu_limit: "1.0",
             memory_limit: "512m",
             read_only_rootfs: true,
             env: &[],
@@ -231,6 +235,7 @@ mod tests {
         assert!(args.contains(&"--security-opt=no-new-privileges".to_string()));
         assert!(args.windows(2).any(|pair| pair == ["--pids-limit", "256"]));
         assert!(args.windows(2).any(|pair| pair == ["--memory", "512m"]));
+        assert!(args.windows(2).any(|pair| pair == ["--cpus", "1.0"]));
         assert!(!args.contains(&"-e".to_string()));
         assert!(args.contains(&"--read-only".to_string()));
         assert!(args.windows(2).any(|pair| pair == ["--user", "1000:1000"]));
@@ -254,6 +259,7 @@ mod tests {
             plugin_uid: 1000,
             plugin_gid: 1000,
             pids_limit: 256,
+            cpu_limit: "1.0",
             memory_limit: "512m",
             read_only_rootfs: false,
             env: &env,
@@ -291,6 +297,7 @@ mod tests {
             plugin_uid: 1000,
             plugin_gid: 1000,
             pids_limit: 256,
+            cpu_limit: "1.0",
             memory_limit: "512m",
             read_only_rootfs: false,
             env: &env,

@@ -6,6 +6,7 @@ pub const DEFAULT_SOCKET_PATH: &str = "/run/botwork/launcher.sock";
 // Override with BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX when needed.
 pub const DEFAULT_IMAGE_ALLOWLIST: &str = r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$";
 pub const DEFAULT_CONTAINER_PIDS_LIMIT: u32 = 256;
+pub const DEFAULT_CONTAINER_CPU_LIMIT: &str = "1.0";
 pub const DEFAULT_CONTAINER_MEMORY_LIMIT: &str = "512m";
 
 #[derive(Clone, Debug)]
@@ -18,6 +19,7 @@ pub struct Config {
     pub plugin_gid: u32,
     pub image_allowlist_regex: String,
     pub container_pids_limit: u32,
+    pub container_cpu_limit: String,
     pub container_memory_limit: String,
     pub container_read_only_rootfs: bool,
 }
@@ -63,6 +65,11 @@ impl Config {
             .unwrap_or_else(|_| DEFAULT_CONTAINER_PIDS_LIMIT.to_string())
             .parse::<u32>()
             .map_err(|err| format!("invalid BOTWORK_LAUNCHER_PIDS_LIMIT: {err}"))?;
+        let container_cpu_limit = env::var("BOTWORK_LAUNCHER_CPU_LIMIT")
+            .unwrap_or_else(|_| DEFAULT_CONTAINER_CPU_LIMIT.to_string());
+        if container_cpu_limit.trim().is_empty() {
+            return Err("invalid BOTWORK_LAUNCHER_CPU_LIMIT: must not be empty".to_string());
+        }
         let container_memory_limit = env::var("BOTWORK_LAUNCHER_MEMORY_LIMIT")
             .unwrap_or_else(|_| DEFAULT_CONTAINER_MEMORY_LIMIT.to_string());
         if container_memory_limit.trim().is_empty() {
@@ -80,6 +87,7 @@ impl Config {
             plugin_gid,
             image_allowlist_regex,
             container_pids_limit,
+            container_cpu_limit,
             container_memory_limit,
             container_read_only_rootfs,
         })
@@ -164,8 +172,14 @@ fn group_lookup_buffer_len() -> usize {
 #[cfg(test)]
 mod tests {
     use std::ffi::CStr;
+    use std::sync::{Mutex, OnceLock};
 
-    use super::{parse_bool_env, resolve_group_spec};
+    use super::{parse_bool_env, resolve_group_spec, Config, DEFAULT_CONTAINER_CPU_LIMIT};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn resolve_group_spec_accepts_numeric_gid() {
@@ -196,6 +210,25 @@ mod tests {
             parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect("missing bool"),
             None
         );
+    }
+
+    #[test]
+    fn from_env_uses_default_cpu_limit_when_unset() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::remove_var("BOTWORK_LAUNCHER_CPU_LIMIT");
+        let config = Config::from_env().expect("config");
+        assert_eq!(config.container_cpu_limit, DEFAULT_CONTAINER_CPU_LIMIT);
+    }
+
+    #[test]
+    fn from_env_rejects_empty_cpu_limit() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_CPU_LIMIT", "   ");
+        assert_eq!(
+            Config::from_env().expect_err("empty cpu limit should fail"),
+            "invalid BOTWORK_LAUNCHER_CPU_LIMIT: must not be empty"
+        );
+        std::env::remove_var("BOTWORK_LAUNCHER_CPU_LIMIT");
     }
 
     fn current_group_name(gid: u32) -> String {

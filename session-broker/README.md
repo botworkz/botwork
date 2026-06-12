@@ -59,6 +59,25 @@ the `BOTWORK_SECRET_*` block contiguous at the end for easy scanning in logs.
 The combined list is capped at 64 entries; if `static + secrets > 64`,
 secrets are truncated (not static env).
 
+## Plugin registry: `resources`
+
+Each plugin may optionally define per-plugin launcher resource overrides:
+
+```yaml
+plugins:
+  cargo:
+    image: botwork/mcp-cargo:local
+    resources:
+      cpus: "4.0"
+      memory: "4g"
+      pids: 1024
+```
+
+- Any of `cpus`, `memory`, and `pids` may be omitted.
+- `cpus`/`memory` must be non-empty strings; `pids` must be an integer in `1..=4294967295`.
+- Unknown keys under `resources` are rejected at broker startup.
+- Broker forwards this block to launcher `/launch`; omitted fields fall back to launcher defaults.
+
 ## Plugin registry: `upstream_auth`
 
 `/etc/botwork/plugins.yaml` supports `upstream_auth` per plugin with this

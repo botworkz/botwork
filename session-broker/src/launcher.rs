@@ -10,6 +10,7 @@ use tokio::net::{TcpStream, UnixStream};
 use tokio::time::timeout;
 
 use crate::log_info;
+use crate::plugin_registry::PluginResources;
 use crate::PROBE_SLEEP;
 
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +92,7 @@ pub async fn launch_session(
     staging_path: &str,
     network: &str,
     env: &[(String, String)],
+    resources: &PluginResources,
 ) -> Result<Value, LauncherError> {
     let mut payload = serde_json::Map::from_iter([
         ("name".to_string(), Value::String(name.to_string())),
@@ -115,6 +117,19 @@ pub async fn launch_session(
                     .collect(),
             ),
         );
+    }
+    if resources.cpus.is_some() || resources.memory.is_some() || resources.pids.is_some() {
+        let mut resources_payload = serde_json::Map::new();
+        if let Some(cpus) = &resources.cpus {
+            resources_payload.insert("cpus".to_string(), Value::String(cpus.to_string()));
+        }
+        if let Some(memory) = &resources.memory {
+            resources_payload.insert("memory".to_string(), Value::String(memory.to_string()));
+        }
+        if let Some(pids) = resources.pids {
+            resources_payload.insert("pids".to_string(), Value::Number(pids.into()));
+        }
+        payload.insert("resources".to_string(), Value::Object(resources_payload));
     }
     let (status, body) = launcher_post(
         socket_path,
@@ -204,7 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn launcher_post_omits_env_when_slice_empty() {
-        let body = capture_launch_body(&[]).await;
+        let body = capture_launch_body(&[], &PluginResources::default()).await;
         assert!(!body.contains("\"env\""));
     }
 
@@ -214,7 +229,7 @@ mod tests {
             ("BOTWORK_SECRET_A".to_string(), "1".to_string()),
             ("BOTWORK_SECRET_B".to_string(), "2".to_string()),
         ];
-        let body = capture_launch_body(&env).await;
+        let body = capture_launch_body(&env, &PluginResources::default()).await;
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("json body");
         let names: Vec<&str> = parsed["env"]
             .as_array()
@@ -225,7 +240,27 @@ mod tests {
         assert_eq!(names, vec!["BOTWORK_SECRET_A", "BOTWORK_SECRET_B"]);
     }
 
-    async fn capture_launch_body(env: &[(String, String)]) -> String {
+    #[tokio::test]
+    async fn launcher_post_omits_resources_when_unset() {
+        let body = capture_launch_body(&[], &PluginResources::default()).await;
+        assert!(!body.contains("\"resources\""));
+    }
+
+    #[tokio::test]
+    async fn launcher_post_includes_resources_when_set() {
+        let resources = PluginResources {
+            cpus: Some("4.0".to_string()),
+            memory: Some("4g".to_string()),
+            pids: Some(1024),
+        };
+        let body = capture_launch_body(&[], &resources).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        assert_eq!(parsed["resources"]["cpus"], "4.0");
+        assert_eq!(parsed["resources"]["memory"], "4g");
+        assert_eq!(parsed["resources"]["pids"], 1024);
+    }
+
+    async fn capture_launch_body(env: &[(String, String)], resources: &PluginResources) -> String {
         let temp = tempdir().expect("tempdir");
         let socket_path = temp.path().join("launcher.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
@@ -259,6 +294,7 @@ Connection: close
             "/tmp/staging",
             "botwork",
             env,
+            resources,
         )
         .await
         .expect("launch succeeds");

@@ -50,6 +50,7 @@ The socket-activated path does **not** chmod/chown the inherited fd; set `Socket
 - `BOTWORK_LAUNCHER_ALLOWED_GID=<gid>`: allow peers whose `SO_PEERCRED` gid matches
   - if neither is set, the launcher defaults to its own effective uid/gid for local development; production should set the broker uid/gid explicitly
 - `BOTWORK_LAUNCHER_PIDS_LIMIT=<count>`: docker `--pids-limit` for plugin containers (default `256`)
+- `BOTWORK_LAUNCHER_CPU_LIMIT=<value>`: docker `--cpus` for plugin containers (default `1.0`)
 - `BOTWORK_LAUNCHER_MEMORY_LIMIT=<value>`: docker `--memory` for plugin containers (default `512m`)
 - `BOTWORK_LAUNCHER_READ_ONLY_ROOTFS=<true|false>`: opt-in `--read-only` root fs for plugin containers; left off by default because some plugins still need writable runtime paths
 - `BOTWORK_PLUGIN_UID=<uid>` / `BOTWORK_PLUGIN_GID=<gid>`: uid/gid passed to `docker run --user`
@@ -66,6 +67,13 @@ The socket group/mode and the `SO_PEERCRED` allowlist are deliberate belt-and-br
 - Additional guardrails: max 64 env entries, max value length 64 KiB, duplicate names rejected.
 - Environment variable values are never logged by launcher. Success logs include only `env_count=<N>`.
 - Non-goal: launcher does not fetch secrets. Upstream components (typically `session-broker` using `botwork-auth-broker`) are responsible for obtaining values and providing them in `/launch`.
+
+## Per-launch resource overrides
+
+- `/launch` accepts an optional `resources` object with optional `cpus`, `memory`, and `pids` keys.
+- `cpus` and `memory` must be non-empty strings, and `pids` must be an integer in `1..=4294967295`.
+- Unknown keys in `resources` are rejected.
+- Any omitted key falls back to the launcher's configured defaults (`BOTWORK_LAUNCHER_{CPU,MEMORY,PIDS}_LIMIT` or compile-time defaults).
 
 ## Logging
 
