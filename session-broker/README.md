@@ -39,9 +39,11 @@ plugins:
 
 - The field is optional and defaults to empty.
 - Keys must match `[A-Z_][A-Z0-9_]*`, must not be in the reserved set
-  (`PATH`, `HOME`, `USER`, `LD_PRELOAD`, `LD_LIBRARY_PATH`), must not start
+  (`PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`), must not start
   with `DOCKER_`, and must not start with `BOTWORK_SECRET_` (reserved for
-  vault-derived entries).
+  vault-derived entries). `HOME` and `USER` are intentionally **not** reserved
+  and may be set per-plugin (e.g. `HOME: /workspace` for cache-heavy plugins
+  like `bazel` or `cargo`).
 - Non-string YAML scalars (booleans, integers) are **rejected at parse time**
   with a clear error suggesting the user quote the value.
 - Values are capped at 64 KiB.

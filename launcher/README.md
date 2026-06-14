@@ -62,7 +62,7 @@ The socket group/mode and the `SO_PEERCRED` allowlist are deliberate belt-and-br
 
 - `/launch` accepts an optional `env` field. When omitted or `null`, launcher behavior is unchanged and no `-e` flags are added to `docker run`.
 - When present, `env` must be an array of objects with exactly `{ "name": "...", "value": "..." }` string fields.
-- `name` must match `^[A-Z_][A-Z0-9_]*$`, must not start with `DOCKER_`, and must not be one of: `PATH`, `HOME`, `USER`, `LD_PRELOAD`, `LD_LIBRARY_PATH`.
+- `name` must match `^[A-Z_][A-Z0-9_]*$`, must not start with `DOCKER_`, and must not be one of: `PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`.
 - `value` is forwarded verbatim to Docker and accepts all UTF-8 content except embedded NUL (`\0`) bytes.
 - Additional guardrails: max 64 env entries, max value length 64 KiB, duplicate names rejected.
 - Environment variable values are never logged by launcher. Success logs include only `env_count=<N>`.
