@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::secrets;
 
 // Keep in sync with launcher/src/validate.rs RESERVED_ENV_NAMES.
-const RESERVED_ENV_NAMES: &[&str] = &["PATH", "HOME", "USER", "LD_PRELOAD", "LD_LIBRARY_PATH"];
+const RESERVED_ENV_NAMES: &[&str] = &["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"];
 
 /// Maximum number of static env entries per plugin (leaves headroom under
 /// launcher's MAX_ENV_ENTRIES = 64 for vault-derived secrets).
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn load_env_rejects_reserved_name() {
-        for reserved in ["PATH", "HOME", "USER", "LD_PRELOAD", "LD_LIBRARY_PATH"] {
+        for reserved in ["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"] {
             let dir = tempdir().expect("tempdir");
             let path = write_plugins(
                 dir.path(),
@@ -816,6 +816,26 @@ mod tests {
             assert!(
                 err.to_string().contains("plugin 'p'"),
                 "error should mention plugin: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_env_accepts_home_and_user() {
+        for (key, val) in [("HOME", "/workspace"), ("USER", "botwork")] {
+            let dir = tempdir().expect("tempdir");
+            let path = write_plugins(
+                dir.path(),
+                &format!(
+                    "plugins:\n  p:\n    image: botwork/mcp-p:local\n    env:\n      {key}: {val}\n"
+                ),
+            );
+            let registry = load(&path).unwrap_or_else(|_| panic!("{key} should be accepted"));
+            let plugin = registry.get("p").expect("plugin 'p'");
+            assert!(
+                plugin.env.contains(&(key.to_string(), val.to_string())),
+                "expected {key}={val} in plugin env: {:?}",
+                plugin.env
             );
         }
     }
