@@ -676,6 +676,28 @@ mod tests {
     }
 
     #[test]
+    fn launch_payload_env_accepts_home_and_user() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "env".to_string(),
+            serde_json::json!([
+                {"name": "HOME", "value": "/workspace"},
+                {"name": "USER", "value": "botwork"}
+            ]),
+        );
+        let parsed =
+            parse_launch_payload(&payload, &validators).expect("HOME and USER should be accepted");
+        assert_eq!(
+            parsed.env,
+            vec![
+                ("HOME".to_string(), "/workspace".to_string()),
+                ("USER".to_string(), "botwork".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn launch_payload_env_invalid_value_is_400() {
         let validators = validators();
         let mut payload = valid_launch_payload();

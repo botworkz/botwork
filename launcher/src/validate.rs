@@ -7,7 +7,7 @@ use crate::error::LauncherError;
 const STAGING_BASE: &str = "/var/lib/botwork/tenants";
 const AGENTS_BASE: &str = "/var/lib/botwork/tenants";
 const TENANT_RE: &str = r"[a-z][a-z0-9-]{0,30}";
-pub const RESERVED_ENV_NAMES: &[&str] = &["PATH", "HOME", "USER", "LD_PRELOAD", "LD_LIBRARY_PATH"];
+pub const RESERVED_ENV_NAMES: &[&str] = &["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"];
 
 #[derive(Clone, Debug)]
 pub struct Validators {
@@ -211,6 +211,12 @@ mod tests {
         for name in RESERVED_ENV_NAMES {
             assert!(!valid_env_name(name));
         }
+    }
+
+    #[test]
+    fn valid_env_name_accepts_home_and_user() {
+        assert!(valid_env_name("HOME"));
+        assert!(valid_env_name("USER"));
     }
 
     #[test]
