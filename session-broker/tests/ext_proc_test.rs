@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use botwork_session_broker::ext_proc::{
-    upstream_header_mutation, ExternalProcessorService, PerStreamState,
+    upstream_header_mutation, ExternalProcessorService, PerStreamState, TeardownInfo,
 };
 use botwork_session_broker::plugin_registry::{PluginConfig, PluginResources, UpstreamAuth};
 use botwork_session_broker::session_registry::SessionRegistry;
@@ -1802,3 +1802,254 @@ fn extract_header_value(request: &str, header_name: &str) -> Option<String> {
         })
     })
 }
+
+fn app_state_with_plugins_and_registry(
+    launcher_socket_path: String,
+    registry: Arc<SessionRegistry>,
+) -> AppState {
+    let mut plugin_registry = HashMap::new();
+    plugin_registry.insert("plugin-a".to_string(), sample_plugin_config());
+    AppState {
+        plugin_registry,
+        session_registry: registry,
+        transport_sessions: Arc::new(Mutex::new(HashMap::new())),
+        pending_init: Arc::new(Mutex::new(HashMap::new())),
+        launcher_socket_path,
+        auth_broker_url: "http://127.0.0.1:1".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DELETE teardown tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_headers_delete_known_session_sets_teardown_on_response() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let _ = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "DELETE"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    let teardown = stream
+        .teardown_on_response
+        .as_ref()
+        .expect("teardown_on_response should be set after DELETE");
+    assert_eq!(teardown.mcp_session_id, "sess-1");
+    assert_eq!(teardown.container_name, "mcp_session_abc");
+    assert!(
+        teardown.staging_path.contains("abcdef"),
+        "staging path should contain the staging token: {}",
+        teardown.staging_path
+    );
+}
+
+#[tokio::test]
+async fn request_headers_delete_without_session_does_not_set_teardown() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "DELETE"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), Some(404));
+    assert!(stream.teardown_on_response.is_none());
+}
+
+#[tokio::test]
+async fn request_headers_delete_tenant_mismatch_does_not_set_teardown() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "DELETE"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant2"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), Some(403));
+    assert!(stream.teardown_on_response.is_none());
+}
+
+#[tokio::test]
+async fn response_headers_delete_teardown_drops_session_and_calls_launcher() {
+    let temp_dir = tempdir().unwrap();
+    let socket_path = temp_dir.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        200,
+        r#"{"status":"torn_down"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let registry_path = temp_dir.path().join("sessions.json");
+    let registry = Arc::new(SessionRegistry::new(registry_path.to_str().unwrap()));
+    registry
+        .record_spawn(
+            "mcp_session_abc",
+            "/var/lib/botwork/tenants/tenant1/staging/abcdef",
+            "botwork/plugin-a:local",
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+    let state = app_state_with_plugins_and_registry(path_to_string(&socket_path), registry);
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+
+    let mut stream = PerStreamState::default();
+    let _ = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "DELETE"),
+            (":path", "/tenant1/plugin-a/foo"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+    assert!(stream.teardown_on_response.is_some());
+
+    let response = ExternalProcessorService::handle_response_headers(
+        &state,
+        &mut stream,
+        headers(&[(":status", "200")]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+
+    // teardown_on_response consumed
+    assert!(stream.teardown_on_response.is_none());
+
+    // launcher was called with correct payload
+    let body_str = launcher_body
+        .lock()
+        .await
+        .clone()
+        .expect("launcher should have been called");
+    let payload: serde_json::Value = serde_json::from_str(&body_str).expect("valid json");
+    assert_eq!(payload["name"], "mcp_session_abc");
+    assert!(
+        payload["staging_path"].as_str().unwrap().contains("abcdef"),
+        "staging path in launcher payload: {}",
+        payload["staging_path"]
+    );
+
+    // transport_sessions entry removed
+    assert!(state
+        .transport_sessions
+        .lock()
+        .await
+        .get("sess-1")
+        .is_none());
+
+    // session_registry entry removed
+    let reg_data = state.session_registry.read().await;
+    assert!(
+        !reg_data.sessions.contains_key("mcp_session_abc"),
+        "registry should not contain mcp_session_abc after teardown"
+    );
+
+    // response still continues normally
+    assert!(matches!(
+        response.response,
+        Some(processing_response::Response::ResponseHeaders(_))
+    ));
+}
+
+#[tokio::test]
+async fn response_headers_delete_teardown_called_on_5xx_upstream() {
+    let temp_dir = tempdir().unwrap();
+    let socket_path = temp_dir.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        200,
+        r#"{"status":"torn_down"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let state = app_state_with_plugins(path_to_string(&socket_path));
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+
+    let mut stream = PerStreamState::default();
+    let _ = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "DELETE"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    // upstream returns 5xx — teardown should still fire
+    let _ = ExternalProcessorService::handle_response_headers(
+        &state,
+        &mut stream,
+        headers(&[(":status", "500")]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+
+    assert!(
+        launcher_body.lock().await.is_some(),
+        "launcher should have been called even on 5xx upstream"
+    );
+    assert!(state
+        .transport_sessions
+        .lock()
+        .await
+        .get("sess-1")
+        .is_none());
+}
+
+#[allow(dead_code)]
+fn _use_teardown_info_type(_: TeardownInfo) {}
