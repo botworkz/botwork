@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::launcher::{call_bind_agent, launch_session, probe_ready, LauncherError};
+use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_ready, LauncherError};
 use crate::plugin_registry::{PluginConfig, UpstreamAuth};
 use crate::secrets;
 use crate::session_registry::utc_now;
@@ -42,6 +42,13 @@ fn tenant_plugin_path_pattern() -> &'static Regex {
 }
 
 #[derive(Debug, Clone)]
+pub struct TeardownInfo {
+    pub mcp_session_id: String,
+    pub container_name: String,
+    pub staging_path: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct PerStreamState {
     pub stream_id: String,
     pub method: String,
@@ -55,6 +62,7 @@ pub struct PerStreamState {
     pub chosen_upstream: Option<String>,
     pub trusted_tenant: String,
     pub cap: Option<String>,
+    pub teardown_on_response: Option<TeardownInfo>,
 }
 
 impl Default for PerStreamState {
@@ -74,6 +82,7 @@ impl Default for PerStreamState {
             chosen_upstream: None,
             trusted_tenant: String::new(),
             cap: None,
+            teardown_on_response: None,
         }
     }
 }
@@ -468,6 +477,23 @@ fn logged_immediate_response(
     immediate_response(status, body)
 }
 
+async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
+    call_teardown(
+        &state.launcher_socket_path,
+        &teardown.container_name,
+        &teardown.staging_path,
+    )
+    .await;
+    {
+        let mut sessions = state.transport_sessions.lock().await;
+        sessions.remove(&teardown.mcp_session_id);
+    }
+    state
+        .session_registry
+        .record_teardown(&teardown.container_name)
+        .await;
+}
+
 async fn spawn_new_container(
     state: &AppState,
     client_addr: &str,
@@ -722,6 +748,14 @@ impl ExternalProcessorService {
                 &transport,
             );
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
+            stream.teardown_on_response = Some(TeardownInfo {
+                mcp_session_id: stream
+                    .mcp_session_id
+                    .clone()
+                    .expect("mcp_session_id must be present in DELETE branch"),
+                container_name: transport.container_name.clone(),
+                staging_path: staging_path(&transport.tenant_name, &transport.staging_token),
+            });
             log_phase(
                 stream,
                 "request_headers",
@@ -1088,6 +1122,11 @@ impl ExternalProcessorService {
     ) -> ProcessingResponse {
         let header_map = msg.headers.unwrap_or_default();
         let headers = extract_headers(&header_map);
+
+        if let Some(teardown) = stream.teardown_on_response.take() {
+            teardown_session(state, &teardown).await;
+        }
+
         let pending = {
             let mut pending_init = state.pending_init.lock().await;
             pending_init.remove(&stream.stream_id)
