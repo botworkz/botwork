@@ -350,3 +350,61 @@ async fn admin_get_sessions_includes_spawned_session() {
     assert!(entry["agent_id"].is_null(), "agent_id must be null");
     assert!(entry["bound_at"].is_null(), "bound_at must be null");
 }
+
+#[tokio::test]
+async fn session_registry_record_teardown_removes_entry_and_persists() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+    let registry = SessionRegistry::new(path.to_str().unwrap());
+
+    registry
+        .record_spawn(
+            "mcp_session_aabbccddeeff",
+            "/staging/aabbccddeeff",
+            "botwork/mcp-echo:local",
+            &utc_now(),
+        )
+        .await;
+
+    registry.record_teardown("mcp_session_aabbccddeeff").await;
+
+    let data = registry.read().await;
+    assert!(
+        data.sessions.is_empty(),
+        "sessions map should be empty after teardown"
+    );
+
+    // Verify the removal was persisted to disk
+    let content = std::fs::read_to_string(&path).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&content).expect("valid JSON after teardown");
+    assert!(
+        value["sessions"].as_object().unwrap().is_empty(),
+        "persisted sessions should be empty after teardown"
+    );
+}
+
+#[tokio::test]
+async fn session_registry_record_teardown_absent_container_is_noop() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+    let registry = SessionRegistry::new(path.to_str().unwrap());
+
+    // Record a different container so the file exists on disk
+    registry
+        .record_spawn(
+            "mcp_session_other",
+            "/staging/other",
+            "botwork/mcp-echo:local",
+            &utc_now(),
+        )
+        .await;
+
+    // Teardown a container that doesn't exist — should be a no-op
+    registry.record_teardown("mcp_session_nonexistent").await;
+
+    // The other entry must still be present
+    let data = registry.read().await;
+    assert_eq!(data.sessions.len(), 1);
+    assert!(data.sessions.contains_key("mcp_session_other"));
+}

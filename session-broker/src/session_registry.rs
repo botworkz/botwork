@@ -148,6 +148,21 @@ impl SessionRegistry {
             log_info(&format!("failed to write session registry: {e}"));
         }
     }
+
+    pub async fn record_teardown(&self, container: &str) {
+        let mut data = self.data.lock().await;
+        if data.sessions.remove(container).is_none() {
+            log_info(&format!(
+                "registry teardown: container={container} not present (no-op)"
+            ));
+            return;
+        }
+        log_info(&format!("registry teardown: container={container}"));
+        data.updated_at = utc_now();
+        if let Err(e) = write_atomic(&self.path, &data) {
+            log_info(&format!("failed to write session registry: {e}"));
+        }
+    }
 }
 
 fn load_from_disk(path: &str) -> Result<RegistryData, String> {
