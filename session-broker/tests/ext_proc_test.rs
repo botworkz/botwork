@@ -282,7 +282,7 @@ async fn request_headers_invalid_tenant_format_returns_400() {
 }
 
 #[tokio::test]
-async fn request_headers_get_without_session_returns_continue() {
+async fn request_headers_get_without_session_returns_400() {
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -296,16 +296,12 @@ async fn request_headers_get_without_session_returns_continue() {
     )
     .await;
 
-    assert!(matches!(
-        response.response,
-        Some(processing_response::Response::RequestHeaders(_))
-    ));
-    assert_eq!(immediate_status(&response), None);
+    assert_eq!(immediate_status(&response), Some(400));
     assert_eq!(extract_upstream_mutation(&response), None);
 }
 
 #[tokio::test]
-async fn request_headers_get_unknown_session_returns_continue() {
+async fn request_headers_get_unknown_session_returns_404() {
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -320,10 +316,7 @@ async fn request_headers_get_unknown_session_returns_continue() {
     )
     .await;
 
-    assert!(matches!(
-        response.response,
-        Some(processing_response::Response::RequestHeaders(_))
-    ));
+    assert_eq!(immediate_status(&response), Some(404));
     assert_eq!(extract_upstream_mutation(&response), None);
 }
 
