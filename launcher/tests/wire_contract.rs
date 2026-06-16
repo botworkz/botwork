@@ -44,6 +44,7 @@ async fn wire_contract_validation_paths() {
         container_cpu_limit: "1.0".to_string(),
         container_memory_limit: "512m".to_string(),
         container_read_only_rootfs: false,
+        broker_socket_path: "/run/botwork/broker.sock".to_string(),
     };
     let validators = Validators::new(&config.image_allowlist_regex).expect("validators");
     let state = Arc::new(AppState { config, validators });
@@ -147,6 +148,7 @@ async fn wire_contract_rejects_large_request_bodies() {
         container_cpu_limit: "1.0".to_string(),
         container_memory_limit: "512m".to_string(),
         container_read_only_rootfs: false,
+        broker_socket_path: "/run/botwork/broker.sock".to_string(),
     };
     let validators = Validators::new(&config.image_allowlist_regex).expect("validators");
     let state = Arc::new(AppState { config, validators });

@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod exit_listener;
 pub mod ext_proc;
 pub mod launcher;
 pub mod plugin_registry;
@@ -21,6 +22,12 @@ pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROBE_SLEEP: Duration = Duration::from_millis(100);
 pub const TENANT_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
 pub const TENANT_PLUGIN_PATH_RE: &str = r"^/([a-z][a-z0-9-]{0,30})/([a-z][a-z0-9-]{0,30})(/.*)?$";
+
+/// How long a tombstoned `Mcp-Session-Id` blocks new routing (5 minutes).
+pub const TOMBSTONE_TTL: Duration = Duration::from_secs(300);
+
+/// How long a container-liveness cache entry stays valid (5 minutes).
+pub const LIVENESS_TTL: Duration = Duration::from_secs(300);
 
 pub fn redact_token(value: &str) -> String {
     let prefix: String = value.chars().take(6).collect();
@@ -119,6 +126,14 @@ pub struct AppState {
     pub pending_init: Arc<Mutex<HashMap<String, PendingInit>>>,
     pub launcher_socket_path: String,
     pub auth_broker_url: String,
+    /// Tombstoned `Mcp-Session-Id` values: maps session-id → expiry `Instant`.
+    /// Requests referencing a tombstoned id receive an immediate 404 without a
+    /// transport-session lookup, preventing re-spawn races on stale clients.
+    pub tombstones: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    /// Per-container liveness cache: maps container name → expiry `Instant`.
+    /// An entry present and not yet expired means the container was confirmed
+    /// running within the last `LIVENESS_TTL` and no docker inspect is needed.
+    pub liveness_cache: Arc<Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 pub fn log_info(message: &str) {
@@ -159,6 +174,8 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "/run/botwork/launcher.sock".to_string());
     let auth_broker_url = std::env::var("BOTWORK_AUTH_BROKER_URL")
         .unwrap_or_else(|_| "http://auth_broker:9100".to_string());
+    let broker_socket_path = std::env::var("BOTWORK_BROKER_SOCKET_PATH")
+        .unwrap_or_else(|_| "/run/botwork/broker.sock".to_string());
 
     let state = AppState {
         plugin_registry: plugins,
@@ -167,10 +184,24 @@ pub async fn run() -> Result<(), String> {
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url,
+        tombstones: Arc::new(Mutex::new(HashMap::new())),
+        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
     };
 
     log_info(&format!("starting admin HTTP server on {admin_addr}"));
     log_info(&format!("starting gRPC ext_proc service on {grpc_addr}"));
+    log_info(&format!(
+        "starting exit listener on unix://{broker_socket_path}"
+    ));
+
+    let exit_listener_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            exit_listener::serve_exit_listener(exit_listener_state, &broker_socket_path).await
+        {
+            log_info(&format!("exit listener error: {e}"));
+        }
+    });
 
     tokio::try_join!(
         admin::serve_admin(state.clone(), &admin_addr),

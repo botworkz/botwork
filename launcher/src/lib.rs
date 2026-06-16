@@ -2,6 +2,7 @@ mod cmd;
 pub mod config;
 mod docker;
 mod error;
+pub mod events;
 mod mount;
 pub mod server;
 pub mod validate;
@@ -45,7 +46,11 @@ pub async fn run() -> Result<(), String> {
 
     log_info(&format!("listening on unix://{}", config.socket_path));
 
+    let broker_socket_path = config.broker_socket_path.clone();
     let state = Arc::new(AppState { config, validators });
+
+    tokio::spawn(events::run_event_loop(broker_socket_path));
+
     serve_on(listener, state).await
 }
 

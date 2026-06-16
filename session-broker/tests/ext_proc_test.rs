@@ -67,6 +67,8 @@ fn app_state_with_plugins_and_auth_and_path_and_upstream_auth(
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url,
+        tombstones: Arc::new(Mutex::new(HashMap::new())),
+        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -78,6 +80,8 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url: "http://127.0.0.1:1".to_string(),
+        tombstones: Arc::new(Mutex::new(HashMap::new())),
+        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -248,6 +252,12 @@ fn sample_pending(tenant: &str, plugin: &str, container: &str) -> PendingInit {
 }
 
 async fn insert_transport(state: &AppState, mcp_session_id: &str, transport: TransportState) {
+    // Seed the liveness cache so tests don't trigger docker inspect for
+    // containers that only exist in the test's mental model.
+    state.liveness_cache.lock().await.insert(
+        transport.container_name.clone(),
+        std::time::Instant::now() + botwork_session_broker::LIVENESS_TTL,
+    );
     state
         .transport_sessions
         .lock()
@@ -1473,6 +1483,8 @@ fn app_state_with_plugin_env_and_resources(
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url,
+        tombstones: Arc::new(Mutex::new(HashMap::new())),
+        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -1817,6 +1829,8 @@ fn app_state_with_plugins_and_registry(
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url: "http://127.0.0.1:1".to_string(),
+        tombstones: Arc::new(Mutex::new(HashMap::new())),
+        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
