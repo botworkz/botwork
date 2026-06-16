@@ -24,6 +24,8 @@ fn is_secret_name(name: &str) -> bool {
     if name.starts_with("BOTWORK_SECRET_") {
         return true;
     }
+    // Suffix-based match catches `_PAT` itself (and other common shapes).
+    // The numbered-variant branch below handles `_PAT1`, `_PAT2`, etc.
     for suffix in [
         "_TOKEN",
         "_PAT",
@@ -37,7 +39,7 @@ fn is_secret_name(name: &str) -> bool {
             return true;
         }
     }
-    // _PAT[0-9]+  — e.g. MY_PAT1, MY_PAT2
+    // _PAT[0-9]+  — e.g. MY_PAT1, MY_PAT2 (bare _PAT is caught above)
     if let Some(idx) = name.rfind("_PAT") {
         let after = &name[idx + 4..];
         if !after.is_empty() && after.chars().all(|c| c.is_ascii_digit()) {
@@ -79,7 +81,21 @@ fn is_token_value(value: &str) -> bool {
     false
 }
 
+/// Renders a secret value for logging.
+///
+/// For values shorter than 16 bytes the prefix would leak too much of the
+/// secret (e.g. an 8-byte key would expose 75% of its bytes), so we redact
+/// wholesale.  For longer values a 6-char prefix is preserved to aid
+/// cross-log correlation, mirroring `session-broker::redact_token`.
+///
+/// Length is measured in bytes; secrets in real-world token formats are
+/// ASCII, so this matches char count in practice.  A hypothetical multi-byte
+/// UTF-8 secret with `len() >= 16` could see all of its chars logged via the
+/// prefix, but no known token format exposes this in practice.
 fn redact_value(value: &str) -> String {
+    if value.len() < 16 {
+        return "<redacted>".to_string();
+    }
     let prefix: String = value.chars().take(6).collect();
     format!("<redacted:{prefix}…>")
 }
@@ -90,7 +106,8 @@ fn redact_value(value: &str) -> String {
 ///
 /// Redaction rules (applied per element):
 /// 1. `NAME=VALUE` — if `NAME` matches the secret-name pattern, `VALUE` is
-///    replaced with `<redacted:PREFIX…>` (first 6 chars of the value + `…`).
+///    replaced with `<redacted>` (short values) or `<redacted:PREFIX…>`
+///    (≥ 16 bytes); see `redact_value` for details.
 /// 2. Bare token value — if the element looks like a known token shape
 ///    (GitHub PAT, OpenAI `sk-…`, Slack `xox*-…`) it is replaced wholesale.
 /// 3. Everything else — passed through verbatim.
@@ -280,29 +297,50 @@ mod tests {
         }
     }
 
+    // ── redact_value ────────────────────────────────────────────────────────
+
+    #[test]
+    fn redact_value_short_values_redacted_wholesale() {
+        // Values shorter than 16 bytes are fully redacted to avoid leaking
+        // a meaningful fraction of a short secret through the prefix.
+        assert_eq!(redact_value(""), "<redacted>");
+        assert_eq!(redact_value("abc"), "<redacted>");
+        assert_eq!(redact_value("hunter2"), "<redacted>");
+        assert_eq!(redact_value(&"x".repeat(15)), "<redacted>");
+    }
+
+    #[test]
+    fn redact_value_long_values_keep_six_char_prefix() {
+        // For values >= 16 bytes the 6-char prefix is logged to aid
+        // cross-log correlation without exposing useful entropy.
+        assert_eq!(redact_value(&"x".repeat(16)), "<redacted:xxxxxx…>");
+        assert_eq!(redact_value("ghp_p8xpXgViGiTM3"), "<redacted:ghp_p8…>");
+        assert_eq!(redact_value("abcdefghijklmnop"), "<redacted:abcdef…>");
+    }
+
     // ── redact_argv ─────────────────────────────────────────────────────────
 
     #[test]
     fn redact_argv_redacts_botwork_secret_name_value() {
-        let args = argv(&[
-            "docker",
-            "run",
-            "-e",
-            "BOTWORK_SECRET_GITHUB_COM_PAT=ghp_realtoken",
-        ]);
+        let secret = format!("ghp_{}", "x".repeat(36));
+        let arg = format!("BOTWORK_SECRET_GITHUB_COM_PAT={secret}");
+        let args = argv(&["docker", "run", "-e", &arg]);
         let out = redact_argv(&args);
         assert!(
-            !out.contains("ghp_realtoken"),
+            !out.contains(&secret),
             "secret value must not appear in log: {out}"
         );
         assert!(
-            out.contains("BOTWORK_SECRET_GITHUB_COM_PAT=<redacted:"),
+            out.contains("BOTWORK_SECRET_GITHUB_COM_PAT=<redacted"),
             "redacted placeholder must appear: {out}"
         );
     }
 
     #[test]
     fn redact_argv_redacts_all_secret_suffixes() {
+        // Use a 13-byte value so it exercises the short-redact path (the
+        // wholesale `<redacted>` form); the longer prefix-preserving form
+        // is exercised in redact_value_long_values_keep_six_char_prefix.
         for name in [
             "MY_TOKEN",
             "MY_PAT",
@@ -320,7 +358,7 @@ mod tests {
                 "{name}: secret value must not appear: {out}"
             );
             assert!(
-                out.contains("<redacted:"),
+                out.contains("<redacted"),
                 "{name}: redacted placeholder must appear: {out}"
             );
         }
@@ -373,7 +411,7 @@ mod tests {
         assert_eq!(parts[2], "--name");
         assert_eq!(parts[3], "mcp_session_abc");
         assert_eq!(parts[4], "-e");
-        assert!(parts[5].starts_with("BOTWORK_SECRET_X=<redacted:"));
+        assert!(parts[5].starts_with("BOTWORK_SECRET_X=<redacted"));
         assert_eq!(parts[6], "-e");
         assert_eq!(parts[7], "BOTWORK_PLUGIN_NAME=echo");
         assert!(!out.contains("secret123"));
@@ -385,14 +423,5 @@ mod tests {
         let out = redact_argv(&argv(&["docker", "run", &token]));
         assert!(!out.contains(&token), "raw token must not appear: {out}");
         assert!(out.contains("<redacted:"), "placeholder must appear: {out}");
-    }
-
-    #[test]
-    fn redact_value_uses_six_char_prefix() {
-        assert_eq!(redact_value("ghp_p8xpXgViGiTM3"), "<redacted:ghp_p8…>");
-        assert_eq!(redact_value("abc"), "<redacted:abc…>");
-        assert_eq!(redact_value(""), "<redacted:…>");
-        // Long arbitrary string: only the first 6 chars are preserved
-        assert_eq!(redact_value("abcdefghijklmnop"), "<redacted:abcdef…>");
     }
 }
