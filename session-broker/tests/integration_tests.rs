@@ -7,7 +7,7 @@ use botwork_session_broker::admin::build_router;
 use botwork_session_broker::plugin_registry::{
     self, PluginRegistryError, PluginResources, UpstreamAuth,
 };
-use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
+use botwork_session_broker::session_registry::{utc_now, RegistryLoadError, SessionRegistry};
 use botwork_session_broker::AppState;
 use http::Request;
 use tempfile::tempdir;
@@ -142,11 +142,93 @@ async fn session_registry_missing_file_gives_empty_start() {
     let path = dir.path().join("sessions.json");
     // Path doesn't exist — load_and_reconcile should be a no-op
     let registry = SessionRegistry::new(path.to_str().unwrap());
-    registry.load_and_reconcile().await;
+    registry.load_and_reconcile().await.expect("no file is ok");
 
     let data = registry.read().await;
     assert_eq!(data.version, 1);
     assert!(data.sessions.is_empty());
+}
+
+#[tokio::test]
+async fn session_registry_load_rejects_pre_namespace_entries() {
+    // A session-registry file written by a pre-namespace broker is missing
+    // the tenant/namespace fields.  Silently skipping such entries would
+    // orphan the underlying docker containers — instead, we surface an
+    // error so the operator deals with the migration explicitly.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+
+    let old_json = r#"{
+        "version": 1,
+        "updated_at": "2026-01-01T00:00:00Z",
+        "sessions": {
+            "mcp_session_old1": {
+                "container": "mcp_session_old1",
+                "staging_path": "/staging/old1",
+                "image": "botwork/mcp-echo:local",
+                "created_at": "2026-01-01T00:00:00Z",
+                "mcp_session_id": null,
+                "agent_id": null,
+                "bound_at": null
+            },
+            "mcp_session_old2": {
+                "container": "mcp_session_old2",
+                "staging_path": "/staging/old2",
+                "image": "botwork/mcp-echo:local",
+                "created_at": "2026-01-01T00:00:00Z",
+                "mcp_session_id": null,
+                "agent_id": null,
+                "bound_at": null
+            }
+        }
+    }"#;
+    std::fs::write(&path, old_json).unwrap();
+
+    let registry = SessionRegistry::new(path.to_str().unwrap());
+    let err = registry
+        .load_and_reconcile()
+        .await
+        .expect_err("must refuse to load pre-namespace registry");
+
+    match err {
+        RegistryLoadError::SchemaMismatch { ref offending } => {
+            assert_eq!(offending.len(), 2);
+            assert!(offending.contains(&"mcp_session_old1".to_string()));
+            assert!(offending.contains(&"mcp_session_old2".to_string()));
+        }
+        other => panic!("expected SchemaMismatch, got {other:?}"),
+    }
+
+    // The error message must tell the operator both the count and the
+    // migration steps, including the listed container names.
+    let display = err.to_string();
+    assert!(display.contains("2 entries"), "message: {display}");
+    assert!(display.contains("mcp_session_old1"), "message: {display}");
+    assert!(display.contains("mcp_session_old2"), "message: {display}");
+    assert!(display.contains("docker rm -f"), "message: {display}");
+    assert!(
+        display.contains("remove the registry file"),
+        "message: {display}"
+    );
+}
+
+#[tokio::test]
+async fn session_registry_load_io_error_propagates() {
+    // A non-JSON file at the registry path must produce Io, not SchemaMismatch.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+    std::fs::write(&path, "this is not json").unwrap();
+
+    let registry = SessionRegistry::new(path.to_str().unwrap());
+    let err = registry
+        .load_and_reconcile()
+        .await
+        .expect_err("malformed JSON must fail");
+
+    assert!(
+        matches!(err, RegistryLoadError::Io(_)),
+        "expected Io variant, got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -160,6 +242,8 @@ async fn session_registry_record_spawn_and_read() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             &now,
         )
@@ -174,6 +258,8 @@ async fn session_registry_record_spawn_and_read() {
         entry.staging_path,
         "/var/lib/botwork/tenants/acme/staging/aabbccddeeff"
     );
+    assert_eq!(entry.tenant, "acme");
+    assert_eq!(entry.namespace, "mcp");
     assert_eq!(entry.image, "botwork/mcp-echo:local");
     assert_eq!(entry.created_at, now);
     assert!(entry.mcp_session_id.is_none());
@@ -191,6 +277,8 @@ async fn session_registry_record_mcp_session_id_roundtrip() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/staging/aabbccddeeff",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )
@@ -232,8 +320,15 @@ async fn session_registry_atomic_write_under_concurrent_mutation() {
         handles.push(tokio::spawn(async move {
             let container = format!("mcp_session_{i:012x}");
             let staging = format!("/staging/{i:012x}");
-            reg.record_spawn(&container, &staging, "botwork/mcp-echo:local", &utc_now())
-                .await;
+            reg.record_spawn(
+                &container,
+                &staging,
+                "acme",
+                "mcp",
+                "botwork/mcp-echo:local",
+                &utc_now(),
+            )
+            .await;
         }));
     }
     for handle in handles {
@@ -316,6 +411,8 @@ async fn admin_get_sessions_includes_spawned_session() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             "2026-05-25T23:14:09Z",
         )
@@ -342,6 +439,8 @@ async fn admin_get_sessions_includes_spawned_session() {
         entry["staging_path"],
         "/var/lib/botwork/tenants/acme/staging/aabbccddeeff"
     );
+    assert_eq!(entry["tenant"], "acme");
+    assert_eq!(entry["namespace"], "mcp");
     assert_eq!(entry["image"], "botwork/mcp-echo:local");
     assert_eq!(entry["created_at"], "2026-05-25T23:14:09Z");
     // null fields must be present as null, not omitted
@@ -363,6 +462,8 @@ async fn session_registry_record_teardown_removes_entry_and_persists() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/staging/aabbccddeeff",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )
@@ -397,6 +498,8 @@ async fn session_registry_record_teardown_absent_container_is_noop() {
         .record_spawn(
             "mcp_session_other",
             "/staging/other",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )

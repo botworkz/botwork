@@ -204,10 +204,21 @@ fn sample_transport_with_path(
     container: &str,
     plugin_path: &str,
 ) -> TransportState {
+    sample_transport_with_namespace_and_path(tenant, "mcp", plugin, container, plugin_path)
+}
+
+fn sample_transport_with_namespace_and_path(
+    tenant: &str,
+    namespace: &str,
+    plugin: &str,
+    container: &str,
+    plugin_path: &str,
+) -> TransportState {
     TransportState {
         container_name: container.to_string(),
         staging_token: "abcdef".to_string(),
         tenant_name: tenant.to_string(),
+        namespace: namespace.to_string(),
         plugin_name: plugin.to_string(),
         port: 8000,
         path: plugin_path.to_string(),
@@ -244,6 +255,7 @@ fn sample_pending(tenant: &str, plugin: &str, container: &str) -> PendingInit {
         container_name: container.to_string(),
         staging_token: "abcdef".to_string(),
         tenant_name: tenant.to_string(),
+        namespace: "mcp".to_string(),
         plugin_name: plugin.to_string(),
         plugin_config: sample_plugin_config(),
         upstream_authorization: None,
@@ -282,7 +294,7 @@ async fn request_headers_invalid_tenant_format_returns_400() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "BadTenant"),
         ]),
     )
@@ -300,7 +312,7 @@ async fn request_headers_get_without_session_returns_400() {
         &mut stream,
         headers(&[
             (":method", "GET"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -323,7 +335,7 @@ async fn request_headers_get_unknown_session_returns_404() {
         &mut stream,
         headers(&[
             (":method", "GET"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-unknown"),
         ]),
@@ -353,7 +365,7 @@ async fn request_headers_get_known_session_routes_to_upstream() {
         &mut stream,
         headers(&[
             (":method", "GET"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -388,7 +400,7 @@ async fn request_headers_get_known_session_routes_to_upstream_root_path() {
         &mut stream,
         headers(&[
             (":method", "GET"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -416,7 +428,7 @@ async fn request_headers_strips_x_botwork_cap_on_get_route() {
         &mut stream,
         headers(&[
             (":method", "GET"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -441,7 +453,7 @@ async fn request_headers_get_tenant_mismatch_returns_403() {
         &mut stream,
         headers(&[
             (":method", "GET"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant2"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -466,7 +478,7 @@ async fn request_headers_get_path_tenant_mismatch_returns_403() {
         &mut stream,
         headers(&[
             (":method", "GET"),
-            (":path", "/tenant2/plugin-a"),
+            (":path", "/tenant2/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -485,7 +497,7 @@ async fn request_headers_delete_without_session_returns_404() {
         &mut stream,
         headers(&[
             (":method", "DELETE"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -503,7 +515,7 @@ async fn request_headers_delete_unknown_session_returns_404() {
         &mut stream,
         headers(&[
             (":method", "DELETE"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-unknown"),
         ]),
@@ -528,7 +540,7 @@ async fn request_headers_delete_known_session_routes_to_upstream() {
         &mut stream,
         headers(&[
             (":method", "DELETE"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -553,7 +565,7 @@ async fn request_headers_post_unknown_session_returns_404() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-unknown"),
         ]),
@@ -578,7 +590,7 @@ async fn request_headers_post_known_session_routes_to_upstream() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -609,7 +621,7 @@ async fn request_headers_strips_x_botwork_cap_on_existing_session_route() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -634,7 +646,7 @@ async fn request_headers_strips_authorization_when_upstream_auth_none_existing_s
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -665,7 +677,7 @@ async fn request_headers_existing_session_with_cached_bearer_emits_set_authoriza
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -703,7 +715,7 @@ async fn request_headers_existing_session_without_cached_bearer_strips_authoriza
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -728,7 +740,7 @@ async fn request_headers_existing_session_missing_from_registry_falls_back_to_st
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -756,7 +768,7 @@ async fn request_headers_post_known_session_tenant_mismatch_returns_403() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant2"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -793,7 +805,7 @@ async fn request_headers_post_initialize_path_tenant_mismatch_returns_403() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant2/plugin-a"),
+            (":path", "/tenant2/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -811,7 +823,7 @@ async fn request_headers_post_initialize_empty_plugin_registry_returns_500() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -829,7 +841,7 @@ async fn request_headers_post_initialize_unknown_plugin_returns_404() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-x"),
+            (":path", "/tenant1/mcp/plugin-x"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -1096,7 +1108,7 @@ async fn spawn_passes_cap_to_secrets_fetch_and_envs_to_launcher() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1147,7 +1159,7 @@ async fn spawn_without_cap_fetches_no_secrets_and_passes_empty_env() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -1184,7 +1196,7 @@ async fn request_headers_strips_authorization_when_upstream_auth_none_spawn_path
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -1231,7 +1243,7 @@ async fn request_headers_bearer_no_match_returns_5xx_no_spawn() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1266,7 +1278,7 @@ async fn request_headers_bearer_multiple_matches_returns_5xx() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1301,7 +1313,7 @@ async fn request_headers_bearer_non_utf8_secret_returns_5xx() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1336,7 +1348,7 @@ async fn spawn_with_cap_but_auth_broker_unreachable_continues_with_empty_env() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1370,7 +1382,7 @@ async fn spawn_with_cap_but_auth_broker_401_continues_with_empty_env() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1393,7 +1405,7 @@ async fn cap_present_in_per_stream_state_after_request_headers() {
         &mut stream,
         headers(&[
             (":method", "GET"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1426,7 +1438,7 @@ async fn bearer_value_not_logged_in_clear() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1515,7 +1527,7 @@ async fn spawn_static_env_appears_in_launcher_payload() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -1575,7 +1587,7 @@ async fn spawn_plugin_resources_appear_in_launcher_payload() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -1622,7 +1634,7 @@ async fn spawn_static_env_appears_before_secrets() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("x-botwork-cap", "cap-123"),
         ]),
@@ -1672,7 +1684,7 @@ async fn spawn_static_env_present_when_no_cap() {
         &mut stream,
         headers(&[
             (":method", "POST"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -1853,7 +1865,7 @@ async fn request_headers_delete_known_session_sets_teardown_on_response() {
         &mut stream,
         headers(&[
             (":method", "DELETE"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -1882,7 +1894,7 @@ async fn request_headers_delete_without_session_does_not_set_teardown() {
         &mut stream,
         headers(&[
             (":method", "DELETE"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
         ]),
     )
@@ -1907,7 +1919,7 @@ async fn request_headers_delete_tenant_mismatch_does_not_set_teardown() {
         &mut stream,
         headers(&[
             (":method", "DELETE"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant2"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -1937,6 +1949,8 @@ async fn response_headers_delete_teardown_drops_session_and_calls_launcher() {
         .record_spawn(
             "mcp_session_abc",
             "/var/lib/botwork/tenants/tenant1/staging/abcdef",
+            "tenant1",
+            "mcp",
             "botwork/plugin-a:local",
             "2026-01-01T00:00:00Z",
         )
@@ -1956,7 +1970,7 @@ async fn response_headers_delete_teardown_drops_session_and_calls_launcher() {
         &mut stream,
         headers(&[
             (":method", "DELETE"),
-            (":path", "/tenant1/plugin-a/foo"),
+            (":path", "/tenant1/mcp/plugin-a/foo"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -2038,7 +2052,7 @@ async fn response_headers_delete_teardown_called_on_5xx_upstream() {
         &mut stream,
         headers(&[
             (":method", "DELETE"),
-            (":path", "/tenant1/plugin-a"),
+            (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
             ("mcp-session-id", "sess-1"),
         ]),
@@ -2064,6 +2078,216 @@ async fn response_headers_delete_teardown_called_on_5xx_upstream() {
         .await
         .get("sess-1")
         .is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Namespace tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_headers_post_missing_namespace_returns_400() {
+    // Old-shape URL /<tenant>/<plugin> without a namespace → 400
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), Some(400));
+    assert!(
+        immediate_body(&response)
+            .unwrap_or_default()
+            .contains("namespace required: use /<tenant>/<namespace>/<plugin>"),
+        "expected namespace hint in error body: {:?}",
+        immediate_body(&response)
+    );
+}
+
+#[tokio::test]
+async fn request_headers_get_namespace_mismatch_returns_403() {
+    // Transport bound to (tenant1, ns1, plugin-a); request uses ns2 → 403
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport_with_namespace_and_path(
+            "tenant1",
+            "ns1",
+            "plugin-a",
+            "mcp_session_abc",
+            "/mcp",
+        ),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "GET"),
+            (":path", "/tenant1/ns2/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), Some(403));
+    assert_eq!(
+        immediate_body(&response).as_deref(),
+        Some("session namespace mismatch")
+    );
+}
+
+#[tokio::test]
+async fn request_headers_delete_namespace_mismatch_returns_403() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport_with_namespace_and_path(
+            "tenant1",
+            "ns1",
+            "plugin-a",
+            "mcp_session_abc",
+            "/mcp",
+        ),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "DELETE"),
+            (":path", "/tenant1/ns2/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), Some(403));
+    assert_eq!(
+        immediate_body(&response).as_deref(),
+        Some("session namespace mismatch")
+    );
+}
+
+#[tokio::test]
+async fn request_headers_post_known_session_namespace_mismatch_returns_403() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-1",
+        sample_transport_with_namespace_and_path(
+            "tenant1",
+            "ns1",
+            "plugin-a",
+            "mcp_session_abc",
+            "/mcp",
+        ),
+    )
+    .await;
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/ns2/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-1"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(immediate_status(&response), Some(403));
+    assert_eq!(
+        immediate_body(&response).as_deref(),
+        Some("session namespace mismatch")
+    );
+}
+
+#[tokio::test]
+async fn different_namespaces_same_tenant_and_agent_get_distinct_agent_dirs() {
+    // Two transports: same tenant/agent_id/plugin, different namespace.
+    // Their agent_dirs must differ.
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    insert_transport(
+        &state,
+        "sess-ns1",
+        sample_transport_with_namespace_and_path(
+            "tenant1",
+            "ns1",
+            "plugin-a",
+            "mcp_session_aaa",
+            "/mcp",
+        ),
+    )
+    .await;
+    insert_transport(
+        &state,
+        "sess-ns2",
+        sample_transport_with_namespace_and_path(
+            "tenant1",
+            "ns2",
+            "plugin-a",
+            "mcp_session_bbb",
+            "/mcp",
+        ),
+    )
+    .await;
+
+    let sessions = state.transport_sessions.lock().await;
+    let t1 = sessions.get("sess-ns1").unwrap();
+    let t2 = sessions.get("sess-ns2").unwrap();
+    assert_ne!(t1.namespace, t2.namespace, "namespaces must differ");
+    // The agent_dir paths would differ because namespace is part of the key.
+    let dir1 = format!(
+        "/var/lib/botwork/tenants/{}/namespaces/{}/agents/agent-1",
+        t1.tenant_name, t1.namespace
+    );
+    let dir2 = format!(
+        "/var/lib/botwork/tenants/{}/namespaces/{}/agents/agent-1",
+        t2.tenant_name, t2.namespace
+    );
+    assert_ne!(
+        dir1, dir2,
+        "agent_dirs with different namespaces must differ"
+    );
+}
+
+#[tokio::test]
+async fn session_entry_serialization_includes_tenant_and_namespace() {
+    use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+    let registry = SessionRegistry::new(path.to_str().unwrap());
+
+    registry
+        .record_spawn(
+            "mcp_session_aabbccddeeff",
+            "/staging/x",
+            "acme",
+            "dev",
+            "botwork/mcp-echo:local",
+            &utc_now(),
+        )
+        .await;
+
+    let content = std::fs::read_to_string(&path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let entry = &json["sessions"]["mcp_session_aabbccddeeff"];
+    assert_eq!(entry["tenant"], "acme");
+    assert_eq!(entry["namespace"], "dev");
 }
 
 #[allow(dead_code)]

@@ -26,6 +26,7 @@ fn sample_transport(container: &str) -> TransportState {
         container_name: container.to_string(),
         staging_token: "aabbccddeeff".to_string(),
         tenant_name: "acme".to_string(),
+        namespace: "mcp".to_string(),
         plugin_name: "plugin-a".to_string(),
         port: 8000,
         path: "/mcp".to_string(),
@@ -56,6 +57,8 @@ async fn container_exit_drops_transport_session() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/staging/aabbccddeeff",
+            "tenant1",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )
@@ -120,6 +123,8 @@ async fn container_exit_idempotent() {
         .record_spawn(
             "mcp_session_112233445566",
             "/staging/112233445566",
+            "tenant1",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )
@@ -162,6 +167,8 @@ async fn container_exit_tombstones_session() {
         .record_spawn(
             "mcp_session_ffeeddccbbaa",
             "/staging/ffeeddccbbaa",
+            "tenant1",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )
@@ -209,6 +216,8 @@ async fn container_exit_removes_registry_row() {
         .record_spawn(
             "mcp_session_cafebabe0000",
             "/staging/cafebabe0000",
+            "tenant1",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )
