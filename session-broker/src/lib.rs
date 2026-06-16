@@ -21,7 +21,9 @@ pub const SESSION_PORT: u16 = 8000;
 pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROBE_SLEEP: Duration = Duration::from_millis(100);
 pub const TENANT_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
-pub const TENANT_PLUGIN_PATH_RE: &str = r"^/([a-z][a-z0-9-]{0,30})/([a-z][a-z0-9-]{0,30})(/.*)?$";
+pub const NAMESPACE_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
+pub const TENANT_NAMESPACE_PLUGIN_PATH_RE: &str =
+    r"^/([a-z][a-z0-9-]{0,30})/([a-z][a-z0-9-]{0,30})/([a-z][a-z0-9-]{0,30})(/.*)?$";
 
 /// How long a tombstoned `Mcp-Session-Id` blocks new routing (5 minutes).
 pub const TOMBSTONE_TTL: Duration = Duration::from_secs(300);
@@ -65,6 +67,7 @@ pub struct TransportState {
     pub container_name: String,
     pub staging_token: String,
     pub tenant_name: String,
+    pub namespace: String,
     pub plugin_name: String,
     pub port: u16,
     pub path: String,
@@ -78,6 +81,7 @@ impl fmt::Debug for TransportState {
             .field("container_name", &self.container_name)
             .field("staging_token", &self.staging_token)
             .field("tenant_name", &self.tenant_name)
+            .field("namespace", &self.namespace)
             .field("plugin_name", &self.plugin_name)
             .field("port", &self.port)
             .field("path", &self.path)
@@ -95,6 +99,7 @@ pub struct PendingInit {
     pub container_name: String,
     pub staging_token: String,
     pub tenant_name: String,
+    pub namespace: String,
     pub plugin_name: String,
     pub plugin_config: PluginConfig,
     pub upstream_authorization: Option<String>,
@@ -107,6 +112,7 @@ impl fmt::Debug for PendingInit {
             .field("container_name", &self.container_name)
             .field("staging_token", &self.staging_token)
             .field("tenant_name", &self.tenant_name)
+            .field("namespace", &self.namespace)
             .field("plugin_name", &self.plugin_name)
             .field("plugin_config", &self.plugin_config)
             .field(
@@ -164,7 +170,15 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "/var/lib/botwork/sessions.json".to_string());
 
     let session_registry = Arc::new(SessionRegistry::new(&session_registry_path));
-    session_registry.load_and_reconcile().await;
+    // Refuse to start if the on-disk registry exists but cannot be safely
+    // loaded — most commonly because it predates the namespace cutover.
+    // Silently dropping such entries would orphan their containers (no
+    // DELETE-routed teardown, no admin visibility), so this is intentional.
+    // The error message tells the operator exactly what to clean up.
+    session_registry
+        .load_and_reconcile()
+        .await
+        .map_err(|e| format!("{e}"))?;
 
     let admin_addr = std::env::var("BOTWORK_SESSION_BROKER_ADMIN_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:9002".to_string());

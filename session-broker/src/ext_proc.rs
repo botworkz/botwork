@@ -26,19 +26,25 @@ use crate::secrets;
 use crate::session_registry::{is_container_running, utc_now};
 use crate::{
     log_info, redact_token, AppState, PendingInit, TransportState, COLD_START_TIMEOUT,
-    LIVENESS_TTL, TENANT_PLUGIN_PATH_RE, TENANT_RE, TOMBSTONE_TTL,
+    LIVENESS_TTL, NAMESPACE_RE, TENANT_NAMESPACE_PLUGIN_PATH_RE, TENANT_RE, TOMBSTONE_TTL,
 };
 
 static TENANT_PATTERN: OnceLock<Regex> = OnceLock::new();
-static TENANT_PLUGIN_PATH_PATTERN: OnceLock<Regex> = OnceLock::new();
+static NAMESPACE_PATTERN: OnceLock<Regex> = OnceLock::new();
+static TENANT_NAMESPACE_PLUGIN_PATH_PATTERN: OnceLock<Regex> = OnceLock::new();
 
 fn tenant_pattern() -> &'static Regex {
     TENANT_PATTERN.get_or_init(|| Regex::new(TENANT_RE).expect("valid tenant regex"))
 }
 
-fn tenant_plugin_path_pattern() -> &'static Regex {
-    TENANT_PLUGIN_PATH_PATTERN
-        .get_or_init(|| Regex::new(TENANT_PLUGIN_PATH_RE).expect("valid tenant/plugin regex"))
+fn namespace_pattern() -> &'static Regex {
+    NAMESPACE_PATTERN.get_or_init(|| Regex::new(NAMESPACE_RE).expect("valid namespace regex"))
+}
+
+fn tenant_namespace_plugin_path_pattern() -> &'static Regex {
+    TENANT_NAMESPACE_PLUGIN_PATH_PATTERN.get_or_init(|| {
+        Regex::new(TENANT_NAMESPACE_PLUGIN_PATH_RE).expect("valid tenant/namespace/plugin regex")
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -95,20 +101,22 @@ pub fn split_path_and_query(path: &str) -> (&str, &str) {
     }
 }
 
-pub fn parse_tenant_plugin(path: &str) -> Option<(String, String)> {
+pub fn parse_tenant_namespace_plugin(path: &str) -> Option<(String, String, String)> {
     let (base_path, _) = split_path_and_query(path);
-    let captures = tenant_plugin_path_pattern().captures(base_path)?;
+    let captures = tenant_namespace_plugin_path_pattern().captures(base_path)?;
     let tenant = captures.get(1)?.as_str().to_string();
-    let plugin = captures.get(2)?.as_str().to_string();
-    Some((tenant, plugin))
+    let namespace = captures.get(2)?.as_str().to_string();
+    let plugin = captures.get(3)?.as_str().to_string();
+    Some((tenant, namespace, plugin))
 }
 
-pub fn parse_plugin_path(path: &str, plugin_path: &str) -> Option<(String, String, String)> {
+pub fn parse_full_path(path: &str, plugin_path: &str) -> Option<(String, String, String, String)> {
     let (base_path, query) = split_path_and_query(path);
-    let captures = tenant_plugin_path_pattern().captures(base_path)?;
+    let captures = tenant_namespace_plugin_path_pattern().captures(base_path)?;
     let tenant = captures.get(1)?.as_str().to_string();
-    let plugin = captures.get(2)?.as_str().to_string();
-    let remainder = captures.get(3).map_or("", |m| m.as_str());
+    let namespace = captures.get(2)?.as_str().to_string();
+    let plugin = captures.get(3)?.as_str().to_string();
+    let remainder = captures.get(4).map_or("", |m| m.as_str());
     let prefix = if plugin_path == "/" { "" } else { plugin_path };
     let body_raw = format!("{prefix}{remainder}");
     let body = if body_raw.is_empty() {
@@ -116,11 +124,11 @@ pub fn parse_plugin_path(path: &str, plugin_path: &str) -> Option<(String, Strin
     } else {
         body_raw
     };
-    Some((tenant, plugin, format!("{body}{query}")))
+    Some((tenant, namespace, plugin, format!("{body}{query}")))
 }
 
 pub fn forward_path(path: &str, plugin_path: &str) -> String {
-    if let Some((_, _, rewritten)) = parse_plugin_path(path, plugin_path) {
+    if let Some((_, _, _, rewritten)) = parse_full_path(path, plugin_path) {
         rewritten
     } else if path.is_empty() {
         "/".to_string()
@@ -180,8 +188,8 @@ fn staging_path(tenant_name: &str, token: &str) -> String {
     format!("/var/lib/botwork/tenants/{tenant_name}/staging/{token}")
 }
 
-fn agent_dir(tenant_name: &str, agent_id: &str) -> String {
-    format!("/var/lib/botwork/tenants/{tenant_name}/agents/{agent_id}")
+fn agent_dir(tenant_name: &str, namespace: &str, agent_id: &str) -> String {
+    format!("/var/lib/botwork/tenants/{tenant_name}/namespaces/{namespace}/agents/{agent_id}")
 }
 
 fn upstream(container_name: &str, port: u16) -> String {
@@ -573,10 +581,12 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_new_container(
     state: &AppState,
     client_addr: &str,
     tenant_name: &str,
+    namespace: &str,
     plugin_name: &str,
     plugin_config: &PluginConfig,
     upstream_authorization: Option<String>,
@@ -625,6 +635,7 @@ async fn spawn_new_container(
         container_name,
         staging_token: token,
         tenant_name: tenant_name.to_string(),
+        namespace: namespace.to_string(),
         plugin_name: plugin_name.to_string(),
         plugin_config: plugin_config.clone(),
         upstream_authorization,
@@ -734,13 +745,23 @@ impl ExternalProcessorService {
                     "session tenant mismatch",
                 );
             }
-            if let Some((path_tenant_name, path_plugin_name)) = parse_tenant_plugin(&stream.path) {
+            if let Some((path_tenant_name, path_namespace, path_plugin_name)) =
+                parse_tenant_namespace_plugin(&stream.path)
+            {
                 if path_tenant_name != stream.trusted_tenant {
                     return logged_immediate_response(
                         stream,
                         "request_headers",
                         403,
                         "tenant path/header mismatch",
+                    );
+                }
+                if path_namespace != transport.namespace {
+                    return logged_immediate_response(
+                        stream,
+                        "request_headers",
+                        403,
+                        "session namespace mismatch",
                     );
                 }
                 if path_plugin_name != transport.plugin_name {
@@ -819,13 +840,23 @@ impl ExternalProcessorService {
                     "session tenant mismatch",
                 );
             }
-            if let Some((path_tenant_name, path_plugin_name)) = parse_tenant_plugin(&stream.path) {
+            if let Some((path_tenant_name, path_namespace, path_plugin_name)) =
+                parse_tenant_namespace_plugin(&stream.path)
+            {
                 if path_tenant_name != stream.trusted_tenant {
                     return logged_immediate_response(
                         stream,
                         "request_headers",
                         403,
                         "tenant path/header mismatch",
+                    );
+                }
+                if path_namespace != transport.namespace {
+                    return logged_immediate_response(
+                        stream,
+                        "request_headers",
+                        403,
+                        "session namespace mismatch",
                     );
                 }
                 if path_plugin_name != transport.plugin_name {
@@ -894,8 +925,8 @@ impl ExternalProcessorService {
                             "session tenant mismatch",
                         );
                     }
-                    if let Some((path_tenant_name, path_plugin_name)) =
-                        parse_tenant_plugin(&stream.path)
+                    if let Some((path_tenant_name, path_namespace, path_plugin_name)) =
+                        parse_tenant_namespace_plugin(&stream.path)
                     {
                         if path_tenant_name != stream.trusted_tenant {
                             return logged_immediate_response(
@@ -903,6 +934,14 @@ impl ExternalProcessorService {
                                 "request_headers",
                                 403,
                                 "tenant path/header mismatch",
+                            );
+                        }
+                        if path_namespace != transport.namespace {
+                            return logged_immediate_response(
+                                stream,
+                                "request_headers",
+                                403,
+                                "session namespace mismatch",
                             );
                         }
                         if path_plugin_name != transport.plugin_name {
@@ -942,14 +981,25 @@ impl ExternalProcessorService {
                 );
             }
 
-            let Some((path_tenant_name, plugin_name)) = parse_tenant_plugin(&stream.path) else {
+            let Some((path_tenant_name, namespace, plugin_name)) =
+                parse_tenant_namespace_plugin(&stream.path)
+            else {
                 return logged_immediate_response(
                     stream,
                     "request_headers",
                     400,
-                    "plugin required: use /<tenant>/<plugin>",
+                    "namespace required: use /<tenant>/<namespace>/<plugin>",
                 );
             };
+
+            if !namespace_pattern().is_match(&namespace) {
+                return logged_immediate_response(
+                    stream,
+                    "request_headers",
+                    400,
+                    "invalid namespace",
+                );
+            }
 
             if path_tenant_name != stream.trusted_tenant {
                 return logged_immediate_response(
@@ -1047,6 +1097,7 @@ impl ExternalProcessorService {
                 state,
                 &stream.client_addr,
                 &stream.trusted_tenant,
+                &namespace,
                 &plugin_name,
                 &plugin_config,
                 upstream_authorization.clone(),
@@ -1070,6 +1121,8 @@ impl ExternalProcessorService {
                 .record_spawn(
                     &pending.container_name,
                     &staging_path(&pending.tenant_name, &pending.staging_token),
+                    &pending.tenant_name,
+                    &pending.namespace,
                     &pending.plugin_config.image,
                     &pending.created_at,
                 )
@@ -1189,7 +1242,7 @@ impl ExternalProcessorService {
                 let result = call_bind_agent(
                     &state.launcher_socket_path,
                     &staging_path(&transport.tenant_name, &transport.staging_token),
-                    &agent_dir(&transport.tenant_name, &agent_id),
+                    &agent_dir(&transport.tenant_name, &transport.namespace, &agent_id),
                 )
                 .await;
                 if result.is_ok() {
@@ -1271,6 +1324,7 @@ impl ExternalProcessorService {
                     container_name: pending.container_name.clone(),
                     staging_token: pending.staging_token.clone(),
                     tenant_name: pending.tenant_name.clone(),
+                    namespace: pending.namespace.clone(),
                     plugin_name: pending.plugin_name.clone(),
                     port: pending.plugin_config.port,
                     path: pending.plugin_config.path.clone(),
@@ -1431,35 +1485,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_plugin_path_legacy_mcp() {
-        let parsed = parse_plugin_path("/tenant/plugin", "/mcp").expect("valid path");
+    fn parse_full_path_three_components_required() {
+        // Two components is the old shape — must return None
+        assert!(parse_full_path("/tenant/plugin", "/mcp").is_none());
+        // Three components: tenant/namespace/plugin
+        let parsed = parse_full_path("/tenant/mcp/plugin", "/mcp").expect("valid path");
         assert_eq!(parsed.0, "tenant");
-        assert_eq!(parsed.1, "plugin");
-        assert_eq!(parsed.2, "/mcp");
+        assert_eq!(parsed.1, "mcp");
+        assert_eq!(parsed.2, "plugin");
+        assert_eq!(parsed.3, "/mcp");
 
-        let parsed_with_extra = parse_plugin_path("/tenant/plugin/extra?query=1", "/mcp")
+        let parsed_with_extra = parse_full_path("/tenant/mcp/plugin/extra?query=1", "/mcp")
             .expect("valid path with extra");
-        assert_eq!(parsed_with_extra.2, "/mcp/extra?query=1");
+        assert_eq!(parsed_with_extra.3, "/mcp/extra?query=1");
 
-        assert!(parse_plugin_path("/tenant", "/mcp").is_none());
-        assert!(parse_plugin_path("/Tenant/plugin", "/mcp").is_none());
-        assert!(parse_plugin_path("/tenant/", "/mcp").is_none());
+        assert!(parse_full_path("/tenant", "/mcp").is_none());
+        assert!(parse_full_path("/Tenant/mcp/plugin", "/mcp").is_none());
+        assert!(parse_full_path("/tenant/mcp/", "/mcp").is_none());
     }
 
     #[test]
-    fn parse_plugin_path_root_default() {
-        let parsed = parse_plugin_path("/tenant/plugin", "/").expect("valid path");
-        assert_eq!(parsed.2, "/");
+    fn parse_full_path_root_default() {
+        let parsed = parse_full_path("/tenant/mcp/plugin", "/").expect("valid path");
+        assert_eq!(parsed.3, "/");
 
-        let parsed_with_extra =
-            parse_plugin_path("/tenant/plugin/extra?query=1", "/").expect("valid path with extra");
-        assert_eq!(parsed_with_extra.2, "/extra?query=1");
+        let parsed_with_extra = parse_full_path("/tenant/mcp/plugin/extra?query=1", "/")
+            .expect("valid path with extra");
+        assert_eq!(parsed_with_extra.3, "/extra?query=1");
     }
 
     #[test]
-    fn parse_plugin_path_custom_prefix() {
-        let parsed = parse_plugin_path("/tenant/plugin/foo", "/api/v1").expect("valid path");
-        assert_eq!(parsed.2, "/api/v1/foo");
+    fn parse_full_path_custom_prefix() {
+        let parsed = parse_full_path("/tenant/mcp/plugin/foo", "/api/v1").expect("valid path");
+        assert_eq!(parsed.3, "/api/v1/foo");
+    }
+
+    #[test]
+    fn parse_tenant_namespace_plugin_three_components() {
+        assert!(parse_tenant_namespace_plugin("/t/p").is_none());
+        let parsed = parse_tenant_namespace_plugin("/t/n/p").expect("valid path");
+        assert_eq!(parsed, ("t".to_string(), "n".to_string(), "p".to_string()));
     }
 
     #[test]
@@ -1567,14 +1632,17 @@ mod tests {
 
     #[test]
     fn forward_path_uses_plugin_path() {
-        assert_eq!(forward_path("/tenant/plugin", "/"), "/");
-        assert_eq!(forward_path("/tenant/plugin/foo?x=1", "/"), "/foo?x=1");
-        assert_eq!(forward_path("/tenant/plugin", "/mcp"), "/mcp");
+        assert_eq!(forward_path("/tenant/mcp/plugin", "/"), "/");
+        assert_eq!(forward_path("/tenant/mcp/plugin/foo?x=1", "/"), "/foo?x=1");
+        assert_eq!(forward_path("/tenant/mcp/plugin", "/mcp"), "/mcp");
         assert_eq!(
-            forward_path("/tenant/plugin/foo?x=1", "/mcp"),
+            forward_path("/tenant/mcp/plugin/foo?x=1", "/mcp"),
             "/mcp/foo?x=1"
         );
-        assert_eq!(forward_path("/tenant/plugin/foo", "/api/v1"), "/api/v1/foo");
+        assert_eq!(
+            forward_path("/tenant/mcp/plugin/foo", "/api/v1"),
+            "/api/v1/foo"
+        );
     }
 
     #[test]
@@ -1746,6 +1814,7 @@ mod tests {
             container_name: "mcp_session_123".to_string(),
             staging_token: "stage".to_string(),
             tenant_name: "tenant1".to_string(),
+            namespace: "mcp".to_string(),
             plugin_name: "plugin-a".to_string(),
             port: 8000,
             path: "/mcp".to_string(),
