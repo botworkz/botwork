@@ -70,7 +70,15 @@ async fn wire_contract_validation_paths() {
         Case {
             method: "POST",
             path: "/bind-agent",
-            body: r#"{"staging_path":"/var/lib/botwork/tenants/acme/staging/aabbccddeeff","agent_dir":"/var/lib/botwork/tenants/acme/agents/bad.agent"}"#,
+            body: r#"{"staging_path":"/var/lib/botwork/tenants/acme/staging/aabbccddeeff","agent_dir":"/var/lib/botwork/tenants/acme/namespaces/mcp/agents/bad.agent"}"#,
+            expected_status: "HTTP/1.1 400 Bad Request",
+            expected_body: r#"{"error": "invalid agent_dir"}"#,
+        },
+        Case {
+            // Old-format agent_dir without namespaces component → 400
+            method: "POST",
+            path: "/bind-agent",
+            body: r#"{"staging_path":"/var/lib/botwork/tenants/acme/staging/aabbccddeeff","agent_dir":"/var/lib/botwork/tenants/acme/agents/my-agent"}"#,
             expected_status: "HTTP/1.1 400 Bad Request",
             expected_body: r#"{"error": "invalid agent_dir"}"#,
         },

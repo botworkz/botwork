@@ -160,6 +160,8 @@ async fn session_registry_record_spawn_and_read() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             &now,
         )
@@ -174,6 +176,8 @@ async fn session_registry_record_spawn_and_read() {
         entry.staging_path,
         "/var/lib/botwork/tenants/acme/staging/aabbccddeeff"
     );
+    assert_eq!(entry.tenant, "acme");
+    assert_eq!(entry.namespace, "mcp");
     assert_eq!(entry.image, "botwork/mcp-echo:local");
     assert_eq!(entry.created_at, now);
     assert!(entry.mcp_session_id.is_none());
@@ -191,6 +195,8 @@ async fn session_registry_record_mcp_session_id_roundtrip() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/staging/aabbccddeeff",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )
@@ -232,8 +238,15 @@ async fn session_registry_atomic_write_under_concurrent_mutation() {
         handles.push(tokio::spawn(async move {
             let container = format!("mcp_session_{i:012x}");
             let staging = format!("/staging/{i:012x}");
-            reg.record_spawn(&container, &staging, "botwork/mcp-echo:local", &utc_now())
-                .await;
+            reg.record_spawn(
+                &container,
+                &staging,
+                "acme",
+                "mcp",
+                "botwork/mcp-echo:local",
+                &utc_now(),
+            )
+            .await;
         }));
     }
     for handle in handles {
@@ -316,6 +329,8 @@ async fn admin_get_sessions_includes_spawned_session() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             "2026-05-25T23:14:09Z",
         )
@@ -342,6 +357,8 @@ async fn admin_get_sessions_includes_spawned_session() {
         entry["staging_path"],
         "/var/lib/botwork/tenants/acme/staging/aabbccddeeff"
     );
+    assert_eq!(entry["tenant"], "acme");
+    assert_eq!(entry["namespace"], "mcp");
     assert_eq!(entry["image"], "botwork/mcp-echo:local");
     assert_eq!(entry["created_at"], "2026-05-25T23:14:09Z");
     // null fields must be present as null, not omitted
@@ -363,6 +380,8 @@ async fn session_registry_record_teardown_removes_entry_and_persists() {
         .record_spawn(
             "mcp_session_aabbccddeeff",
             "/staging/aabbccddeeff",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )
@@ -397,6 +416,8 @@ async fn session_registry_record_teardown_absent_container_is_noop() {
         .record_spawn(
             "mcp_session_other",
             "/staging/other",
+            "acme",
+            "mcp",
             "botwork/mcp-echo:local",
             &utc_now(),
         )

@@ -16,6 +16,8 @@ pub fn utc_now() -> String {
 pub struct SessionEntry {
     pub container: String,
     pub staging_path: String,
+    pub tenant: String,
+    pub namespace: String,
     pub mcp_session_id: Option<String>,
     pub agent_id: Option<String>,
     pub image: String,
@@ -84,6 +86,8 @@ impl SessionRegistry {
         &self,
         container: &str,
         staging_path: &str,
+        tenant: &str,
+        namespace: &str,
         image: &str,
         created_at: &str,
     ) {
@@ -93,6 +97,8 @@ impl SessionRegistry {
             SessionEntry {
                 container: container.to_string(),
                 staging_path: staging_path.to_string(),
+                tenant: tenant.to_string(),
+                namespace: namespace.to_string(),
                 mcp_session_id: None,
                 agent_id: None,
                 image: image.to_string(),

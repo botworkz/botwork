@@ -28,7 +28,7 @@ impl Validators {
         ))
         .map_err(|err| err.to_string())?;
         let agent_dir_re = Regex::new(&format!(
-            r"^/var/lib/botwork/tenants/{TENANT_RE}/agents/[A-Za-z0-9_-]{{1,64}}$"
+            r"^/var/lib/botwork/tenants/{TENANT_RE}/namespaces/{TENANT_RE}/agents/[A-Za-z0-9_-]{{1,64}}$"
         ))
         .map_err(|err| err.to_string())?;
 
@@ -154,7 +154,8 @@ mod tests {
         assert!(validators.valid_image("botwork/mcp-echo:local"));
         assert!(validators.valid_network("botwork_network-1"));
         assert!(validators.valid_staging_path("/var/lib/botwork/tenants/acme/staging/aabbccddeeff"));
-        assert!(validators.valid_agent_dir("/var/lib/botwork/tenants/acme/agents/my_agent-1"));
+        assert!(validators
+            .valid_agent_dir("/var/lib/botwork/tenants/acme/namespaces/mcp/agents/my_agent-1"));
     }
 
     #[test]
@@ -175,6 +176,8 @@ mod tests {
         );
         assert!(!validators.valid_agent_dir("/var/lib/botwork/tenants/acme/agents/invalid.agent"));
         assert!(!validators.valid_agent_dir("/tmp/agents/agentA"));
+        assert!(!validators
+            .valid_agent_dir("/var/lib/botwork/tenants/acme/namespaces/mcp/agents/invalid.agent"));
     }
 
     #[test]
@@ -190,9 +193,12 @@ mod tests {
         );
 
         let agent = validators
-            .safe_agent_dir("/var/lib/botwork/tenants/acme/agents/agent_A")
+            .safe_agent_dir("/var/lib/botwork/tenants/acme/namespaces/mcp/agents/agent_A")
             .expect("agent dir should validate");
-        assert_eq!(agent, "/var/lib/botwork/tenants/acme/agents/agent_A");
+        assert_eq!(
+            agent,
+            "/var/lib/botwork/tenants/acme/namespaces/mcp/agents/agent_A"
+        );
     }
 
     #[test]
