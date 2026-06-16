@@ -25,6 +25,13 @@ fn container_name_pattern() -> &'static Regex {
 }
 
 /// Runs forever, restarting the `docker events` subscription on failure.
+///
+/// This function is intended to be spawned once at launcher startup as a
+/// background `tokio::task`.  It **never returns** — on each restart it waits
+/// 2 seconds before re-subscribing so transient docker daemon hiccups do not
+/// cause a tight restart loop.  Any exit events that occurred while the
+/// subscription was down are picked up by the broker-side liveness poll
+/// (mechanism B).
 pub async fn run_event_loop(broker_socket_path: String) -> ! {
     loop {
         log_info("events: starting docker events subscription");
@@ -78,9 +85,15 @@ async fn run_event_loop_once(broker_socket_path: &str) {
 
 /// Parses a JSON line from `docker events --format '{{json .}}'` output.
 ///
-/// Returns `Some((container_name, event_action, exit_code))` when the line
-/// represents a `die`/`destroy`/`oom` event for a container whose name matches
-/// `^mcp_session_[a-f0-9]+$`, or `None` otherwise (including malformed lines).
+/// Returns `Some((container_name, event_action, exit_code))` where:
+/// - `container_name` — the `Actor.Attributes.name` field, e.g. `mcp_session_5ea57ab800c5`
+/// - `event_action`  — one of `"die"`, `"destroy"`, or `"oom"`
+/// - `exit_code`     — the process exit code from `Actor.Attributes.exitCode` if present
+///
+/// Returns `None` for any line that does not represent a `die`/`destroy`/`oom`
+/// event for a container whose name matches `^mcp_session_[a-f0-9]+$`, including
+/// malformed or incomplete JSON lines (which are silently dropped rather than
+/// causing a panic).
 pub fn parse_event_line(line: &str) -> Option<(String, String, Option<i64>)> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
 

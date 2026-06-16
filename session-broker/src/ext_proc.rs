@@ -519,10 +519,15 @@ async fn is_tombstoned(state: &AppState, mcp_session_id: &str) -> bool {
 
 /// Returns `true` if the container backing this transport session is running.
 ///
-/// Uses a TTL'd in-memory cache to avoid a `docker inspect` fork on every
-/// request.  On a cache miss (or expired entry) a single blocking
-/// `docker inspect` is performed.  If docker is unavailable the result
-/// defaults to `true` to avoid false-positive eviction.
+/// Uses a TTL'd in-memory cache (`LIVENESS_TTL`) keyed by container name to
+/// avoid a `docker inspect` fork on every request.
+///
+/// - **Cache hit** (entry present and not yet expired): returns `true` immediately.
+/// - **Cache miss or expired entry**: performs a single blocking `docker inspect`
+///   call, which may add a brief delay for the first request after expiry.
+///   On success, the container name is re-inserted into the cache.
+/// - **Docker unavailable** (`None` from `is_container_running`): defaults to
+///   `true` to avoid false-positive eviction when the docker CLI is unreachable.
 async fn check_container_liveness(state: &AppState, container_name: &str) -> bool {
     {
         let cache = state.liveness_cache.lock().await;
