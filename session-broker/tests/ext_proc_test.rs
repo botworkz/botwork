@@ -297,6 +297,7 @@ async fn request_headers_get_without_session_returns_400() {
     .await;
 
     assert_eq!(immediate_status(&response), Some(400));
+    assert_eq!(immediate_body(&response).as_deref(), Some("missing Mcp-Session-Id header"));
     assert_eq!(extract_upstream_mutation(&response), None);
 }
 
@@ -317,6 +318,7 @@ async fn request_headers_get_unknown_session_returns_404() {
     .await;
 
     assert_eq!(immediate_status(&response), Some(404));
+    assert_eq!(immediate_body(&response).as_deref(), Some("unknown mcp-session-id"));
     assert_eq!(extract_upstream_mutation(&response), None);
 }
 
