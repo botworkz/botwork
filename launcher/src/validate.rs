@@ -92,6 +92,25 @@ impl Validators {
     }
 }
 
+/// Returns `true` for env var names that carry sensitive data and must never
+/// appear on a subprocess argv.  The `BOTWORK_SECRET_` prefix is the project's
+/// canonical contract for secret-bearing env vars.
+///
+/// This contract is enforced in three places that must stay in sync:
+///   * `launcher/src/validate.rs::is_sensitive_env` (this file): which env
+///     values get routed to docker via stdin instead of argv.
+///   * `session-broker/src/plugin_registry.rs`: rejects user-supplied static
+///     env entries that use this prefix (reserved for vault-derived values).
+///   * `session-broker/src/secrets.rs::SECRET_ENV_PREFIX`: where the broker
+///     stamps secrets it fetched from the auth-broker before forwarding to
+///     the launcher.
+///
+/// Changing the prefix or adding a second sensitive prefix requires updating
+/// all three call sites.
+pub fn is_sensitive_env(name: &str) -> bool {
+    name.starts_with("BOTWORK_SECRET_")
+}
+
 pub fn valid_env_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() {
@@ -193,6 +212,17 @@ mod tests {
             .safe_agent_dir("/var/lib/botwork/tenants/acme/agents/agent_A")
             .expect("agent dir should validate");
         assert_eq!(agent, "/var/lib/botwork/tenants/acme/agents/agent_A");
+    }
+
+    #[test]
+    fn is_sensitive_env_classifies_by_prefix() {
+        use super::is_sensitive_env;
+
+        assert!(is_sensitive_env("BOTWORK_SECRET_GITHUB_COM_PAT"));
+        assert!(is_sensitive_env("BOTWORK_SECRET_"));
+        assert!(!is_sensitive_env("BOTWORK_NOT_SECRET"));
+        assert!(!is_sensitive_env("FOO"));
+        assert!(!is_sensitive_env(""));
     }
 
     #[test]
