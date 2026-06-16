@@ -735,8 +735,8 @@ mod tests {
 
     #[test]
     fn launch_payload_non_sensitive_env_with_newline_is_accepted() {
-        // Non-sensitive env values with newlines are passed as -e on argv where they
-        // are safe; only sensitive values (env-file format) must be free of newlines.
+        // Non-sensitive values are passed via -e on argv; the env-file format
+        // restriction (no newlines) only applies to sensitive vars routed via stdin.
         let validators = validators();
         let mut payload = valid_launch_payload();
         payload.insert(

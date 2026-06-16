@@ -180,11 +180,11 @@ fn docker_run_args(request: &ContainerLaunch<'_>) -> Vec<String> {
     ];
 
     for (name, value) in request.env {
+        debug_assert!(valid_env_name(name), "invalid env name: {}", name);
         if is_sensitive_env(name) {
             // Sensitive vars are routed via stdin (--env-file /dev/stdin); never on argv.
             continue;
         }
-        debug_assert!(valid_env_name(name), "invalid env name: {}", name);
         run_cmd.push("-e".to_string());
         run_cmd.push(format!("{name}={value}"));
     }
