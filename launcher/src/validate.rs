@@ -28,6 +28,8 @@ impl Validators {
         ))
         .map_err(|err| err.to_string())?;
         let agent_dir_re = Regex::new(&format!(
+            // Namespace shares tenant's character class (lowercase, digits, hyphens, 1-31 chars).
+            // Reusing TENANT_RE here; introduce a separate NAMESPACE_RE if the rules diverge.
             r"^/var/lib/botwork/tenants/{TENANT_RE}/namespaces/{TENANT_RE}/agents/[A-Za-z0-9_-]{{1,64}}$"
         ))
         .map_err(|err| err.to_string())?;

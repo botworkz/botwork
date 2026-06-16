@@ -2104,7 +2104,7 @@ async fn request_headers_post_missing_namespace_returns_400() {
     assert!(
         immediate_body(&response)
             .unwrap_or_default()
-            .contains("plugin required: use /<tenant>/<namespace>/<plugin>"),
+            .contains("namespace required: use /<tenant>/<namespace>/<plugin>"),
         "expected namespace hint in error body: {:?}",
         immediate_body(&response)
     );

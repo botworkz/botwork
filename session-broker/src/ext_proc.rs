@@ -988,7 +988,7 @@ impl ExternalProcessorService {
                     stream,
                     "request_headers",
                     400,
-                    "plugin required: use /<tenant>/<namespace>/<plugin>",
+                    "namespace required: use /<tenant>/<namespace>/<plugin>",
                 );
             };
 
