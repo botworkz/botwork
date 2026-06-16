@@ -95,6 +95,18 @@ impl Validators {
 /// Returns `true` for env var names that carry sensitive data and must never
 /// appear on a subprocess argv.  The `BOTWORK_SECRET_` prefix is the project's
 /// canonical contract for secret-bearing env vars.
+///
+/// This contract is enforced in three places that must stay in sync:
+///   * `launcher/src/validate.rs::is_sensitive_env` (this file): which env
+///     values get routed to docker via stdin instead of argv.
+///   * `session-broker/src/plugin_registry.rs`: rejects user-supplied static
+///     env entries that use this prefix (reserved for vault-derived values).
+///   * `session-broker/src/secrets.rs::SECRET_ENV_PREFIX`: where the broker
+///     stamps secrets it fetched from the auth-broker before forwarding to
+///     the launcher.
+///
+/// Changing the prefix or adding a second sensitive prefix requires updating
+/// all three call sites.
 pub fn is_sensitive_env(name: &str) -> bool {
     name.starts_with("BOTWORK_SECRET_")
 }
