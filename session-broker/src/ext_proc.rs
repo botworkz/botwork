@@ -619,13 +619,12 @@ impl ExternalProcessorService {
 
         if stream.method == "GET" {
             if stream.mcp_session_id.is_none() {
-                log_phase(
+                return logged_immediate_response(
                     stream,
                     "request_headers",
-                    "continue_get_without_session",
-                    &[("authority", !stream.authority.is_empty())],
+                    400,
+                    "missing Mcp-Session-Id header",
                 );
-                return request_headers_continue();
             }
             let transport = {
                 let sessions = state.transport_sessions.lock().await;
@@ -634,13 +633,12 @@ impl ExternalProcessorService {
                     .cloned()
             };
             let Some(transport) = transport else {
-                log_phase(
+                return logged_immediate_response(
                     stream,
                     "request_headers",
-                    "continue_unknown_get_session",
-                    &[],
+                    404,
+                    "unknown mcp-session-id",
                 );
-                return request_headers_continue();
             };
             if transport.tenant_name != stream.trusted_tenant {
                 return logged_immediate_response(
