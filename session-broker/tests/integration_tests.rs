@@ -191,7 +191,7 @@ async fn session_registry_load_rejects_pre_namespace_entries() {
         .expect_err("must refuse to load pre-namespace registry");
 
     match err {
-        RegistryLoadError::SchemaMismatch { offending } => {
+        RegistryLoadError::SchemaMismatch { ref offending } => {
             assert_eq!(offending.len(), 2);
             assert!(offending.contains(&"mcp_session_old1".to_string()));
             assert!(offending.contains(&"mcp_session_old2".to_string()));

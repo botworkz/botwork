@@ -2290,41 +2290,5 @@ async fn session_entry_serialization_includes_tenant_and_namespace() {
     assert_eq!(entry["namespace"], "dev");
 }
 
-#[tokio::test]
-async fn load_from_disk_skips_old_format_entries_without_namespace() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("sessions.json");
-
-    // Write an entry in the old format (no tenant/namespace fields)
-    let old_json = r#"{
-        "version": 1,
-        "updated_at": "2026-01-01T00:00:00Z",
-        "sessions": {
-            "mcp_session_old": {
-                "container": "mcp_session_old",
-                "staging_path": "/staging/old",
-                "image": "botwork/mcp-echo:local",
-                "created_at": "2026-01-01T00:00:00Z",
-                "mcp_session_id": null,
-                "agent_id": null,
-                "bound_at": null
-            }
-        }
-    }"#;
-    std::fs::write(&path, old_json).unwrap();
-
-    let registry =
-        botwork_session_broker::session_registry::SessionRegistry::new(path.to_str().unwrap());
-    registry.load_and_reconcile().await;
-
-    // Old-format entry (missing tenant/namespace) must be silently skipped.
-    let data = registry.read().await;
-    assert!(
-        data.sessions.is_empty(),
-        "old-format entries should be skipped on load, but got: {:?}",
-        data.sessions.keys().collect::<Vec<_>>()
-    );
-}
-
 #[allow(dead_code)]
 fn _use_teardown_info_type(_: TeardownInfo) {}
