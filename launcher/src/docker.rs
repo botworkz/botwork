@@ -1,10 +1,9 @@
 use std::fs;
 
-use crate::cmd::{log_info, run_command};
+use crate::cmd::{log_info, run_command, run_command_with_stdin};
 use crate::error::LauncherError;
 use crate::mount::{fallback_message, is_not_mounted_or_einval, setup_staging_dir};
-use crate::validate::valid_env_name;
-use crate::validate::Validators;
+use crate::validate::{is_sensitive_env, valid_env_name, Validators};
 
 pub struct ContainerLaunch<'a> {
     pub name: &'a str,
@@ -73,8 +72,13 @@ pub fn ensure_container(
     }
 
     let run_cmd = docker_run_args(request);
+    let stdin_bytes = sensitive_env_stdin(request.env);
 
-    let launch = run_command(&run_cmd).map_err(LauncherError::Internal)?;
+    let launch = if stdin_bytes.is_empty() {
+        run_command(&run_cmd).map_err(LauncherError::Internal)?
+    } else {
+        run_command_with_stdin(&run_cmd, &stdin_bytes).map_err(LauncherError::Internal)?
+    };
     if launch.returncode != 0 {
         log_docker_failure("run", &launch);
         return Err(LauncherError::Internal(fallback_message(
@@ -176,9 +180,19 @@ fn docker_run_args(request: &ContainerLaunch<'_>) -> Vec<String> {
     ];
 
     for (name, value) in request.env {
+        if is_sensitive_env(name) {
+            // Sensitive vars are routed via stdin (--env-file /dev/stdin); never on argv.
+            continue;
+        }
         debug_assert!(valid_env_name(name), "invalid env name: {}", name);
         run_cmd.push("-e".to_string());
         run_cmd.push(format!("{name}={value}"));
+    }
+
+    if request.env.iter().any(|(name, _)| is_sensitive_env(name)) {
+        // Docker reads the env-file from its own stdin, which the launcher pipes.
+        run_cmd.push("--env-file".to_string());
+        run_cmd.push("/dev/stdin".to_string());
     }
 
     if request.read_only_rootfs {
@@ -198,9 +212,28 @@ fn docker_run_args(request: &ContainerLaunch<'_>) -> Vec<String> {
     run_cmd
 }
 
+/// Builds the `--env-file` content for sensitive env vars: one `NAME=VALUE\n`
+/// line per entry.  Returns an empty `Vec` when there are no sensitive vars,
+/// in which case the caller should use regular `run_command` (no stdin pipe).
+fn sensitive_env_stdin(env: &[(String, String)]) -> Vec<u8> {
+    let mut content = Vec::new();
+    for (name, value) in env {
+        if is_sensitive_env(name) {
+            content.extend_from_slice(name.as_bytes());
+            content.push(b'=');
+            content.extend_from_slice(value.as_bytes());
+            content.push(b'\n');
+        }
+    }
+    content
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{docker_run_args, is_no_such_container, is_no_such_object, ContainerLaunch};
+    use super::{
+        docker_run_args, is_no_such_container, is_no_such_object, sensitive_env_stdin,
+        ContainerLaunch,
+    };
 
     #[test]
     fn docker_stderr_classification_matches_python_behavior() {
@@ -306,5 +339,96 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["-e", "FOO=value with spaces and =equals="]));
+    }
+
+    #[test]
+    fn sensitive_env_not_on_argv_and_env_file_flag_added() {
+        let env = vec![
+            ("FOO".to_string(), "plain".to_string()),
+            ("BOTWORK_SECRET_TOKEN".to_string(), "s3cr3t".to_string()),
+        ];
+        let args = docker_run_args(&ContainerLaunch {
+            name: "mcp_session_aabbccddeeff",
+            image: "botwork/mcp-echo:local",
+            network: "botwork",
+            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            with_workspace: false,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            pids_limit: 256,
+            cpu_limit: "1.0",
+            memory_limit: "512m",
+            read_only_rootfs: false,
+            env: &env,
+        });
+
+        // Secret value must never appear anywhere in argv.
+        assert!(
+            !args.iter().any(|a| a.contains("s3cr3t")),
+            "secret value leaked onto argv"
+        );
+        // Secret name must not appear as -e NAME=VALUE.
+        assert!(
+            !args
+                .windows(2)
+                .any(|pair| pair[0] == "-e" && pair[1].starts_with("BOTWORK_SECRET_")),
+            "secret name leaked via -e onto argv"
+        );
+        // Plain env must still be on argv.
+        assert!(
+            args.windows(2).any(|pair| pair == ["-e", "FOO=plain"]),
+            "plain env missing from argv"
+        );
+        // --env-file /dev/stdin must be present.
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--env-file", "/dev/stdin"]),
+            "--env-file /dev/stdin missing"
+        );
+    }
+
+    #[test]
+    fn sensitive_env_stdin_content_is_correct() {
+        let env = vec![
+            ("FOO".to_string(), "plain".to_string()),
+            ("BOTWORK_SECRET_A".to_string(), "alpha".to_string()),
+            ("BOTWORK_SECRET_B".to_string(), "beta=value".to_string()),
+        ];
+        let content = sensitive_env_stdin(&env);
+        let text = std::str::from_utf8(&content).expect("utf8");
+
+        // Only sensitive vars should appear in the stdin content.
+        assert!(!text.contains("FOO"), "plain env leaked into stdin content");
+        assert!(text.contains("BOTWORK_SECRET_A=alpha\n"));
+        assert!(text.contains("BOTWORK_SECRET_B=beta=value\n"));
+    }
+
+    #[test]
+    fn no_env_file_flag_when_no_sensitive_env() {
+        let env = vec![("FOO".to_string(), "bar".to_string())];
+        let args = docker_run_args(&ContainerLaunch {
+            name: "mcp_session_aabbccddeeff",
+            image: "botwork/mcp-echo:local",
+            network: "botwork",
+            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            with_workspace: false,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            pids_limit: 256,
+            cpu_limit: "1.0",
+            memory_limit: "512m",
+            read_only_rootfs: false,
+            env: &env,
+        });
+
+        assert!(
+            !args.contains(&"--env-file".to_string()),
+            "--env-file must not appear when there is no sensitive env"
+        );
+        let stdin = sensitive_env_stdin(&env);
+        assert!(
+            stdin.is_empty(),
+            "stdin bytes must be empty for non-sensitive env"
+        );
     }
 }

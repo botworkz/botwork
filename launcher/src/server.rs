@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::docker::{self, ContainerLaunch};
 use crate::error::LauncherError;
 use crate::mount;
-use crate::validate::Validators;
+use crate::validate::{is_sensitive_env, Validators};
 
 const MAX_JSON_BODY_BYTES: usize = 64 * 1024;
 
@@ -352,6 +352,11 @@ fn parse_launch_payload<'a>(
                 }
                 if value.contains('\0') {
                     return Err(LauncherError::BadRequest("invalid env value".to_string()));
+                }
+                if is_sensitive_env(name) && value.contains('\n') {
+                    return Err(LauncherError::BadRequest(
+                        "sensitive env value must not contain newline".to_string(),
+                    ));
                 }
                 if value.len() > MAX_ENV_VALUE_LEN {
                     return Err(LauncherError::PayloadTooLarge(
@@ -710,6 +715,38 @@ mod tests {
             parse_launch_payload(&payload, &validators),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid env value"
         ));
+    }
+
+    #[test]
+    fn launch_payload_sensitive_env_with_newline_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "env".to_string(),
+            serde_json::json!([{"name": "BOTWORK_SECRET_TOKEN", "value": "line1\nline2"}]),
+        );
+
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators),
+            Err(LauncherError::BadRequest(msg))
+                if msg == "sensitive env value must not contain newline"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_non_sensitive_env_with_newline_is_accepted() {
+        // Non-sensitive env values with newlines are passed as -e on argv where they
+        // are safe; only sensitive values (env-file format) must be free of newlines.
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "env".to_string(),
+            serde_json::json!([{"name": "BOTWORK_FOO", "value": "line1\nline2"}]),
+        );
+
+        let parsed = parse_launch_payload(&payload, &validators)
+            .expect("non-sensitive env with newline should be accepted");
+        assert_eq!(parsed.env[0].1, "line1\nline2");
     }
 
     #[test]

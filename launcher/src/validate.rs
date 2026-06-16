@@ -92,6 +92,13 @@ impl Validators {
     }
 }
 
+/// Returns `true` for env var names that carry sensitive data and must never
+/// appear on a subprocess argv.  The `BOTWORK_SECRET_` prefix is the project's
+/// canonical contract for secret-bearing env vars.
+pub fn is_sensitive_env(name: &str) -> bool {
+    name.starts_with("BOTWORK_SECRET_")
+}
+
 pub fn valid_env_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() {
@@ -193,6 +200,17 @@ mod tests {
             .safe_agent_dir("/var/lib/botwork/tenants/acme/agents/agent_A")
             .expect("agent dir should validate");
         assert_eq!(agent, "/var/lib/botwork/tenants/acme/agents/agent_A");
+    }
+
+    #[test]
+    fn is_sensitive_env_classifies_by_prefix() {
+        use super::is_sensitive_env;
+
+        assert!(is_sensitive_env("BOTWORK_SECRET_GITHUB_COM_PAT"));
+        assert!(is_sensitive_env("BOTWORK_SECRET_"));
+        assert!(!is_sensitive_env("BOTWORK_NOT_SECRET"));
+        assert!(!is_sensitive_env("FOO"));
+        assert!(!is_sensitive_env(""));
     }
 
     #[test]
