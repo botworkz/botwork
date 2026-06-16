@@ -3,6 +3,7 @@ use std::ffi::CString;
 
 pub const PREFIX: &str = "[botwork-launcher]";
 pub const DEFAULT_SOCKET_PATH: &str = "/run/botwork/launcher.sock";
+pub const DEFAULT_BROKER_SOCKET_PATH: &str = "/run/botwork/broker.sock";
 // Override with BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX when needed.
 pub const DEFAULT_IMAGE_ALLOWLIST: &str = r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$";
 pub const DEFAULT_CONTAINER_PIDS_LIMIT: u32 = 256;
@@ -22,6 +23,7 @@ pub struct Config {
     pub container_cpu_limit: String,
     pub container_memory_limit: String,
     pub container_read_only_rootfs: bool,
+    pub broker_socket_path: String,
 }
 
 impl Config {
@@ -77,6 +79,8 @@ impl Config {
         }
         let container_read_only_rootfs =
             parse_bool_env("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS")?.unwrap_or(false);
+        let broker_socket_path = env::var("BOTWORK_BROKER_SOCKET_PATH")
+            .unwrap_or_else(|_| DEFAULT_BROKER_SOCKET_PATH.to_string());
 
         Ok(Self {
             socket_path,
@@ -90,6 +94,7 @@ impl Config {
             container_cpu_limit,
             container_memory_limit,
             container_read_only_rootfs,
+            broker_socket_path,
         })
     }
 }

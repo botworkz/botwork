@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use envoy_proto::envoy::config::core::v3::{
@@ -23,10 +23,10 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_ready, LauncherError};
 use crate::plugin_registry::{PluginConfig, UpstreamAuth};
 use crate::secrets;
-use crate::session_registry::utc_now;
+use crate::session_registry::{is_container_running, utc_now};
 use crate::{
     log_info, redact_token, AppState, PendingInit, TransportState, COLD_START_TIMEOUT,
-    TENANT_PLUGIN_PATH_RE, TENANT_RE,
+    LIVENESS_TTL, TENANT_PLUGIN_PATH_RE, TENANT_RE, TOMBSTONE_TTL,
 };
 
 static TENANT_PATTERN: OnceLock<Regex> = OnceLock::new();
@@ -485,6 +485,13 @@ async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
     )
     .await;
     {
+        let mut tombstones = state.tombstones.lock().await;
+        tombstones.insert(
+            teardown.mcp_session_id.clone(),
+            Instant::now() + TOMBSTONE_TTL,
+        );
+    }
+    {
         let mut sessions = state.transport_sessions.lock().await;
         sessions.remove(&teardown.mcp_session_id);
     }
@@ -492,6 +499,73 @@ async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
         .session_registry
         .record_teardown(&teardown.container_name)
         .await;
+}
+
+/// Returns `true` if `mcp_session_id` is currently tombstoned (i.e. a session
+/// was recently torn down with this id and requests should get an immediate 404).
+/// Expired tombstones are removed lazily on access.
+async fn is_tombstoned(state: &AppState, mcp_session_id: &str) -> bool {
+    let mut tombstones = state.tombstones.lock().await;
+    match tombstones.get(mcp_session_id).copied() {
+        Some(expires_at) if Instant::now() < expires_at => true,
+        Some(_) => {
+            // Expired tombstone — purge it
+            tombstones.remove(mcp_session_id);
+            false
+        }
+        None => false,
+    }
+}
+
+/// Returns `true` if the container backing this transport session is running.
+///
+/// Uses a TTL'd in-memory cache to avoid a `docker inspect` fork on every
+/// request.  On a cache miss (or expired entry) a single blocking
+/// `docker inspect` is performed.  If docker is unavailable the result
+/// defaults to `true` to avoid false-positive eviction.
+async fn check_container_liveness(state: &AppState, container_name: &str) -> bool {
+    {
+        let cache = state.liveness_cache.lock().await;
+        if let Some(&expires_at) = cache.get(container_name) {
+            if Instant::now() < expires_at {
+                return true; // cache hit
+            }
+        }
+    }
+    // Cache miss or expired — run docker inspect (blocking, but infrequent)
+    let is_running = is_container_running(container_name).unwrap_or(true);
+    if is_running {
+        let mut cache = state.liveness_cache.lock().await;
+        cache.insert(container_name.to_string(), Instant::now() + LIVENESS_TTL);
+    }
+    is_running
+}
+
+/// Evicts a transport session that was found to be backed by a dead container.
+///
+/// Tombstones the session id, removes the transport entry, records teardown in
+/// the registry, and best-effort-calls the launcher teardown helper (spawned as
+/// a background task so the calling request handler is not delayed).
+async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &TransportState) {
+    let container_name = transport.container_name.clone();
+    let staging_path = staging_path(&transport.tenant_name, &transport.staging_token);
+    log_info(&format!(
+        "liveness_check: evicting dead session={mcp_session_id} container={container_name}"
+    ));
+    {
+        let mut tombstones = state.tombstones.lock().await;
+        tombstones.insert(mcp_session_id.to_string(), Instant::now() + TOMBSTONE_TTL);
+    }
+    {
+        let mut sessions = state.transport_sessions.lock().await;
+        sessions.remove(mcp_session_id);
+    }
+    let registry = Arc::clone(&state.session_registry);
+    let launcher_path = state.launcher_socket_path.clone();
+    tokio::spawn(async move {
+        registry.record_teardown(&container_name).await;
+        call_teardown(&launcher_path, &container_name, &staging_path).await;
+    });
 }
 
 async fn spawn_new_container(
@@ -626,10 +700,19 @@ impl ExternalProcessorService {
                     "missing Mcp-Session-Id header",
                 );
             }
+            let mcp_session_id = stream.mcp_session_id.as_deref().unwrap();
+            if is_tombstoned(state, mcp_session_id).await {
+                return logged_immediate_response(
+                    stream,
+                    "request_headers",
+                    404,
+                    "unknown mcp-session-id",
+                );
+            }
             let transport = {
                 let sessions = state.transport_sessions.lock().await;
                 sessions
-                    .get(stream.mcp_session_id.as_deref().unwrap())
+                    .get(mcp_session_id)
                     .cloned()
             };
             let Some(transport) = transport else {
@@ -660,7 +743,7 @@ impl ExternalProcessorService {
                 if path_plugin_name != transport.plugin_name {
                     log_info(&format!(
                         "session={} bound_plugin={} request_plugin={}",
-                        stream.mcp_session_id.as_deref().unwrap_or(""),
+                        mcp_session_id,
                         transport.plugin_name,
                         path_plugin_name
                     ));
@@ -669,7 +752,7 @@ impl ExternalProcessorService {
             let rewritten_path = forward_path(&stream.path, &transport.path);
             let (upstream_authorization, strip_authorization) = route_authorization_for_transport(
                 state,
-                stream.mcp_session_id.as_deref(),
+                Some(mcp_session_id),
                 &transport,
             );
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
@@ -699,10 +782,19 @@ impl ExternalProcessorService {
                     "missing Mcp-Session-Id header",
                 );
             }
+            let mcp_session_id = stream.mcp_session_id.as_deref().unwrap();
+            if is_tombstoned(state, mcp_session_id).await {
+                return logged_immediate_response(
+                    stream,
+                    "request_headers",
+                    404,
+                    "unknown mcp-session-id",
+                );
+            }
             let transport = {
                 let sessions = state.transport_sessions.lock().await;
                 sessions
-                    .get(stream.mcp_session_id.as_deref().unwrap())
+                    .get(mcp_session_id)
                     .cloned()
             };
             let Some(transport) = transport else {
@@ -713,6 +805,16 @@ impl ExternalProcessorService {
                     "unknown mcp-session-id",
                 );
             };
+            // Liveness check: if container is dead, evict and return 404
+            if !check_container_liveness(state, &transport.container_name).await {
+                evict_dead_session(state, mcp_session_id, &transport).await;
+                return logged_immediate_response(
+                    stream,
+                    "request_headers",
+                    404,
+                    "unknown mcp-session-id",
+                );
+            }
             if transport.tenant_name != stream.trusted_tenant {
                 return logged_immediate_response(
                     stream,
@@ -733,7 +835,7 @@ impl ExternalProcessorService {
                 if path_plugin_name != transport.plugin_name {
                     log_info(&format!(
                         "session={} bound_plugin={} request_plugin={}",
-                        stream.mcp_session_id.as_deref().unwrap_or(""),
+                        mcp_session_id,
                         transport.plugin_name,
                         path_plugin_name
                     ));
@@ -742,15 +844,12 @@ impl ExternalProcessorService {
             let rewritten_path = forward_path(&stream.path, &transport.path);
             let (upstream_authorization, strip_authorization) = route_authorization_for_transport(
                 state,
-                stream.mcp_session_id.as_deref(),
+                Some(mcp_session_id),
                 &transport,
             );
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
             stream.teardown_on_response = Some(TeardownInfo {
-                mcp_session_id: stream
-                    .mcp_session_id
-                    .clone()
-                    .expect("mcp_session_id must be present in DELETE branch"),
+                mcp_session_id: mcp_session_id.to_string(),
                 container_name: transport.container_name.clone(),
                 staging_path: staging_path(&transport.tenant_name, &transport.staging_token),
             });
@@ -772,12 +871,30 @@ impl ExternalProcessorService {
         }
 
         if stream.method == "POST" {
-            if let Some(ref mcp_session_id) = stream.mcp_session_id {
+            if let Some(ref mcp_session_id) = stream.mcp_session_id.clone() {
+                if is_tombstoned(state, mcp_session_id).await {
+                    return logged_immediate_response(
+                        stream,
+                        "request_headers",
+                        404,
+                        "unknown mcp-session-id",
+                    );
+                }
                 let transport = {
                     let sessions = state.transport_sessions.lock().await;
                     sessions.get(mcp_session_id).cloned()
                 };
                 if let Some(transport) = transport {
+                    // Liveness check: if container is dead, evict and return 404
+                    if !check_container_liveness(state, &transport.container_name).await {
+                        evict_dead_session(state, mcp_session_id, &transport).await;
+                        return logged_immediate_response(
+                            stream,
+                            "request_headers",
+                            404,
+                            "unknown mcp-session-id",
+                        );
+                    }
                     if transport.tenant_name != stream.trusted_tenant {
                         return logged_immediate_response(
                             stream,
@@ -1300,6 +1417,8 @@ mod tests {
             pending_init: Arc::new(Mutex::new(HashMap::new())),
             launcher_socket_path: "/tmp/ext-proc-unit-launcher.sock".to_string(),
             auth_broker_url: "http://127.0.0.1:1".to_string(),
+            tombstones: Arc::new(Mutex::new(HashMap::new())),
+            liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

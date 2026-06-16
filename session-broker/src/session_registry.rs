@@ -267,3 +267,33 @@ pub fn try_list_running_session_containers() -> Option<std::collections::HashSet
         }
     }
 }
+
+/// Checks whether a specific container is currently running.
+///
+/// Returns `Some(true)` if running, `Some(false)` if the container exists but
+/// is not running or does not exist, `None` when the docker CLI is unavailable
+/// (treat as "unknown / assume alive" to avoid false-positive eviction).
+pub fn is_container_running(name: &str) -> Option<bool> {
+    let result = std::process::Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Running}}", name])
+        .output();
+
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log_info("docker CLI not available; skipping liveness check");
+            None
+        }
+        Err(e) => {
+            log_info(&format!("docker inspect failed for {name}: {e}"));
+            None
+        }
+        Ok(output) if !output.status.success() => {
+            // Container not known to docker
+            Some(false)
+        }
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Some(stdout == "true")
+        }
+    }
+}

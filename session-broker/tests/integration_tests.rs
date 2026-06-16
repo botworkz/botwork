@@ -262,6 +262,8 @@ fn app_state_for_registry(registry: Arc<SessionRegistry>) -> AppState {
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path: "/tmp/launcher.sock".to_string(),
         auth_broker_url: "http://127.0.0.1:1".to_string(),
+        tombstones: Arc::new(Mutex::new(HashMap::new())),
+        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
