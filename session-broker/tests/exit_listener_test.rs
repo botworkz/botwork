@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use botwork_session_broker::config_broker::UpstreamAuth;
 use botwork_session_broker::exit_listener::handle_container_exit;
 use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
 use botwork_session_broker::{AppState, TransportState};
@@ -10,12 +11,12 @@ use tokio::sync::Mutex;
 
 fn make_state(registry: Arc<SessionRegistry>) -> AppState {
     AppState {
-        plugin_registry: HashMap::new(),
         session_registry: registry,
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path: "/tmp/missing-launcher.sock".to_string(),
         auth_broker_url: "http://127.0.0.1:1".to_string(),
+        config_broker_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -31,6 +32,7 @@ fn sample_transport(container: &str) -> TransportState {
         plugin_name: "plugin-a".to_string(),
         port: 8000,
         path: "/mcp".to_string(),
+        upstream_auth: UpstreamAuth::None,
         upstream_authorization: None,
         agent_id: None,
     }

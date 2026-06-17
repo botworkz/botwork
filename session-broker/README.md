@@ -1,5 +1,31 @@
 # session-broker
 
+## Architecture: per-session routing only
+
+`session-broker` is the routing component. On every request it decides which
+upstream container to forward traffic to, and on first contact it asks the
+launcher to spin up a per-session container.
+
+It does **not** own a static plugin registry: the parsed view of
+`/etc/botwork/plugins.yaml` lives in
+[`botwork-config-broker`](../config-broker/README.md) and is fetched per spawn
+via `POST /resolve`. Spawn is the only path that talks to config-broker; the
+hot, known-session routing path reads everything it needs off
+`TransportState`.
+
+```
+goose / curl
+    │
+    ▼
+  Envoy
+    │  ext_authz → auth-broker        ── x-botwork-cap (mint)
+    │  ext_proc  → session-broker
+    │              ├─ /resolve        ──▶ config-broker  (spawn only)
+    │              └─ /secrets/fetch  ──▶ auth-broker    (spawn only)
+    │  
+    └─ /launch ────────────────────────▶ launcher
+```
+
 ## Per-tenant secrets injection
 
 `session-broker` is the only component that handles `x-botwork-cap`.
@@ -17,13 +43,60 @@ auth-broker and does not need cap awareness.
 
 Auth-broker fetch errors are fail-open: spawn continues with no injected
 secrets, so control-plane/auth-broker issues do not take down the MCP data
-plane.
+plane. Config-broker errors, by contrast, are fail-closed: spawn cannot
+proceed without a descriptor (see "Config-broker resolution" below).
+
+## Config-broker resolution
+
+Spawn-time descriptor resolution:
+
+```
+POST {BOTWORK_CONFIG_BROKER_ENDPOINT}/resolve
+  { "tenant": "<tenant>", "namespace": "<ns>", "plugin": "<name>" }
+```
+
+Successful response is the plugin's full descriptor (image, port, network,
+path, upstream_auth, resources, env, config_blob). See
+[`config-broker/README.md`](../config-broker/README.md) for the wire shape.
+
+### Failure modes
+
+| Result                                  | Client-facing status                              |
+|-----------------------------------------|---------------------------------------------------|
+| Operator-fault 4xx (`unknown_plugin`, `invalid_namespace`, `invalid_request`) | Pass-through 4xx with same message |
+| Server fault 5xx, transport error, timeout, garbage response | 502 with detail; spawn fails closed |
+
+There is **no** retry on the spawn-path config-broker call in v0. Fail-closed
+keeps the failure surface narrow and operator-debuggable; an outage of
+config-broker is operationally identical to a failure of any other dependency
+on the spawn path (already true of auth-broker on the bearer-token path).
+
+### Caching
+
+None in v0. Each spawn does one round-trip. Existing sessions are unaffected
+by config-broker availability — once a session is bound the policy
+(`upstream_auth`, `port`, `path`) is captured on `TransportState` and routing
+proceeds locally without further config-broker calls.
+
+## Plugin registry: ownership note
+
+The fields documented below — `config`, `env`, `resources`, `upstream_auth`,
+plus `image`, `port`, `network`, `path` — are the operator-facing shape of
+`/etc/botwork/plugins.yaml`. **The file lives with config-broker, not
+session-broker.** session-broker no longer reads it. The grammar and rules
+documented here are still authoritative — they're enforced at config-broker
+startup — but to edit the file you SSH to wherever config-broker runs and
+restart that service. session-broker does not need to be bounced.
+
+The remaining sections are kept here because the *injection semantics* (what
+ends up in the container's env vars, in what order, with what reservations)
+are session-broker's responsibility.
 
 ## Plugin registry: `config`
 
 Each plugin in `/etc/botwork/plugins.yaml` may declare a structured, non-secret
-`config:` mapping. The broker serialises this to compact JSON and injects it as
-`BOTWORK_MCP_CONFIG` in every spawned container for that plugin.
+`config:` mapping. config-broker serialises this to compact JSON; session-broker
+injects it as `BOTWORK_MCP_CONFIG` in every spawned container for that plugin.
 
 ```yaml
 plugins:
@@ -45,7 +118,7 @@ is responsible for parsing it.
 
 - **Name.** `BOTWORK_MCP_CONFIG` — exact and stable; renaming is a breaking
   change for every plugin.
-- **Shape.** Compact-JSON object (`{…}`).  The broker guarantees it is valid
+- **Shape.** Compact-JSON object (`{…}`).  config-broker guarantees it is valid
   JSON; the *content* under the top-level object is opaque pass-through.
 - **Absence semantics.** If the operator did not set `config:` the variable is
   **not present** in the container env (same as unset `env:` entries).  Plugins
@@ -62,7 +135,7 @@ is responsible for parsing it.
 
 - The field is optional and defaults to absent (no injection).
 - The value must be a YAML mapping; scalars and sequences at the top level are
-  rejected at broker startup.
+  rejected at config-broker startup.
 - The serialised JSON is capped at 64 KiB.
 - `BOTWORK_MCP_CONFIG` is **reserved** — setting it directly in the `env:`
   mapping is a parse-time error.  Use `config:` instead.
@@ -106,8 +179,8 @@ plugins:
 - At most 32 entries per plugin.
 - Duplicate keys within a single plugin's `env:` are rejected.
 
-Bad config causes broker startup to fail immediately with a message naming the
-offending plugin and field.
+Bad config causes config-broker startup to fail immediately with a message
+naming the offending plugin and field. session-broker is unaffected.
 
 ### Merge order
 
@@ -134,8 +207,8 @@ plugins:
 
 - Any of `cpus`, `memory`, and `pids` may be omitted.
 - `cpus`/`memory` must be non-empty strings; `pids` must be an integer in `1..=4294967295`.
-- Unknown keys under `resources` are rejected at broker startup.
-- Broker forwards this block to launcher `/launch`; omitted fields fall back to launcher defaults.
+- Unknown keys under `resources` are rejected at config-broker startup.
+- session-broker forwards this block to launcher `/launch`; omitted fields fall back to launcher defaults.
 
 ## Plugin registry: `upstream_auth`
 
@@ -163,7 +236,9 @@ These are two different credentials by design:
 When `upstream_auth: bearer/<service>` is enabled, `session-broker` exchanges
 `x-botwork-cap` with auth-broker, finds the single visible vault secret whose
 `service` matches `<service>`, and mints the upstream `Authorization` header
-from that secret.
+from that secret. The policy (`bearer/<service>` or `none`) is captured on
+`TransportState` at spawn time, so subsequent requests on the same session
+make the strip-or-forward decision locally.
 
 ### Operator workflow
 
@@ -189,3 +264,17 @@ plugins:
 
 If zero secrets match, or more than one secret matches the configured service,
 spawn fails with a 5xx so operators can fix vault state explicitly.
+
+## Environment variables
+
+- `BOTWORK_SESSION_BROKER_ADMIN_ADDR` (default `0.0.0.0:9002`).
+- `BOTWORK_SESSION_BROKER_GRPC_ADDR` (default `0.0.0.0:9001`).
+- `BOTWORK_LAUNCHER_SOCKET_PATH` (default `/run/botwork/launcher.sock`).
+- `BOTWORK_AUTH_BROKER_URL` (default `http://auth_broker:9100`).
+- `BOTWORK_CONFIG_BROKER_ENDPOINT` (default `http://config_broker:9200`).
+- `BOTWORK_BROKER_SOCKET_PATH` (default `/run/botwork/broker.sock`).
+- `BOTWORK_SESSION_REGISTRY_PATH` (default `/var/lib/botwork/sessions.json`).
+- `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` (default `30`).
+
+`BOTWORK_PLUGIN_REGISTRY_PATH` is no longer read by session-broker — it is now
+config-broker's environment variable.
