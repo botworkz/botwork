@@ -10,6 +10,7 @@ FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /build
 
+COPY config-broker/ ./config-broker/
 COPY session-broker/ ./session-broker/
 COPY launcher/ ./launcher/
 COPY tools/ ./tools/
