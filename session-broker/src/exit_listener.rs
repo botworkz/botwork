@@ -20,6 +20,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::UnixListener;
 use tokio::time::timeout;
 
+use crate::ext_proc::liveness_remove;
 use crate::launcher::call_teardown;
 use crate::{log_info, AppState, TOMBSTONE_TTL};
 
@@ -191,15 +192,7 @@ pub async fn handle_container_exit(
     }
     // Cancel any pending grace timer so the container-exit and stream-close
     // reapers don't race each other.
-    {
-        let entry = state.stream_liveness.lock().await.remove(&mcp_session_id);
-        if let Some(liveness) = entry {
-            let handle = liveness.grace_handle.lock().await.take();
-            if let Some(handle) = handle {
-                handle.abort();
-            }
-        }
-    }
+    liveness_remove(state, &mcp_session_id).await;
 
     state.session_registry.record_teardown(container_name).await;
 

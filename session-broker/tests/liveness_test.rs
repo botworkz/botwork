@@ -16,7 +16,7 @@ use botwork_session_broker::ext_proc::{
     seed_startup_liveness, ExternalProcessorService, PerStreamState,
 };
 use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
-use botwork_session_broker::test_support::{start_log_capture, take_log_capture};
+use botwork_session_broker::test_support::{liveness_drop, start_log_capture, take_log_capture};
 use botwork_session_broker::{AppState, TransportState};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use envoy_proto::envoy::service::ext_proc::v3::HttpHeaders;
@@ -510,4 +510,68 @@ fn env_knob_custom_value_is_parsed() {
             raw, expected
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent bump/drop stress: never leaves corrupt liveness state
+// ---------------------------------------------------------------------------
+
+/// Spawns N concurrent bump/drop pairs on the same mcp-session-id and asserts
+/// that the final state is never corrupt.  Valid outcomes are:
+///   - entry absent (reaped), *or*
+///   - entry present with `open_streams == 0` and a grace handle armed, *or*
+///   - entry present with `open_streams > 0` and no grace handle (streams still open).
+///
+/// A corrupt mix — e.g. `open_streams > 0` AND a grace handle armed — would
+/// indicate the schedule-vs-bump race or another ordering hazard.
+#[tokio::test]
+async fn concurrent_bump_drop_never_leaves_corrupt_state() {
+    // Use a long grace so the timer does not fire during the test window.
+    std::env::set_var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS", "300");
+
+    let state = make_state();
+    insert_transport(&state, "sess-race", "mcp_session_race").await;
+
+    const TASKS: usize = 64;
+    let mut joins = Vec::with_capacity(TASKS);
+    for _ in 0..TASKS {
+        let s = state.clone();
+        joins.push(tokio::spawn(async move {
+            let mut ps = PerStreamState::default();
+            // Bump via the real request-headers path.
+            let _ = ExternalProcessorService::handle_request_headers(
+                &s,
+                &mut ps,
+                make_headers(&[
+                    (":method", "GET"),
+                    (":path", "/tenant1/mcp/plugin-a"),
+                    ("x-botwork-tenant", "tenant1"),
+                    ("mcp-session-id", "sess-race"),
+                ]),
+            )
+            .await;
+            // Drop via the exported liveness_drop so we exercise the full
+            // decrement + potential grace-timer arming path.
+            if let Some(ref sid) = ps.liveness_session_id {
+                liveness_drop(&s, sid).await;
+            }
+        }));
+    }
+    for j in joins {
+        j.await.unwrap();
+    }
+
+    // Allow any background grace-timer spawn to complete.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let map = state.stream_liveness.lock().await;
+    if let Some(l) = map.get("sess-race") {
+        let n = l.open_streams.load(std::sync::atomic::Ordering::SeqCst);
+        let has_timer = l.grace_handle.lock().await.is_some();
+        assert!(
+            (n == 0 && has_timer) || (n > 0 && !has_timer),
+            "corrupt liveness state: open_streams={n} has_timer={has_timer}"
+        );
+    }
+    // If the entry is absent the session was already reaped — also valid.
 }

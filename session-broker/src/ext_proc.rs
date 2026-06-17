@@ -520,7 +520,7 @@ async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
 /// Cancels any pending grace timer and removes the liveness entry for
 /// `mcp_session_id`.  Called by all teardown paths so the grace timer cannot
 /// fire after a session has already been reaped by another code path.
-async fn liveness_remove(state: &AppState, mcp_session_id: &str) {
+pub(crate) async fn liveness_remove(state: &AppState, mcp_session_id: &str) {
     let entry = state.stream_liveness.lock().await.remove(mcp_session_id);
     if let Some(liveness) = entry {
         let handle = liveness.grace_handle.lock().await.take();
@@ -555,16 +555,26 @@ async fn liveness_bump(state: &AppState, mcp_session_id: &str) {
 /// Decrements the open-stream counter for `mcp_session_id`.  When the counter
 /// reaches zero a grace timer is armed; if no new stream opens within the grace
 /// period the session is automatically reaped.
-async fn liveness_drop(state: &AppState, mcp_session_id: &str) {
+pub async fn liveness_drop(state: &AppState, mcp_session_id: &str) {
     let liveness = {
         let map = state.stream_liveness.lock().await;
         map.get(mcp_session_id).cloned()
     };
     let Some(liveness) = liveness else { return };
-    let prev = liveness.open_streams.fetch_sub(1, Ordering::SeqCst);
-    if prev == 1 {
-        // Was 1, now 0 — arm the grace timer.
-        schedule_grace_timer(state.clone(), mcp_session_id.to_string(), liveness).await;
+    let result = liveness.open_streams.fetch_update(
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+        |n| if n == 0 { None } else { Some(n - 1) },
+    );
+    match result {
+        Ok(1) => {
+            // Was 1, now 0 — arm the grace timer.
+            schedule_grace_timer(state.clone(), mcp_session_id.to_string(), liveness).await;
+        }
+        Ok(_) => {} // still > 0
+        Err(_) => log_info(&format!(
+            "liveness_drop: counter underflow guard for {mcp_session_id} (unexpected)"
+        )),
     }
 }
 
@@ -578,6 +588,16 @@ async fn schedule_grace_timer(state: AppState, sid: String, liveness: Arc<Sessio
         .unwrap_or(DEFAULT_DISCONNECT_GRACE_SECS);
     let grace = std::time::Duration::from_secs(grace_secs);
 
+    // Hold the handle lock across spawn-and-store so liveness_bump cannot
+    // observe "no handle to abort" while we are mid-spawn.
+    let mut guard = liveness.grace_handle.lock().await;
+
+    // A bump might have raced in before we got the lock; if so the counter
+    // is already > 0 and we must not arm the timer at all.
+    if liveness.open_streams.load(Ordering::SeqCst) > 0 {
+        return;
+    }
+
     let state_clone = state.clone();
     let sid_clone = sid.clone();
     let handle = tokio::spawn(async move {
@@ -590,8 +610,6 @@ async fn schedule_grace_timer(state: AppState, sid: String, liveness: Arc<Sessio
         // no extra removal is needed here.
     });
 
-    // Use an explicit binding for the guard so its lifetime is clear.
-    let mut guard = liveness.grace_handle.lock().await;
     *guard = Some(handle);
     drop(guard);
     log_info(&format!(
@@ -656,11 +674,7 @@ pub async fn seed_startup_liveness(state: &AppState) {
             .lock()
             .await
             .insert(mcp_session_id.clone(), Arc::clone(&liveness));
-        let state_clone = state.clone();
-        let sid = mcp_session_id.clone();
-        tokio::spawn(async move {
-            schedule_grace_timer(state_clone, sid, liveness).await;
-        });
+        schedule_grace_timer(state.clone(), mcp_session_id.clone(), liveness).await;
     }
 }
 

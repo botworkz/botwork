@@ -85,6 +85,11 @@ pub mod test_support {
             .take()
             .unwrap_or_default()
     }
+
+    /// Re-exported for integration tests so concurrent bump/drop tests can
+    /// drive the full liveness state machine without going through the HTTP
+    /// ext_proc path for the drop side.
+    pub use crate::ext_proc::liveness_drop;
 }
 
 #[derive(Clone)]
