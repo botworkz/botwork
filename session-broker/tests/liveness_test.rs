@@ -513,6 +513,64 @@ fn env_knob_custom_value_is_parsed() {
 }
 
 // ---------------------------------------------------------------------------
+// Grace expiry actually invokes teardown (regression: JoinHandle self-abort)
+// ---------------------------------------------------------------------------
+
+/// Verifies that when a grace timer fires the session is fully torn down —
+/// i.e. the transport entry is removed and a tombstone is inserted.
+///
+/// This is a regression test for the bug where `teardown_session` called
+/// `liveness_remove`, which aborted the grace-timer's own JoinHandle, causing
+/// `call_teardown` (and all subsequent teardown steps) to be cancelled.
+#[tokio::test]
+async fn grace_expiry_invokes_teardown() {
+    // Use a short grace so the test runs quickly.
+    // Safety: tests run in a single process; other tests use set_var(…, "300")
+    // or long sleeps, so a brief 1-second window here is fine.
+    std::env::set_var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS", "1");
+
+    let state = make_state();
+    insert_transport(&state, "sess-reap", "mcp_session_reap").await;
+
+    // Open one stream so the liveness counter is bumped to 1.
+    let mut ps = PerStreamState::default();
+    let _ = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut ps,
+        make_headers(&[
+            (":method", "GET"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("mcp-session-id", "sess-reap"),
+        ]),
+    )
+    .await;
+
+    // Close the stream — arms the grace timer.
+    liveness_drop(&state, "sess-reap").await;
+
+    // Wait for the grace period to elapse plus a slack margin.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // The transport entry must have been removed by teardown_session.
+    assert!(
+        state
+            .transport_sessions
+            .lock()
+            .await
+            .get("sess-reap")
+            .is_none(),
+        "transport_sessions entry should be removed by teardown"
+    );
+
+    // A tombstone must have been inserted by teardown_session.
+    assert!(
+        state.tombstones.lock().await.contains_key("sess-reap"),
+        "tombstone should be inserted by teardown"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Concurrent bump/drop stress: never leaves corrupt liveness state
 // ---------------------------------------------------------------------------
 
