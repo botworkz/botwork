@@ -1,12 +1,14 @@
 # Containers
 
-`botwork` builds one container image:
+`botwork` builds two container images:
 
 - `session-broker`: Rust session broker service image.
+- `config-broker`: Rust config broker service image (resolves plugin
+  descriptors for session-broker; owns `plugins.yaml`).
 
 ## Build locally
 
-Build the image locally with EarthBuild (the maintained Earthly fork):
+Build the images locally with EarthBuild (the maintained Earthly fork):
 
 ```bash
 tmp="$(mktemp -d)"
@@ -19,31 +21,35 @@ sudo install -m 0755 "${tmp}/earth-linux-amd64" /usr/local/bin/earthly
 earthly bootstrap
 rm -rf "${tmp}"
 earthly +session-broker-image
+earthly +config-broker-image
+# Or build everything:
+earthly +images
 ```
 
-This produces `botwork/session-broker:local`.
+This produces `botwork/session-broker:local` and `botwork/config-broker:local`.
 
-> **Release builds** stamp the image with `org.opencontainers.image.revision` set to `$GITHUB_SHA`
-> and verify the label matches before pushing to GHCR — if there is ever a mismatch the workflow
-> fails rather than silently shipping the wrong image. Local builds (and PR builds) do not pass
-> `GIT_SHA`, so the label will be empty, which is fine — the check only runs in the release path.
+> **Release builds** stamp each image with `org.opencontainers.image.revision`
+> set to `$GITHUB_SHA` and verify the label matches before pushing to GHCR —
+> if there is ever a mismatch the workflow fails rather than silently shipping
+> the wrong image. Local builds (and PR builds) do not pass `GIT_SHA`, so the
+> label will be empty, which is fine — the check only runs in the release path.
 
-`botworkz/vm` consumes this cross-repo in sibling/local mode
-via `FROM ../botwork+session-broker-image`, so the `+session-broker-image` target
-name and `botwork/session-broker:local` tag are a stable contract.
+`botworkz/vm` consumes these cross-repo in sibling/local mode via
+`FROM ../botwork+<svc>-image`, so the `+<svc>-image` target names and
+`botwork/<svc>:local` tags are a stable contract.
 
 ## Produce tarballs
 
-Downstream consumers can export the locally built image as a tarball with:
+Downstream consumers can export the locally built images as tarballs with:
 
 ```bash
 make -C containers tarballs
 ```
 
-`make -C containers` now routes image builds through `earthly +session-broker-image`
-so the Earthfile is the single source of truth. `tarballs` remains as a thin
-convenience wrapper and writes `containers/dist/session-broker.tar`, which
-consumers can load with `docker load`.
+`make -C containers` routes image builds through `earthly +<svc>-image` so the
+Earthfile is the single source of truth. `tarballs` remains as a thin
+convenience wrapper and writes `containers/dist/<svc>.tar` for each service,
+which consumers can load with `docker load`.
 
 ## Release process
 
@@ -54,8 +60,9 @@ by the root `VERSION` file (repo root, not this directory).
 
 1. Set `VERSION` to a clean semver (no suffix), e.g. `1.2.0`, and merge to `main`.
 2. The release workflow detects the clean version and automatically:
-   - Builds and pushes `ghcr.io/botworkz/botwork/session-broker:<VERSION>` and
-     `ghcr.io/botworkz/botwork/session-broker:latest` to GHCR.
+   - Builds and pushes `ghcr.io/botworkz/botwork/session-broker:<VERSION>`,
+     `ghcr.io/botworkz/botwork/config-broker:<VERSION>`, and the corresponding
+     `:latest` tags to GHCR.
    - Builds release binaries for `botwork-launcher` and `botwork-tools`.
    - Creates a GitHub Release `v<VERSION>` with those binaries as assets.
 3. The published Release event triggers a second job that bumps `VERSION` to the

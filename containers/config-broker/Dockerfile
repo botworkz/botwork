@@ -1,6 +1,6 @@
 # Build from the repository root:
-#   docker build -t botwork/session-broker:local \
-#     -f containers/session-broker/Dockerfile .
+#   docker build -t botwork/config-broker:local \
+#     -f containers/config-broker/Dockerfile .
 
 # Pin builder to bookworm so the binary links against glibc 2.36, matching
 # the distroless base-nossl-debian12 runtime. The default rust:1.90-slim
@@ -21,7 +21,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN cargo build --release --package botwork-session-broker
+RUN cargo build --release --package botwork-config-broker
 
 # Runtime
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
@@ -37,9 +37,9 @@ LABEL org.opencontainers.image.source="https://github.com/botworkz/botwork"
 COPY --from=builder /lib/x86_64-linux-gnu/libgcc_s.so.1 \
     /lib/x86_64-linux-gnu/libgcc_s.so.1
 
-COPY --from=builder /build/target/release/botwork-session-broker \
-    /usr/local/bin/botwork-session-broker
+COPY --from=builder /build/target/release/botwork-config-broker \
+    /usr/local/bin/botwork-config-broker
 
-EXPOSE 9001 9002
+EXPOSE 9200
 
-ENTRYPOINT ["/usr/local/bin/botwork-session-broker"]
+ENTRYPOINT ["/usr/local/bin/botwork-config-broker"]

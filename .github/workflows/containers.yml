@@ -52,3 +52,14 @@ jobs:
         output="$(docker run --rm botwork/session-broker:local 2>&1 || true)"
         echo "$output"
         echo "$output" | grep -q "plugin registry file not found"
+    - name: Build config-broker
+      run: |
+        set -euo pipefail
+        earthly +config-broker-image
+    - name: Smoke test config-broker
+      run: |
+        set -euo pipefail
+        # config-broker refuses to start when plugins.yaml is missing.
+        output="$(docker run --rm botwork/config-broker:local 2>&1 || true)"
+        echo "$output"
+        echo "$output" | grep -q "plugin registry file not found"
