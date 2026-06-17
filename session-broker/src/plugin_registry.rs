@@ -215,6 +215,11 @@ fn parse_env(
     Ok(result)
 }
 
+/// Parse the `config:` field from a plugin's YAML block.
+///
+/// `config_val` is the full plugin block; this function indexes `["config"]`
+/// internally, matching the convention used by `parse_env` and
+/// `parse_resources`.
 fn parse_config(
     plugin_name: &str,
     config_val: &serde_yaml::Value,
@@ -226,7 +231,7 @@ fn parse_config(
 
     // Convert serde_yaml::Value → serde_json::Value.  Most well-formed YAML
     // structures round-trip cleanly; failures mean the operator used a
-    // YAML feature that has no JSON equivalent (e.g. integer map keys).
+    // YAML feature that has no JSON equivalent (e.g. a null map key).
     let json_val: serde_json::Value = serde_json::to_value(raw).map_err(|e| {
         PluginRegistryError::Invalid(format!(
             "plugin '{plugin_name}' has invalid 'config': cannot represent as JSON: {e}"
@@ -239,6 +244,11 @@ fn parse_config(
             "plugin '{plugin_name}' has invalid 'config': expected a mapping (got {})",
             json_val_type_name(&json_val)
         )));
+    }
+
+    // Treat an empty mapping the same as absent: no env var injected.
+    if json_val.as_object().unwrap().is_empty() {
+        return Ok(None);
     }
 
     // Guard against pathologically large blobs at load time.
@@ -1066,6 +1076,45 @@ mod tests {
         );
         let loaded = load(&path).expect("load plugins");
         assert!(loaded["p"].config.is_none());
+    }
+
+    #[test]
+    fn load_config_normalises_empty_mapping_to_none() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    config: {}
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert!(loaded["p"].config.is_none());
+    }
+
+    #[test]
+    fn load_config_rejects_null_map_key() {
+        // YAML allows null as a mapping key (~: value); JSON does not —
+        // serde_json requires every object key to be a string.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    config:
+      ~: value
+",
+        );
+        let err = load(&path).expect_err("null map key should fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'")
+                && err.contains("invalid 'config'")
+                && err.contains("cannot represent as JSON"),
+            "error should mention plugin and JSON conversion failure: {err}"
+        );
     }
 
     #[test]
