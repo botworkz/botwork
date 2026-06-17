@@ -21,8 +21,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::config_broker::{self, EnvEntry, PluginDescriptor, UpstreamAuth, CONFIG_ENV_NAME};
 use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_ready, LauncherError};
-use crate::plugin_registry::{PluginConfig, UpstreamAuth, CONFIG_ENV_NAME};
 use crate::secrets;
 use crate::session_registry::{is_container_running, utc_now};
 use crate::{
@@ -329,43 +329,31 @@ fn request_headers_route(
 }
 
 fn route_authorization_for_transport(
-    state: &AppState,
+    _state: &AppState,
     mcp_session_id: Option<&str>,
     transport: &TransportState,
 ) -> (Option<String>, bool) {
     let session_id = mcp_session_id.unwrap_or("");
-    match state.plugin_registry.get(&transport.plugin_name) {
-        Some(plugin_config) => match (
-            &plugin_config.upstream_auth,
-            &transport.upstream_authorization,
-        ) {
-            (UpstreamAuth::Bearer { service }, Some(value)) => {
-                log_info(&format!(
-                    "route auth: session={session_id} plugin={} upstream_auth=bearer/{service} set (token={})",
-                    transport.plugin_name,
-                    redact_token(value)
-                ));
-                (Some(value.clone()), false)
-            }
-            (UpstreamAuth::None, _) => {
-                log_info(&format!(
-                    "route auth: session={session_id} plugin={} upstream_auth=none stripped",
-                    transport.plugin_name
-                ));
-                (None, true)
-            }
-            (UpstreamAuth::Bearer { service }, None) => {
-                log_info(&format!(
-                    "route auth: session={session_id} plugin={} upstream_auth=bearer/{service} configured but no resolved token on transport — stripped",
-                    transport.plugin_name
-                ));
-                (None, true)
-            }
-        },
-        None => {
+    match (&transport.upstream_auth, &transport.upstream_authorization) {
+        (UpstreamAuth::Bearer { service }, Some(value)) => {
             log_info(&format!(
-                "session={} plugin '{}' missing from registry during route decision; defaulting upstream_auth=none; upstream auth: stripped",
-                session_id, transport.plugin_name
+                "route auth: session={session_id} plugin={} upstream_auth=bearer/{service} set (token={})",
+                transport.plugin_name,
+                redact_token(value)
+            ));
+            (Some(value.clone()), false)
+        }
+        (UpstreamAuth::None, _) => {
+            log_info(&format!(
+                "route auth: session={session_id} plugin={} upstream_auth=none stripped",
+                transport.plugin_name
+            ));
+            (None, true)
+        }
+        (UpstreamAuth::Bearer { service }, None) => {
+            log_info(&format!(
+                "route auth: session={session_id} plugin={} upstream_auth=bearer/{service} configured but no resolved token on transport — stripped",
+                transport.plugin_name
             ));
             (None, true)
         }
@@ -769,7 +757,7 @@ async fn spawn_new_container(
     tenant_name: &str,
     namespace: &str,
     plugin_name: &str,
-    plugin_config: &PluginConfig,
+    descriptor: &PluginDescriptor,
     upstream_authorization: Option<String>,
     env: &[(String, String)],
 ) -> Result<PendingInit, LauncherError> {
@@ -782,11 +770,11 @@ async fn spawn_new_container(
     let launch_result = launch_session(
         &state.launcher_socket_path,
         &container_name,
-        &plugin_config.image,
+        &descriptor.image,
         &staging_path,
-        &plugin_config.network,
+        &descriptor.network,
         env,
-        &plugin_config.resources,
+        &descriptor.resources,
     )
     .await?;
     if let Ok(serialized) = serde_json::to_string(&launch_result) {
@@ -797,7 +785,7 @@ async fn spawn_new_container(
     if remaining.is_zero()
         || !probe_ready(
             &container_name,
-            plugin_config.port,
+            descriptor.port,
             std::time::Duration::from_millis(200),
             remaining,
         )
@@ -805,7 +793,7 @@ async fn spawn_new_container(
     {
         return Err(LauncherError::ProbeTimeout {
             host: container_name,
-            port: plugin_config.port,
+            port: descriptor.port,
         });
     }
     log_info(&format!(
@@ -818,7 +806,7 @@ async fn spawn_new_container(
         tenant_name: tenant_name.to_string(),
         namespace: namespace.to_string(),
         plugin_name: plugin_name.to_string(),
-        plugin_config: plugin_config.clone(),
+        descriptor: descriptor.clone(),
         upstream_authorization,
         created_at: utc_now(),
     })
@@ -1198,23 +1186,29 @@ impl ExternalProcessorService {
                     "tenant path/header mismatch",
                 );
             }
-            if state.plugin_registry.is_empty() {
-                return logged_immediate_response(
-                    stream,
-                    "request_headers",
-                    500,
-                    "plugin registry not loaded",
-                );
-            }
-            let Some(plugin_config) = state.plugin_registry.get(&plugin_name).cloned() else {
-                return logged_immediate_response(
-                    stream,
-                    "request_headers",
-                    404,
-                    &format!("unknown plugin: {plugin_name}"),
-                );
+            // Resolve descriptor from config-broker. Spawn fails closed on
+            // any non-success — operator-fault 4xx pass through, infra 5xx /
+            // transport collapses to 502.
+            let descriptor = match config_broker::resolve(
+                &state.config_broker_endpoint,
+                &stream.trusted_tenant,
+                &namespace,
+                &plugin_name,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            {
+                Ok(descriptor) => descriptor,
+                Err(err) => {
+                    return logged_immediate_response(
+                        stream,
+                        "request_headers",
+                        err.status_code(),
+                        &err.to_string(),
+                    );
+                }
             };
-            let rewritten_path = forward_path(&stream.path, &plugin_config.path);
+            let rewritten_path = forward_path(&stream.path, &descriptor.path);
 
             // Fail open for env injection; upstream bearer resolution below fails closed.
             let fetched_secrets = match stream.cap.as_deref() {
@@ -1239,16 +1233,20 @@ impl ExternalProcessorService {
                 _ => Vec::new(),
             };
             let secret_env = secrets::build_env_entries(&fetched_secrets);
-            let static_env_count = plugin_config.env.len();
+            let static_env_count = descriptor.env.len();
             let mut env: Vec<(String, String)> =
                 Vec::with_capacity(static_env_count + secret_env.len() + 1);
             // Static plugin env first (deterministic config), secrets appended after.
-            env.extend(plugin_config.env.iter().cloned());
-            // Structured config follows static env as compact JSON when set.
-            if let Some(config_json) = &plugin_config.config {
-                let json_str = serde_json::to_string(config_json)
-                    .expect("config Value always re-serializes; validated at registry load");
-                env.push((CONFIG_ENV_NAME.to_string(), json_str));
+            env.extend(
+                descriptor
+                    .env
+                    .iter()
+                    .map(|EnvEntry { name, value }| (name.clone(), value.clone())),
+            );
+            // Structured config follows static env. config-broker already
+            // returns it as a compact-JSON string ready to drop in.
+            if let Some(blob) = &descriptor.config_blob {
+                env.push((CONFIG_ENV_NAME.to_string(), blob.clone()));
             }
             for entry in &secret_env {
                 if env.len() >= secrets::MAX_ENV_ENTRIES {
@@ -1279,7 +1277,7 @@ impl ExternalProcessorService {
             let upstream_authorization = match resolve_spawn_upstream_authorization(
                 &stream.trusted_tenant,
                 &plugin_name,
-                &plugin_config.upstream_auth,
+                &descriptor.upstream_auth,
                 &fetched_secrets,
             ) {
                 Ok(value) => value,
@@ -1294,7 +1292,7 @@ impl ExternalProcessorService {
                 &stream.trusted_tenant,
                 &namespace,
                 &plugin_name,
-                &plugin_config,
+                &descriptor,
                 upstream_authorization.clone(),
                 &env,
             )
@@ -1318,7 +1316,7 @@ impl ExternalProcessorService {
                     &staging_path(&pending.tenant_name, &pending.staging_token),
                     &pending.tenant_name,
                     &pending.namespace,
-                    &pending.plugin_config.image,
+                    &pending.descriptor.image,
                     &pending.created_at,
                 )
                 .await;
@@ -1328,10 +1326,8 @@ impl ExternalProcessorService {
                 pending_init.insert(stream.stream_id.clone(), pending.clone());
             }
 
-            stream.chosen_upstream = Some(upstream(
-                &pending.container_name,
-                pending.plugin_config.port,
-            ));
+            stream.chosen_upstream =
+                Some(upstream(&pending.container_name, pending.descriptor.port));
             log_phase(
                 stream,
                 "request_headers",
@@ -1521,8 +1517,9 @@ impl ExternalProcessorService {
                     tenant_name: pending.tenant_name.clone(),
                     namespace: pending.namespace.clone(),
                     plugin_name: pending.plugin_name.clone(),
-                    port: pending.plugin_config.port,
-                    path: pending.plugin_config.path.clone(),
+                    port: pending.descriptor.port,
+                    path: pending.descriptor.path.clone(),
+                    upstream_auth: pending.descriptor.upstream_auth.clone(),
                     upstream_authorization: pending.upstream_authorization.clone(),
                     agent_id: None,
                 },
@@ -1639,36 +1636,25 @@ pub async fn serve_grpc(state: AppState, addr: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_registry::{PluginRegistry, PluginResources};
     use crate::session_registry::SessionRegistry;
     use crate::test_support::{start_log_capture, take_log_capture};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock};
     use tokio::sync::Mutex;
 
-    fn test_plugin_config(upstream_auth: UpstreamAuth) -> PluginConfig {
-        PluginConfig {
-            image: "ghcr.io/botworkz/plugin:test".to_string(),
-            port: 8000,
-            network: "botwork".to_string(),
-            path: "/mcp".to_string(),
-            upstream_auth,
-            env: vec![],
-            resources: PluginResources::default(),
-            config: None,
-        }
-    }
-
-    fn test_app_state(plugin_name: &str, upstream_auth: UpstreamAuth) -> AppState {
-        let mut plugin_registry = PluginRegistry::new();
-        plugin_registry.insert(plugin_name.to_string(), test_plugin_config(upstream_auth));
+    fn test_app_state(_plugin_name: &str, _upstream_auth: UpstreamAuth) -> AppState {
+        // Pre-config-broker tests took a (plugin_name, upstream_auth) pair so
+        // the registry could be seeded for the routing path's lookup. Routing
+        // now reads `upstream_auth` directly off TransportState, so neither
+        // argument is consulted by the routing-of-known-sessions tests in
+        // this file. Kept on the signature to minimise call-site churn.
         AppState {
-            plugin_registry,
             session_registry: Arc::new(SessionRegistry::new("/tmp/ext-proc-unit-sessions.json")),
             transport_sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_init: Arc::new(Mutex::new(HashMap::new())),
             launcher_socket_path: "/tmp/ext-proc-unit-launcher.sock".to_string(),
             auth_broker_url: "http://127.0.0.1:1".to_string(),
+            config_broker_endpoint: "http://127.0.0.1:1".to_string(),
             tombstones: Arc::new(Mutex::new(HashMap::new())),
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -2018,7 +2004,7 @@ mod tests {
     #[test]
     fn route_authorization_for_transport_logs_each_outcome() {
         let _guard = log_capture_guard();
-        let transport = TransportState {
+        let base_transport = TransportState {
             container_name: "mcp_session_123".to_string(),
             staging_token: "stage".to_string(),
             tenant_name: "tenant1".to_string(),
@@ -2026,19 +2012,21 @@ mod tests {
             plugin_name: "plugin-a".to_string(),
             port: 8000,
             path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
             upstream_authorization: Some("ghp_SECRET".to_string()),
             agent_id: None,
         };
+        // Routing reads upstream_auth straight off TransportState; the
+        // AppState argument is unused on the routing-of-known-sessions path
+        // since the config-broker split.
+        let state = test_app_state("plugin-a", UpstreamAuth::None);
 
+        // Bearer + resolved token → forwarded.
         start_log_capture();
-        let state_forward = test_app_state(
-            "plugin-a",
-            UpstreamAuth::Bearer {
-                service: "github.com".to_string(),
-            },
-        );
         let (upstream_auth, strip) =
-            route_authorization_for_transport(&state_forward, Some("sid-1"), &transport);
+            route_authorization_for_transport(&state, Some("sid-1"), &base_transport);
         let logs_forward = take_log_capture().join("\n");
         assert_eq!(upstream_auth.as_deref(), Some("ghp_SECRET"));
         assert!(!strip);
@@ -2053,27 +2041,12 @@ mod tests {
             "logs should not contain raw route token: {logs_forward}"
         );
 
+        // upstream_auth = None → stripped regardless of any cached token.
         start_log_capture();
-        let state_missing = test_app_state(
-            "other-plugin",
-            UpstreamAuth::Bearer {
-                service: "github.com".to_string(),
-            },
-        );
+        let mut transport_none = base_transport.clone();
+        transport_none.upstream_auth = UpstreamAuth::None;
         let (upstream_auth, strip) =
-            route_authorization_for_transport(&state_missing, Some("sid-2"), &transport);
-        let logs_missing = take_log_capture().join("\n");
-        assert_eq!(upstream_auth, None);
-        assert!(strip);
-        assert!(
-            logs_missing.contains("missing from registry during route decision; defaulting upstream_auth=none; upstream auth: stripped"),
-            "missing registry-strip log: {logs_missing}"
-        );
-
-        start_log_capture();
-        let state_none = test_app_state("plugin-a", UpstreamAuth::None);
-        let (upstream_auth, strip) =
-            route_authorization_for_transport(&state_none, Some("sid-3"), &transport);
+            route_authorization_for_transport(&state, Some("sid-3"), &transport_none);
         let logs_none = take_log_capture().join("\n");
         assert_eq!(upstream_auth, None);
         assert!(strip);
@@ -2083,20 +2056,14 @@ mod tests {
             "missing upstream_auth none stripped log: {logs_none}"
         );
 
+        // Bearer configured but no resolved token cached → stripped, with a
+        // distinguishing log line so the operator can tell this case apart
+        // from the explicit upstream_auth=none case above.
         start_log_capture();
-        let state_bearer_no_token = test_app_state(
-            "plugin-a",
-            UpstreamAuth::Bearer {
-                service: "github.com".to_string(),
-            },
-        );
-        let mut transport_no_token = transport.clone();
+        let mut transport_no_token = base_transport.clone();
         transport_no_token.upstream_authorization = None;
-        let (upstream_auth, strip) = route_authorization_for_transport(
-            &state_bearer_no_token,
-            Some("sid-4"),
-            &transport_no_token,
-        );
+        let (upstream_auth, strip) =
+            route_authorization_for_transport(&state, Some("sid-4"), &transport_no_token);
         let logs_bearer_no_token = take_log_capture().join("\n");
         assert_eq!(upstream_auth, None);
         assert!(strip);

@@ -1,8 +1,8 @@
 pub mod admin;
+pub mod config_broker;
 pub mod exit_listener;
 pub mod ext_proc;
 pub mod launcher;
-pub mod plugin_registry;
 pub mod secrets;
 pub mod session_registry;
 
@@ -14,8 +14,8 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::config_broker::{PluginDescriptor, UpstreamAuth};
 use crate::session_registry::SessionRegistry;
-use plugin_registry::PluginConfig;
 
 pub const PREFIX: &str = "[session-broker]";
 pub const SESSION_NETWORK: &str = "botwork";
@@ -92,6 +92,13 @@ pub mod test_support {
     pub use crate::ext_proc::liveness_drop;
 }
 
+/// Per-session state held while a transport is alive.
+///
+/// `upstream_auth` is captured at spawn time (from the descriptor returned by
+/// config-broker) so the routing-of-known-sessions path can decide whether to
+/// project a `Bearer` header without going back to config-broker on every
+/// request. `port` and `path` are similarly cached. The actual resolved
+/// `Authorization` value (when any) lives in `upstream_authorization`.
 #[derive(Clone)]
 pub struct TransportState {
     pub container_name: String,
@@ -101,6 +108,7 @@ pub struct TransportState {
     pub plugin_name: String,
     pub port: u16,
     pub path: String,
+    pub upstream_auth: UpstreamAuth,
     pub upstream_authorization: Option<String>,
     pub agent_id: Option<String>,
 }
@@ -115,6 +123,7 @@ impl fmt::Debug for TransportState {
             .field("plugin_name", &self.plugin_name)
             .field("port", &self.port)
             .field("path", &self.path)
+            .field("upstream_auth", &self.upstream_auth)
             .field(
                 "upstream_authorization",
                 &self.upstream_authorization.as_deref().map(redact_token),
@@ -131,7 +140,7 @@ pub struct PendingInit {
     pub tenant_name: String,
     pub namespace: String,
     pub plugin_name: String,
-    pub plugin_config: PluginConfig,
+    pub descriptor: PluginDescriptor,
     pub upstream_authorization: Option<String>,
     pub created_at: String,
 }
@@ -144,7 +153,7 @@ impl fmt::Debug for PendingInit {
             .field("tenant_name", &self.tenant_name)
             .field("namespace", &self.namespace)
             .field("plugin_name", &self.plugin_name)
-            .field("plugin_config", &self.plugin_config)
+            .field("descriptor", &self.descriptor)
             .field(
                 "upstream_authorization",
                 &self.upstream_authorization.as_deref().map(redact_token),
@@ -156,12 +165,13 @@ impl fmt::Debug for PendingInit {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub plugin_registry: plugin_registry::PluginRegistry,
     pub session_registry: Arc<SessionRegistry>,
     pub transport_sessions: Arc<Mutex<HashMap<String, TransportState>>>,
     pub pending_init: Arc<Mutex<HashMap<String, PendingInit>>>,
     pub launcher_socket_path: String,
     pub auth_broker_url: String,
+    /// Base URL for `botwork-config-broker` (`POST /resolve` is appended).
+    pub config_broker_endpoint: String,
     /// Tombstoned `Mcp-Session-Id` values: maps session-id → expiry `Instant`.
     /// Requests referencing a tombstoned id receive an immediate 404 without a
     /// transport-session lookup, preventing re-spawn races on stale clients.
@@ -190,17 +200,6 @@ pub fn log_info(message: &str) {
 }
 
 pub async fn run() -> Result<(), String> {
-    let plugin_registry_path = std::env::var("BOTWORK_PLUGIN_REGISTRY_PATH")
-        .unwrap_or_else(|_| "/etc/botwork/plugins.yaml".to_string());
-
-    let plugins = plugin_registry::load(&plugin_registry_path).map_err(|e| format!("{e}"))?;
-
-    log_info(&format!(
-        "loaded plugin registry ({} plugins) from {}",
-        plugins.len(),
-        plugin_registry_path
-    ));
-
     let session_registry_path = std::env::var("BOTWORK_SESSION_REGISTRY_PATH")
         .unwrap_or_else(|_| "/var/lib/botwork/sessions.json".to_string());
 
@@ -223,20 +222,27 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "/run/botwork/launcher.sock".to_string());
     let auth_broker_url = std::env::var("BOTWORK_AUTH_BROKER_URL")
         .unwrap_or_else(|_| "http://auth_broker:9100".to_string());
+    let config_broker_endpoint = std::env::var("BOTWORK_CONFIG_BROKER_ENDPOINT")
+        .unwrap_or_else(|_| "http://config_broker:9200".to_string());
     let broker_socket_path = std::env::var("BOTWORK_BROKER_SOCKET_PATH")
         .unwrap_or_else(|_| "/run/botwork/broker.sock".to_string());
 
     let state = AppState {
-        plugin_registry: plugins,
         session_registry,
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url,
+        config_broker_endpoint,
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
     };
+
+    log_info(&format!(
+        "config-broker endpoint: {}",
+        state.config_broker_endpoint
+    ));
 
     ext_proc::seed_startup_liveness(&state).await;
 

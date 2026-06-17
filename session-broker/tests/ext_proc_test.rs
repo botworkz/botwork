@@ -3,10 +3,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use botwork_session_broker::config_broker::{
+    EnvEntry, PluginDescriptor, PluginResources, UpstreamAuth,
+};
 use botwork_session_broker::ext_proc::{
     upstream_header_mutation, ExternalProcessorService, PerStreamState, TeardownInfo,
 };
-use botwork_session_broker::plugin_registry::{PluginConfig, PluginResources, UpstreamAuth};
 use botwork_session_broker::session_registry::SessionRegistry;
 use botwork_session_broker::test_support::{start_log_capture, take_log_capture};
 use botwork_session_broker::{AppState, PendingInit, TransportState};
@@ -25,6 +27,12 @@ fn session_registry_path() -> &'static str {
         .as_str()
 }
 
+/// Routing-of-known-sessions builder: pre-existing tests pass a launcher
+/// socket path (and sometimes an auth URL); after the cutover the builder no
+/// longer seeds a plugin registry — the test seeds a `TransportState`
+/// directly via `insert_transport`. The config-broker endpoint defaults to a
+/// closed port so accidental spawn calls collapse to a 502 instead of
+/// hanging the test.
 fn app_state_with_plugins(launcher_socket_path: String) -> AppState {
     app_state_with_plugins_and_auth(launcher_socket_path, "http://127.0.0.1:1".to_string())
 }
@@ -33,54 +41,73 @@ fn app_state_with_plugins_and_auth(
     launcher_socket_path: String,
     auth_broker_url: String,
 ) -> AppState {
-    app_state_with_plugins_and_auth_and_path(launcher_socket_path, auth_broker_url, "/mcp")
-}
-
-fn app_state_with_plugins_and_auth_and_path(
-    launcher_socket_path: String,
-    auth_broker_url: String,
-    plugin_path: &str,
-) -> AppState {
-    app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+    app_state_with_plugins_and_endpoints(
         launcher_socket_path,
         auth_broker_url,
-        plugin_path,
-        UpstreamAuth::None,
+        "http://127.0.0.1:1".to_string(),
     )
 }
 
-fn app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+fn app_state_with_plugins_and_endpoints(
     launcher_socket_path: String,
     auth_broker_url: String,
-    plugin_path: &str,
-    upstream_auth: UpstreamAuth,
+    config_broker_endpoint: String,
 ) -> AppState {
-    let mut plugin_registry = HashMap::new();
-    plugin_registry.insert(
-        "plugin-a".to_string(),
-        sample_plugin_config_with_path_and_auth(plugin_path, upstream_auth),
-    );
     AppState {
-        plugin_registry,
         session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url,
+        config_broker_endpoint,
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
+// Pre-cutover this builder seeded the in-process registry with a custom
+// `path`. After the cutover the path is owned by config-broker, so the
+// helper is preserved for source compatibility but `_plugin_path` is
+// ignored. Routing-of-known-sessions tests express the plugin path via
+// the seeded `TransportState` instead.
+fn app_state_with_plugins_and_auth_and_path(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+    _plugin_path: &str,
+) -> AppState {
+    app_state_with_plugins_and_auth(launcher_socket_path, auth_broker_url)
+}
+
+// Spawn-path builder: takes a `config_broker_endpoint` explicitly so the
+// caller can stand up a fake config-broker with whatever descriptor it
+// needs (path, upstream_auth, env, resources, config_blob). The pre-cutover
+// builder packed those into a single `(plugin_path, upstream_auth)` pair;
+// new tests build the full descriptor on the fake server.
+fn app_state_for_spawn(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+    config_broker_endpoint: String,
+) -> AppState {
+    app_state_with_plugins_and_endpoints(
+        launcher_socket_path,
+        auth_broker_url,
+        config_broker_endpoint,
+    )
+}
+
 fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
+    // "Empty" used to mean an empty in-process plugin registry. After the
+    // config-broker cutover the equivalent failure is "config-broker
+    // unreachable" — we point the endpoint at a closed port and let any
+    // spawn attempt collapse to a 502.
     AppState {
-        plugin_registry: HashMap::new(),
         session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url: "http://127.0.0.1:1".to_string(),
+        config_broker_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -224,24 +251,25 @@ fn sample_transport_with_namespace_and_path(
         plugin_name: plugin.to_string(),
         port: 8000,
         path: plugin_path.to_string(),
+        upstream_auth: UpstreamAuth::None,
         upstream_authorization: None,
         agent_id: None,
     }
 }
 
-fn sample_plugin_config() -> PluginConfig {
+fn sample_plugin_config() -> PluginDescriptor {
     sample_plugin_config_with_path("/mcp")
 }
 
-fn sample_plugin_config_with_path(path: &str) -> PluginConfig {
+fn sample_plugin_config_with_path(path: &str) -> PluginDescriptor {
     sample_plugin_config_with_path_and_auth(path, UpstreamAuth::None)
 }
 
 fn sample_plugin_config_with_path_and_auth(
     path: &str,
     upstream_auth: UpstreamAuth,
-) -> PluginConfig {
-    PluginConfig {
+) -> PluginDescriptor {
+    PluginDescriptor {
         image: "botwork/plugin-a:local".to_string(),
         port: 8000,
         network: "botwork".to_string(),
@@ -249,7 +277,7 @@ fn sample_plugin_config_with_path_and_auth(
         upstream_auth,
         env: vec![],
         resources: PluginResources::default(),
-        config: None,
+        config_blob: None,
     }
 }
 
@@ -260,7 +288,7 @@ fn sample_pending(tenant: &str, plugin: &str, container: &str) -> PendingInit {
         tenant_name: tenant.to_string(),
         namespace: "mcp".to_string(),
         plugin_name: plugin.to_string(),
-        plugin_config: sample_plugin_config(),
+        descriptor: sample_plugin_config(),
         upstream_authorization: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
     }
@@ -663,15 +691,16 @@ async fn request_headers_strips_authorization_when_upstream_auth_none_existing_s
 
 #[tokio::test]
 async fn request_headers_existing_session_with_cached_bearer_emits_set_authorization() {
-    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
-        "/tmp/no-launcher.sock".to_string(),
-        "http://127.0.0.1:1".to_string(),
-        "/mcp",
-        UpstreamAuth::Bearer {
-            service: "github.com".to_string(),
-        },
-    );
+    // Routing of a known session reads upstream_auth straight off
+    // TransportState; nothing about config-broker is consulted on the hot
+    // path. Seed both `upstream_auth` (the policy) and
+    // `upstream_authorization` (the resolved token) directly on the
+    // transport.
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     let mut transport = sample_transport("tenant1", "plugin-a", "mcp_session_abc");
+    transport.upstream_auth = UpstreamAuth::Bearer {
+        service: "github.com".to_string(),
+    };
     transport.upstream_authorization = Some("ghp_CACHED".to_string());
     insert_transport(&state, "sess-1", transport).await;
     let mut stream = PerStreamState::default();
@@ -698,20 +727,13 @@ async fn request_headers_existing_session_with_cached_bearer_emits_set_authoriza
 
 #[tokio::test]
 async fn request_headers_existing_session_without_cached_bearer_strips_authorization() {
-    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
-        "/tmp/no-launcher.sock".to_string(),
-        "http://127.0.0.1:1".to_string(),
-        "/mcp",
-        UpstreamAuth::Bearer {
-            service: "github.com".to_string(),
-        },
-    );
-    insert_transport(
-        &state,
-        "sess-1",
-        sample_transport("tenant1", "plugin-a", "mcp_session_abc"),
-    )
-    .await;
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    let mut transport = sample_transport("tenant1", "plugin-a", "mcp_session_abc");
+    // Bearer policy on the transport but no resolved token cached → strip.
+    transport.upstream_auth = UpstreamAuth::Bearer {
+        service: "github.com".to_string(),
+    };
+    insert_transport(&state, "sess-1", transport).await;
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -818,7 +840,10 @@ async fn request_headers_post_initialize_path_tenant_mismatch_returns_403() {
 }
 
 #[tokio::test]
-async fn request_headers_post_initialize_empty_plugin_registry_returns_500() {
+async fn request_headers_post_initialize_config_broker_unreachable_returns_502() {
+    // Pre-cutover this asserted on an empty in-process plugin registry → 500.
+    // After the cutover the equivalent failure mode is "config-broker is not
+    // reachable" — session-broker collapses Transport / 5xx errors to 502.
     let state = app_state_with_empty_plugins("/tmp/no-launcher.sock".to_string());
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -832,12 +857,21 @@ async fn request_headers_post_initialize_empty_plugin_registry_returns_500() {
     )
     .await;
 
-    assert_eq!(immediate_status(&response), Some(500));
+    assert_eq!(immediate_status(&response), Some(502));
 }
 
 #[tokio::test]
 async fn request_headers_post_initialize_unknown_plugin_returns_404() {
-    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    let config_url = spawn_config_broker_with_response(
+        404,
+        r#"{"error":"unknown_plugin","message":"unknown plugin: plugin-x"}"#.to_string(),
+    )
+    .await;
+    let state = app_state_for_spawn(
+        "/tmp/no-launcher.sock".to_string(),
+        "http://127.0.0.1:1".to_string(),
+        config_url,
+    );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -1104,7 +1138,8 @@ async fn spawn_passes_cap_to_secrets_fetch_and_envs_to_launcher() {
     )
     .await;
 
-    let state = app_state_with_plugins_and_auth(path_to_string(&socket_path), auth_url);
+    let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -1155,7 +1190,12 @@ async fn spawn_without_cap_fetches_no_secrets_and_passes_empty_env() {
     )
     .await;
 
-    let state = app_state_with_plugins(path_to_string(&socket_path));
+    let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
+    let state = app_state_for_spawn(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+        config_url,
+    );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -1187,11 +1227,11 @@ async fn request_headers_strips_authorization_when_upstream_auth_none_spawn_path
         Arc::clone(&launcher_body),
     )
     .await;
-    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
+    let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
+    let state = app_state_for_spawn(
         path_to_string(&socket_path),
         "http://127.0.0.1:1".to_string(),
-        "/mcp",
-        UpstreamAuth::None,
+        config_url,
     );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -1232,13 +1272,17 @@ async fn request_headers_bearer_no_match_returns_5xx_no_spawn() {
         Arc::new(Mutex::new(None)),
     )
     .await;
-    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
-        "/tmp/missing-launcher.sock".to_string(),
-        auth_url,
-        "/mcp",
-        UpstreamAuth::Bearer {
+    let descriptor = PluginDescriptor {
+        upstream_auth: UpstreamAuth::Bearer {
             service: "github.com".to_string(),
         },
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
+        "/tmp/missing-launcher.sock".to_string(),
+        auth_url,
+        config_url,
     );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -1267,13 +1311,17 @@ async fn request_headers_bearer_multiple_matches_returns_5xx() {
         Arc::new(Mutex::new(None)),
     )
     .await;
-    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
-        "/tmp/missing-launcher.sock".to_string(),
-        auth_url,
-        "/mcp",
-        UpstreamAuth::Bearer {
+    let descriptor = PluginDescriptor {
+        upstream_auth: UpstreamAuth::Bearer {
             service: "github.com".to_string(),
         },
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
+        "/tmp/missing-launcher.sock".to_string(),
+        auth_url,
+        config_url,
     );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -1302,13 +1350,17 @@ async fn request_headers_bearer_non_utf8_secret_returns_5xx() {
         Arc::new(Mutex::new(None)),
     )
     .await;
-    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
-        "/tmp/missing-launcher.sock".to_string(),
-        auth_url,
-        "/mcp",
-        UpstreamAuth::Bearer {
+    let descriptor = PluginDescriptor {
+        upstream_auth: UpstreamAuth::Bearer {
             service: "github.com".to_string(),
         },
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
+        "/tmp/missing-launcher.sock".to_string(),
+        auth_url,
+        config_url,
     );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -1341,9 +1393,11 @@ async fn spawn_with_cap_but_auth_broker_unreachable_continues_with_empty_env() {
         Arc::clone(&launcher_body),
     )
     .await;
-    let state = app_state_with_plugins_and_auth(
+    let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
+    let state = app_state_for_spawn(
         path_to_string(&socket_path),
         "http://127.0.0.1:1".to_string(),
+        config_url,
     );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -1378,7 +1432,8 @@ async fn spawn_with_cap_but_auth_broker_401_continues_with_empty_env() {
     )
     .await;
     let auth_url = spawn_auth_broker_capture(401, "{}", Arc::new(Mutex::new(None))).await;
-    let state = app_state_with_plugins_and_auth(path_to_string(&socket_path), auth_url);
+    let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -1425,13 +1480,17 @@ async fn bearer_value_not_logged_in_clear() {
         Arc::new(Mutex::new(None)),
     )
     .await;
-    let state = app_state_with_plugins_and_auth_and_path_and_upstream_auth(
-        "/tmp/missing-launcher.sock".to_string(),
-        auth_url,
-        "/mcp",
-        UpstreamAuth::Bearer {
+    let descriptor = PluginDescriptor {
+        upstream_auth: UpstreamAuth::Bearer {
             service: "github.com".to_string(),
         },
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
+        "/tmp/missing-launcher.sock".to_string(),
+        auth_url,
+        config_url,
     );
 
     start_log_capture();
@@ -1459,49 +1518,35 @@ fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn app_state_with_plugin_env(
-    launcher_socket_path: String,
-    auth_broker_url: String,
-    static_env: Vec<(String, String)>,
-) -> AppState {
-    app_state_with_plugin_env_and_resources(
-        launcher_socket_path,
-        auth_broker_url,
-        static_env,
-        PluginResources::default(),
-    )
+/// Spawn-path tests build a fake config-broker on top of this descriptor.
+/// The `with_*` helpers are descriptor builders, not state builders — they
+/// just assemble the JSON the fake `/resolve` endpoint returns. Tests then
+/// stand the fake up via `spawn_config_broker_capture` and feed its URL into
+/// `app_state_for_spawn`.
+fn descriptor_default() -> PluginDescriptor {
+    PluginDescriptor {
+        image: "botwork/plugin-a:local".to_string(),
+        port: 8000,
+        network: "botwork".to_string(),
+        path: "/mcp".to_string(),
+        upstream_auth: UpstreamAuth::None,
+        resources: PluginResources::default(),
+        env: vec![],
+        config_blob: None,
+    }
 }
 
-fn app_state_with_plugin_env_and_resources(
-    launcher_socket_path: String,
-    auth_broker_url: String,
-    static_env: Vec<(String, String)>,
-    resources: PluginResources,
-) -> AppState {
-    let mut plugin_registry = HashMap::new();
-    plugin_registry.insert(
-        "plugin-a".to_string(),
-        PluginConfig {
-            image: "botwork/plugin-a:local".to_string(),
-            port: 8000,
-            network: "botwork".to_string(),
-            path: "/mcp".to_string(),
-            upstream_auth: UpstreamAuth::None,
-            env: static_env,
-            resources,
-            config: None,
-        },
-    );
-    AppState {
-        plugin_registry,
-        session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
-        transport_sessions: Arc::new(Mutex::new(HashMap::new())),
-        pending_init: Arc::new(Mutex::new(HashMap::new())),
-        launcher_socket_path,
-        auth_broker_url,
-        tombstones: Arc::new(Mutex::new(HashMap::new())),
-        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
-        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+fn descriptor_with_env(env: Vec<EnvEntry>) -> PluginDescriptor {
+    PluginDescriptor {
+        env,
+        ..descriptor_default()
+    }
+}
+
+fn descriptor_with_resources(resources: PluginResources) -> PluginDescriptor {
+    PluginDescriptor {
+        resources,
+        ..descriptor_default()
     }
 }
 
@@ -1518,13 +1563,21 @@ async fn spawn_static_env_appears_in_launcher_payload() {
     )
     .await;
 
-    let state = app_state_with_plugin_env(
+    let descriptor = descriptor_with_env(vec![
+        EnvEntry {
+            name: "GITHUB_TOOLSETS".to_string(),
+            value: "default,actions".to_string(),
+        },
+        EnvEntry {
+            name: "GITHUB_TERSE_DESCRIPTIONS".to_string(),
+            value: "true".to_string(),
+        },
+    ]);
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
         path_to_string(&socket_path),
         "http://127.0.0.1:1".to_string(),
-        vec![
-            ("GITHUB_TOOLSETS".to_string(), "default,actions".to_string()),
-            ("GITHUB_TERSE_DESCRIPTIONS".to_string(), "true".to_string()),
-        ],
+        config_url,
     );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -1576,15 +1629,16 @@ async fn spawn_plugin_resources_appear_in_launcher_payload() {
     )
     .await;
 
-    let state = app_state_with_plugin_env_and_resources(
+    let descriptor = descriptor_with_resources(PluginResources {
+        cpus: Some("4.0".to_string()),
+        memory: Some("4g".to_string()),
+        pids: Some(1024),
+    });
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
         path_to_string(&socket_path),
         "http://127.0.0.1:1".to_string(),
-        vec![],
-        PluginResources {
-            cpus: Some("4.0".to_string()),
-            memory: Some("4g".to_string()),
-            pids: Some(1024),
-        },
+        config_url,
     );
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -1628,11 +1682,12 @@ async fn spawn_static_env_appears_before_secrets() {
     )
     .await;
 
-    let state = app_state_with_plugin_env(
-        path_to_string(&socket_path),
-        auth_url,
-        vec![("GITHUB_TOOLSETS".to_string(), "default,actions".to_string())],
-    );
+    let descriptor = descriptor_with_env(vec![EnvEntry {
+        name: "GITHUB_TOOLSETS".to_string(),
+        value: "default,actions".to_string(),
+    }]);
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -1677,10 +1732,15 @@ async fn spawn_static_env_present_when_no_cap() {
     )
     .await;
 
-    let state = app_state_with_plugin_env(
+    let descriptor = descriptor_with_env(vec![EnvEntry {
+        name: "GITHUB_TOOLSETS".to_string(),
+        value: "default,actions".to_string(),
+    }]);
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
         path_to_string(&socket_path),
         "http://127.0.0.1:1".to_string(),
-        vec![("GITHUB_TOOLSETS".to_string(), "default,actions".to_string())],
+        config_url,
     );
     let mut stream = PerStreamState::default();
     // No x-botwork-cap header — no secrets fetch.
@@ -1768,6 +1828,94 @@ async fn spawn_auth_broker_capture(
     format!("http://{addr}")
 }
 
+/// Stand up a fake config-broker on `127.0.0.1:0` that responds to one
+/// `POST /resolve` with the supplied descriptor (rendered to wire JSON) at
+/// status 200, then closes. Returns the base URL.
+///
+/// `expected_calls` controls how many requests the fake will accept before
+/// returning. Pass 1 for the typical single-spawn test.
+async fn spawn_config_broker_with_descriptor(descriptor: PluginDescriptor) -> String {
+    let body = render_descriptor_json(&descriptor);
+    spawn_config_broker_with_response(200, body).await
+}
+
+/// Lower-level fake — caller controls status and body. Useful for the
+/// failure-mode tests that want to assert how session-broker maps a 400/404/
+/// 500/garbage response from config-broker onto a client-facing immediate
+/// response.
+async fn spawn_config_broker_with_response(status_code: u16, body: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind config broker");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept config request");
+        // Drain the request — we don't currently assert on its body in any
+        // spawn-path test, but the read keeps the HTTP framing tidy.
+        let _ = read_tcp_http_request(&mut stream).await;
+        let reason = match status_code {
+            200 => "OK",
+            400 => "Bad Request",
+            404 => "Not Found",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            _ => "OK",
+        };
+        let response = format!(
+            "HTTP/1.1 {status_code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write config response");
+    });
+    format!("http://{addr}")
+}
+
+/// Render a `PluginDescriptor` to the on-the-wire JSON shape config-broker
+/// returns. Mirrors `config-broker/src/handler.rs::render_descriptor` — kept
+/// here so spawn-path tests don't depend on the config-broker crate.
+fn render_descriptor_json(descriptor: &PluginDescriptor) -> String {
+    let upstream_auth = match &descriptor.upstream_auth {
+        UpstreamAuth::None => "none".to_string(),
+        UpstreamAuth::Bearer { service } => format!("bearer/{service}"),
+    };
+    let mut json = serde_json::json!({
+        "image": descriptor.image,
+        "port": descriptor.port,
+        "network": descriptor.network,
+        "path": descriptor.path,
+        "upstream_auth": upstream_auth,
+        "resources": {},
+        "env": descriptor
+            .env
+            .iter()
+            .map(|e| serde_json::json!({ "name": e.name, "value": e.value }))
+            .collect::<Vec<_>>(),
+    });
+    let resources = json["resources"].as_object_mut().unwrap();
+    if let Some(cpus) = &descriptor.resources.cpus {
+        resources.insert("cpus".to_string(), serde_json::Value::String(cpus.clone()));
+    }
+    if let Some(memory) = &descriptor.resources.memory {
+        resources.insert(
+            "memory".to_string(),
+            serde_json::Value::String(memory.clone()),
+        );
+    }
+    if let Some(pids) = descriptor.resources.pids {
+        resources.insert("pids".to_string(), serde_json::Value::Number(pids.into()));
+    }
+    if let Some(blob) = &descriptor.config_blob {
+        json.as_object_mut().unwrap().insert(
+            "config_blob".to_string(),
+            serde_json::Value::String(blob.clone()),
+        );
+    }
+    json.to_string()
+}
+
 async fn read_unix_http_request(stream: &mut UnixStream) -> String {
     read_http_request_impl(stream).await
 }
@@ -1833,19 +1981,17 @@ fn extract_header_value(request: &str, header_name: &str) -> Option<String> {
     })
 }
 
-fn app_state_with_plugins_and_registry(
+fn app_state_with_session_registry(
     launcher_socket_path: String,
     registry: Arc<SessionRegistry>,
 ) -> AppState {
-    let mut plugin_registry = HashMap::new();
-    plugin_registry.insert("plugin-a".to_string(), sample_plugin_config());
     AppState {
-        plugin_registry,
         session_registry: registry,
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
         auth_broker_url: "http://127.0.0.1:1".to_string(),
+        config_broker_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -1962,7 +2108,7 @@ async fn response_headers_delete_teardown_drops_session_and_calls_launcher() {
         )
         .await;
 
-    let state = app_state_with_plugins_and_registry(path_to_string(&socket_path), registry);
+    let state = app_state_with_session_registry(path_to_string(&socket_path), registry);
     insert_transport(
         &state,
         "sess-1",
@@ -2299,40 +2445,16 @@ async fn session_entry_serialization_includes_tenant_and_namespace() {
 #[allow(dead_code)]
 fn _use_teardown_info_type(_: TeardownInfo) {}
 
-fn app_state_with_plugin_config(
-    launcher_socket_path: String,
-    config: Option<serde_json::Value>,
-) -> AppState {
-    let mut plugin_registry = HashMap::new();
-    plugin_registry.insert(
-        "plugin-a".to_string(),
-        PluginConfig {
-            image: "botwork/plugin-a:local".to_string(),
-            port: 8000,
-            network: "botwork".to_string(),
-            path: "/mcp".to_string(),
-            upstream_auth: UpstreamAuth::None,
-            env: vec![],
-            resources: PluginResources::default(),
-            config,
-        },
-    );
-    AppState {
-        plugin_registry,
-        session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
-        transport_sessions: Arc::new(Mutex::new(HashMap::new())),
-        pending_init: Arc::new(Mutex::new(HashMap::new())),
-        launcher_socket_path,
-        auth_broker_url: "http://127.0.0.1:1".to_string(),
-        tombstones: Arc::new(Mutex::new(HashMap::new())),
-        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
-        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+fn descriptor_with_config_blob(config_blob: Option<String>) -> PluginDescriptor {
+    PluginDescriptor {
+        config_blob,
+        ..descriptor_default()
     }
 }
 
 #[tokio::test]
 async fn spawn_config_env_appears_in_launcher_payload() {
-    use botwork_session_broker::plugin_registry::CONFIG_ENV_NAME;
+    use botwork_session_broker::config_broker::CONFIG_ENV_NAME;
 
     let temp = tempdir().unwrap();
     let socket_path = temp.path().join("launcher.sock");
@@ -2345,13 +2467,24 @@ async fn spawn_config_env_appears_in_launcher_payload() {
     )
     .await;
 
-    let config = serde_json::json!({
+    // config-broker now serialises the structured config to compact JSON on
+    // its side — session-broker just drops the resulting string into
+    // BOTWORK_MCP_CONFIG. The fake config-broker therefore has to ship the
+    // descriptor with `config_blob` already serialised.
+    let blob = serde_json::json!({
         "default_token_env": "BOTWORK_SECRET_GITHUB_DEFAULT",
         "routes": [
             { "owner": "botworkz", "token_env": "BOTWORK_SECRET_GITHUB_BOTWORKZ" }
         ]
-    });
-    let state = app_state_with_plugin_config(path_to_string(&socket_path), Some(config));
+    })
+    .to_string();
+    let descriptor = descriptor_with_config_blob(Some(blob));
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+        config_url,
+    );
 
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -2388,7 +2521,7 @@ async fn spawn_config_env_appears_in_launcher_payload() {
 
 #[tokio::test]
 async fn spawn_config_env_absent_when_config_not_set() {
-    use botwork_session_broker::plugin_registry::CONFIG_ENV_NAME;
+    use botwork_session_broker::config_broker::CONFIG_ENV_NAME;
 
     let temp = tempdir().unwrap();
     let socket_path = temp.path().join("launcher.sock");
@@ -2401,7 +2534,13 @@ async fn spawn_config_env_absent_when_config_not_set() {
     )
     .await;
 
-    let state = app_state_with_plugin_config(path_to_string(&socket_path), None);
+    let descriptor = descriptor_with_config_blob(None);
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn(
+        path_to_string(&socket_path),
+        "http://127.0.0.1:1".to_string(),
+        config_url,
+    );
 
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(

@@ -4,133 +4,11 @@ use tokio::sync::Mutex;
 
 use axum::body::Body;
 use botwork_session_broker::admin::build_router;
-use botwork_session_broker::plugin_registry::{
-    self, PluginRegistryError, PluginResources, UpstreamAuth,
-};
 use botwork_session_broker::session_registry::{utc_now, RegistryLoadError, SessionRegistry};
 use botwork_session_broker::AppState;
 use http::Request;
 use tempfile::tempdir;
 use tower::ServiceExt;
-
-// ---------------------------------------------------------------------------
-// Plugin registry tests
-// ---------------------------------------------------------------------------
-
-fn write_plugins(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
-    let path = dir.join("plugins.yaml");
-    std::fs::write(&path, content).unwrap();
-    path
-}
-
-#[test]
-fn plugin_registry_valid_load() {
-    let dir = tempdir().unwrap();
-    let path = write_plugins(
-        dir.path(),
-        "plugins:\n  fs:\n    image: botwork/mcp-fs:local\n  echo:\n    image: botwork/mcp-echo:local\n    port: 9000\n    network: custom\n    path: /mcp\n",
-    );
-
-    let loaded = plugin_registry::load(path.to_str().unwrap()).unwrap();
-
-    assert_eq!(loaded.len(), 2);
-
-    let fs = loaded.get("fs").unwrap();
-    assert_eq!(fs.image, "botwork/mcp-fs:local");
-    assert_eq!(fs.port, 8000);
-    assert_eq!(fs.network, "botwork");
-    assert_eq!(fs.path, "/");
-    assert_eq!(fs.upstream_auth, UpstreamAuth::None);
-    assert_eq!(fs.resources, PluginResources::default());
-
-    let echo = loaded.get("echo").unwrap();
-    assert_eq!(echo.port, 9000);
-    assert_eq!(echo.network, "custom");
-    assert_eq!(echo.path, "/mcp");
-    assert_eq!(echo.upstream_auth, UpstreamAuth::None);
-    assert_eq!(echo.resources, PluginResources::default());
-}
-
-#[test]
-fn plugin_registry_missing_file_raises() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("missing.yaml");
-    let err = plugin_registry::load(path.to_str().unwrap()).unwrap_err();
-    assert!(
-        matches!(err, PluginRegistryError::NotFound(_)),
-        "unexpected error: {err}"
-    );
-    assert!(err.to_string().contains("plugin registry file not found"));
-}
-
-#[test]
-fn plugin_registry_empty_plugins_map_raises() {
-    let dir = tempdir().unwrap();
-    let path = write_plugins(dir.path(), "plugins: {}\n");
-    let err = plugin_registry::load(path.to_str().unwrap()).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("'plugins' must be a non-empty map"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn plugin_registry_missing_image_raises() {
-    let dir = tempdir().unwrap();
-    let path = write_plugins(dir.path(), "plugins:\n  fs:\n    port: 9000\n");
-    let err = plugin_registry::load(path.to_str().unwrap()).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("missing required non-empty 'image'"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn plugin_registry_bad_name_raises() {
-    for bad_name in ["Fs", "a/b", &"a".repeat(32)] {
-        let dir = tempdir().unwrap();
-        let path = write_plugins(
-            dir.path(),
-            &format!("plugins:\n  {bad_name}:\n    image: botwork/x:local\n"),
-        );
-        let err = plugin_registry::load(path.to_str().unwrap()).unwrap_err();
-        assert!(
-            err.to_string().contains("invalid plugin name"),
-            "unexpected error for name '{bad_name}': {err}"
-        );
-    }
-}
-
-#[test]
-fn plugin_registry_bad_port_raises() {
-    let dir = tempdir().unwrap();
-    let path = write_plugins(
-        dir.path(),
-        "plugins:\n  fs:\n    image: botwork/mcp-fs:local\n    port: 99999\n",
-    );
-    let err = plugin_registry::load(path.to_str().unwrap()).unwrap_err();
-    assert!(
-        err.to_string().contains("invalid 'port'"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn plugin_registry_bad_network_raises() {
-    let dir = tempdir().unwrap();
-    // empty string network
-    let path = write_plugins(
-        dir.path(),
-        "plugins:\n  fs:\n    image: botwork/mcp-fs:local\n    network: ''\n",
-    );
-    let err = plugin_registry::load(path.to_str().unwrap()).unwrap_err();
-    assert!(
-        err.to_string().contains("invalid 'network'"),
-        "unexpected error: {err}"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Session registry tests
@@ -351,12 +229,12 @@ async fn session_registry_atomic_write_under_concurrent_mutation() {
 
 fn app_state_for_registry(registry: Arc<SessionRegistry>) -> AppState {
     AppState {
-        plugin_registry: HashMap::new(),
         session_registry: registry,
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path: "/tmp/launcher.sock".to_string(),
         auth_broker_url: "http://127.0.0.1:1".to_string(),
+        config_broker_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
