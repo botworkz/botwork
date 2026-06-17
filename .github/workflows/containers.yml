@@ -49,9 +49,18 @@ jobs:
     - name: Smoke test session-broker
       run: |
         set -euo pipefail
-        output="$(docker run --rm botwork/session-broker:local 2>&1 || true)"
-        echo "$output"
-        echo "$output" | grep -q "plugin registry file not found"
+        # Pre-config-broker session-broker fail-fast asserted on a missing
+        # plugins.yaml. After the cutover session-broker no longer reads
+        # plugins.yaml at all (config-broker owns it), so a no-env-vars launch
+        # starts cleanly and serves forever. Bound the run with `timeout` and
+        # assert on a startup log line that proves the gRPC listener is up.
+        #
+        # Exit status: `timeout` kills the container after 5s and exits 124.
+        # session-broker has no graceful shutdown handler so any non-zero
+        # exit is expected; only the stdout/stderr matters here.
+        output="$(timeout 5s docker run --rm botwork/session-broker:local 2>&1 || true)"
+        echo "${output}"
+        echo "${output}" | grep -q "starting gRPC ext_proc service on 0.0.0.0:9001"
     - name: Build config-broker
       run: |
         set -euo pipefail
@@ -61,5 +70,5 @@ jobs:
         set -euo pipefail
         # config-broker refuses to start when plugins.yaml is missing.
         output="$(docker run --rm botwork/config-broker:local 2>&1 || true)"
-        echo "$output"
-        echo "$output" | grep -q "plugin registry file not found"
+        echo "${output}"
+        echo "${output}" | grep -q "plugin registry file not found"
