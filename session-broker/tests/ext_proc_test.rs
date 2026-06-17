@@ -249,6 +249,7 @@ fn sample_plugin_config_with_path_and_auth(
         upstream_auth,
         env: vec![],
         resources: PluginResources::default(),
+        config: None,
     }
 }
 
@@ -1488,6 +1489,7 @@ fn app_state_with_plugin_env_and_resources(
             upstream_auth: UpstreamAuth::None,
             env: static_env,
             resources,
+            config: None,
         },
     );
     AppState {
@@ -2296,3 +2298,136 @@ async fn session_entry_serialization_includes_tenant_and_namespace() {
 
 #[allow(dead_code)]
 fn _use_teardown_info_type(_: TeardownInfo) {}
+
+fn app_state_with_plugin_config(
+    launcher_socket_path: String,
+    config: Option<serde_json::Value>,
+) -> AppState {
+    let mut plugin_registry = HashMap::new();
+    plugin_registry.insert(
+        "plugin-a".to_string(),
+        PluginConfig {
+            image: "botwork/plugin-a:local".to_string(),
+            port: 8000,
+            network: "botwork".to_string(),
+            path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::None,
+            env: vec![],
+            resources: PluginResources::default(),
+            config,
+        },
+    );
+    AppState {
+        plugin_registry,
+        session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
+        transport_sessions: Arc::new(Mutex::new(HashMap::new())),
+        pending_init: Arc::new(Mutex::new(HashMap::new())),
+        launcher_socket_path,
+        auth_broker_url: "http://127.0.0.1:1".to_string(),
+        tombstones: Arc::new(Mutex::new(HashMap::new())),
+        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+    }
+}
+
+#[tokio::test]
+async fn spawn_config_env_appears_in_launcher_payload() {
+    use botwork_session_broker::plugin_registry::CONFIG_ENV_NAME;
+
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let config = serde_json::json!({
+        "default_token_env": "BOTWORK_SECRET_GITHUB_DEFAULT",
+        "routes": [
+            { "owner": "botworkz", "token_env": "BOTWORK_SECRET_GITHUB_BOTWORKZ" }
+        ]
+    });
+    let state = app_state_with_plugin_config(path_to_string(&socket_path), Some(config));
+
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    let env = launcher_payload["env"].as_array().expect("env array");
+    let config_entry = env
+        .iter()
+        .find(|e| e["name"] == CONFIG_ENV_NAME)
+        .expect("BOTWORK_MCP_CONFIG should be in env");
+    let config_str = config_entry["value"]
+        .as_str()
+        .expect("config value is string");
+    let parsed: serde_json::Value = serde_json::from_str(config_str).expect("config is valid JSON");
+    assert_eq!(
+        parsed["default_token_env"].as_str().unwrap(),
+        "BOTWORK_SECRET_GITHUB_DEFAULT"
+    );
+    assert_eq!(parsed["routes"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn spawn_config_env_absent_when_config_not_set() {
+    use botwork_session_broker::plugin_registry::CONFIG_ENV_NAME;
+
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let launcher_body = Arc::new(Mutex::new(None));
+    let launcher_task = spawn_launcher_capture(
+        &socket_path,
+        500,
+        r#"{"error":"boom"}"#,
+        Arc::clone(&launcher_body),
+    )
+    .await;
+
+    let state = app_state_with_plugin_config(path_to_string(&socket_path), None);
+
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    assert_eq!(immediate_status(&response), Some(502));
+
+    let launcher_payload: serde_json::Value =
+        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
+            .expect("launcher json");
+    // When config is None the env array may be absent entirely (no static env,
+    // no config entry) or present but must not contain BOTWORK_MCP_CONFIG.
+    assert!(
+        launcher_payload.get("env").is_none()
+            || launcher_payload["env"]
+                .as_array()
+                .map(|a| a.iter().all(|e| e["name"] != CONFIG_ENV_NAME))
+                .unwrap_or(true),
+        "BOTWORK_MCP_CONFIG should not be present when config is None"
+    );
+}

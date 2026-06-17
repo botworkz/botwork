@@ -19,6 +19,61 @@ Auth-broker fetch errors are fail-open: spawn continues with no injected
 secrets, so control-plane/auth-broker issues do not take down the MCP data
 plane.
 
+## Plugin registry: `config`
+
+Each plugin in `/etc/botwork/plugins.yaml` may declare a structured, non-secret
+`config:` mapping. The broker serialises this to compact JSON and injects it as
+`BOTWORK_MCP_CONFIG` in every spawned container for that plugin.
+
+```yaml
+plugins:
+  github:
+    image: botwork/mcp-github:local
+    config:
+      default_token_env: BOTWORK_SECRET_GITHUB_DEFAULT
+      routes:
+        - owner: botworkz
+          token_env: BOTWORK_SECRET_GITHUB_BOTWORKZ
+        - owner: phlax
+          token_env: BOTWORK_SECRET_GITHUB_PHLAX
+```
+
+The plugin container receives `BOTWORK_MCP_CONFIG` as a compact-JSON string and
+is responsible for parsing it.
+
+### Plugin-side contract
+
+- **Name.** `BOTWORK_MCP_CONFIG` — exact and stable; renaming is a breaking
+  change for every plugin.
+- **Shape.** Compact-JSON object (`{…}`).  The broker guarantees it is valid
+  JSON; the *content* under the top-level object is opaque pass-through.
+- **Absence semantics.** If the operator did not set `config:` the variable is
+  **not present** in the container env (same as unset `env:` entries).  Plugins
+  must treat a missing variable the same as no config.
+- **Stability.** Static per-plugin; read once at container startup.  The value
+  does not change mid-session; a container restart is needed to pick up new
+  config.
+- **What config must NOT contain.** No secrets.  Route entries or feature flags
+  may *reference* a secret by env-var name (e.g. `token_env:
+  BOTWORK_SECRET_GITHUB_BOTWORKZ`), but the secret *value* is never in the
+  config blob — it arrives separately via `BOTWORK_SECRET_*`.
+
+### Operator rules
+
+- The field is optional and defaults to absent (no injection).
+- The value must be a YAML mapping; scalars and sequences at the top level are
+  rejected at broker startup.
+- The serialised JSON is capped at 64 KiB.
+- `BOTWORK_MCP_CONFIG` is **reserved** — setting it directly in the `env:`
+  mapping is a parse-time error.  Use `config:` instead.
+
+### Injection order
+
+The final env sent to the launcher is ordered:
+1. Static plugin `env:` entries.
+2. `BOTWORK_MCP_CONFIG` (if `config:` is set).
+3. Vault-derived `BOTWORK_SECRET_*` entries.
+
 ## Plugin registry: `env`
 
 Each plugin in `/etc/botwork/plugins.yaml` may declare a static, non-secret
@@ -40,10 +95,11 @@ plugins:
 - The field is optional and defaults to empty.
 - Keys must match `[A-Z_][A-Z0-9_]*`, must not be in the reserved set
   (`PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`), must not start
-  with `DOCKER_`, and must not start with `BOTWORK_SECRET_` (reserved for
-  vault-derived entries). `HOME` and `USER` are intentionally **not** reserved
-  and may be set per-plugin (e.g. `HOME: /workspace` for cache-heavy plugins
-  like `bazel` or `cargo`).
+  with `DOCKER_`, must not start with `BOTWORK_SECRET_` (reserved for
+  vault-derived entries), and must not be `BOTWORK_MCP_CONFIG` (reserved for
+  structured config injection — use the `config:` field). `HOME` and `USER`
+  are intentionally **not** reserved and may be set per-plugin (e.g.
+  `HOME: /workspace` for cache-heavy plugins like `bazel` or `cargo`).
 - Non-string YAML scalars (booleans, integers) are **rejected at parse time**
   with a clear error suggesting the user quote the value.
 - Values are capped at 64 KiB.
@@ -56,10 +112,11 @@ offending plugin and field.
 ### Merge order
 
 When a container is spawned the final `env` array sent to the launcher is
-built as: **static plugin env first, then vault-derived secrets**. This keeps
-the `BOTWORK_SECRET_*` block contiguous at the end for easy scanning in logs.
-The combined list is capped at 64 entries; if `static + secrets > 64`,
-secrets are truncated (not static env).
+built as: **static plugin env first, then `BOTWORK_MCP_CONFIG` (if set), then
+vault-derived secrets**. This keeps the `BOTWORK_SECRET_*` block contiguous at
+the end for easy scanning in logs.
+The combined list is capped at 64 entries; if `static + config + secrets > 64`,
+secrets are truncated (not static env or config).
 
 ## Plugin registry: `resources`
 
