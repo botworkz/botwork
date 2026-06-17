@@ -22,7 +22,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_ready, LauncherError};
-use crate::plugin_registry::{PluginConfig, UpstreamAuth};
+use crate::plugin_registry::{PluginConfig, UpstreamAuth, CONFIG_ENV_NAME};
 use crate::secrets;
 use crate::session_registry::{is_container_running, utc_now};
 use crate::{
@@ -1234,9 +1234,15 @@ impl ExternalProcessorService {
             let secret_env = secrets::build_env_entries(&fetched_secrets);
             let static_env_count = plugin_config.env.len();
             let mut env: Vec<(String, String)> =
-                Vec::with_capacity(static_env_count + secret_env.len());
+                Vec::with_capacity(static_env_count + secret_env.len() + 1);
             // Static plugin env first (deterministic config), secrets appended after.
             env.extend(plugin_config.env.iter().cloned());
+            // Structured config follows static env as compact JSON when set.
+            if let Some(config_json) = &plugin_config.config {
+                let json_str = serde_json::to_string(config_json)
+                    .expect("config Value always re-serializes; validated at registry load");
+                env.push((CONFIG_ENV_NAME.to_string(), json_str));
+            }
             for entry in &secret_env {
                 if env.len() >= secrets::MAX_ENV_ENTRIES {
                     log_info(&format!(
@@ -1642,6 +1648,7 @@ mod tests {
             upstream_auth,
             env: vec![],
             resources: PluginResources::default(),
+            config: None,
         }
     }
 

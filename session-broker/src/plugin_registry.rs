@@ -14,6 +14,15 @@ const RESERVED_ENV_NAMES: &[&str] = &["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"];
 /// launcher's MAX_ENV_ENTRIES = 64 for vault-derived secrets).
 const MAX_STATIC_ENV_ENTRIES: usize = 32;
 
+/// Env var name under which compact-JSON structured config is injected.
+///
+/// This name is reserved: operators must express structured config through the
+/// `config:` field in `plugins.yaml`, not via the flat `env:` mapping.  The
+/// broker serialises the `config:` value to compact JSON and injects it under
+/// this name automatically.  Plugins that do not use `config:` never see the
+/// variable (absence semantics, matching `env:` behaviour).
+pub const CONFIG_ENV_NAME: &str = "BOTWORK_MCP_CONFIG";
+
 static PLUGIN_NAME_RE: OnceLock<Regex> = OnceLock::new();
 
 fn plugin_name_re() -> &'static Regex {
@@ -29,6 +38,10 @@ pub struct PluginConfig {
     pub upstream_auth: UpstreamAuth,
     pub env: Vec<(String, String)>,
     pub resources: PluginResources,
+    /// Structured config serialised to compact JSON and injected as
+    /// `BOTWORK_MCP_CONFIG` in the plugin container.  `None` means the
+    /// operator did not set `config:` and the env var is not injected.
+    pub config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -171,6 +184,12 @@ fn parse_env(
             )));
         }
 
+        if key == CONFIG_ENV_NAME {
+            return Err(PluginRegistryError::Invalid(format!(
+                "plugin '{plugin_name}' env key '{key}': reserved for structured config injection; use the 'config:' field instead"
+            )));
+        }
+
         if !valid_env_name(key) {
             return Err(PluginRegistryError::Invalid(format!(
                 "plugin '{plugin_name}' env key '{key}': invalid name (must match [A-Z_][A-Z0-9_]*, not reserved or DOCKER_-prefixed)"
@@ -194,6 +213,66 @@ fn parse_env(
     }
 
     Ok(result)
+}
+
+/// Parse the `config:` field from a plugin's YAML block.
+///
+/// `config_val` is the full plugin block; this function indexes `["config"]`
+/// internally, matching the convention used by `parse_env` and
+/// `parse_resources`.
+fn parse_config(
+    plugin_name: &str,
+    config_val: &serde_yaml::Value,
+) -> Result<Option<serde_json::Value>, PluginRegistryError> {
+    let raw = &config_val["config"];
+    if raw.is_null() {
+        return Ok(None);
+    }
+
+    // Convert serde_yaml::Value → serde_json::Value.  Most well-formed YAML
+    // structures round-trip cleanly; failures mean the operator used a
+    // YAML feature that has no JSON equivalent (e.g. a null map key).
+    let json_val: serde_json::Value = serde_json::to_value(raw).map_err(|e| {
+        PluginRegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'config': cannot represent as JSON: {e}"
+        ))
+    })?;
+
+    // Reject scalars: structured config must be a JSON object.
+    if !json_val.is_object() {
+        return Err(PluginRegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'config': expected a mapping (got {})",
+            json_val_type_name(&json_val)
+        )));
+    }
+
+    // Treat an empty mapping the same as absent: no env var injected.
+    if json_val.as_object().unwrap().is_empty() {
+        return Ok(None);
+    }
+
+    // Guard against pathologically large blobs at load time.
+    let serialized =
+        serde_json::to_string(&json_val).expect("Value already validated as JSON-serializable");
+    if serialized.len() > secrets::MAX_ENV_VALUE_BYTES {
+        return Err(PluginRegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'config': serialized JSON exceeds maximum size of {} bytes",
+            secrets::MAX_ENV_VALUE_BYTES
+        )));
+    }
+
+    Ok(Some(json_val))
+}
+
+fn json_val_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 fn parse_resources(
@@ -396,6 +475,7 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
         let upstream_auth = UpstreamAuth::from_yaml_value(name, &config_val["upstream_auth"])?;
         let env = parse_env(name, config_val)?;
         let resources = parse_resources(name, config_val)?;
+        let config = parse_config(name, config_val)?;
 
         result.insert(
             name.to_string(),
@@ -407,6 +487,7 @@ pub fn load(path: &str) -> Result<PluginRegistry, PluginRegistryError> {
                 upstream_auth,
                 env,
                 resources,
+                config,
             },
         );
     }
@@ -963,6 +1044,194 @@ mod tests {
             map.len(),
             1,
             "serde_yaml Mapping deduplicates keys internally"
+        );
+    }
+
+    // ── config: field ────────────────────────────────────────────────────────
+
+    #[test]
+    fn load_config_defaults_none_when_absent() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert!(loaded["p"].config.is_none());
+    }
+
+    #[test]
+    fn load_config_defaults_none_when_null() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    config:
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert!(loaded["p"].config.is_none());
+    }
+
+    #[test]
+    fn load_config_normalises_empty_mapping_to_none() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    config: {}
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert!(loaded["p"].config.is_none());
+    }
+
+    #[test]
+    fn load_config_rejects_null_map_key() {
+        // YAML allows null as a mapping key (~: value); JSON does not —
+        // serde_json requires every object key to be a string.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    config:
+      ~: value
+",
+        );
+        let err = load(&path).expect_err("null map key should fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'")
+                && err.contains("invalid 'config'")
+                && err.contains("cannot represent as JSON"),
+            "error should mention plugin and JSON conversion failure: {err}"
+        );
+    }
+
+    #[test]
+    fn load_config_accepts_flat_mapping() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    config:
+      default_token_env: BOTWORK_SECRET_GITHUB_DEFAULT
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        let config = loaded["p"].config.as_ref().expect("config should be Some");
+        assert_eq!(
+            config["default_token_env"].as_str().unwrap(),
+            "BOTWORK_SECRET_GITHUB_DEFAULT"
+        );
+    }
+
+    #[test]
+    fn load_config_accepts_nested_structure() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    config:
+      routes:
+        - owner: botworkz
+          token_env: BOTWORK_SECRET_GITHUB_BOTWORKZ
+        - owner: phlax
+          token_env: BOTWORK_SECRET_GITHUB_PHLAX
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        let config = loaded["p"].config.as_ref().expect("config should be Some");
+        let routes = config["routes"].as_array().expect("routes array");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0]["owner"].as_str().unwrap(), "botworkz");
+        assert_eq!(
+            routes[0]["token_env"].as_str().unwrap(),
+            "BOTWORK_SECRET_GITHUB_BOTWORKZ"
+        );
+    }
+
+    #[test]
+    fn load_config_rejects_non_mapping() {
+        let cases = [
+            ("config: \"a string\"", "string"),
+            ("config: 42", "number"),
+            ("config: true", "bool"),
+            ("config:\n      - item1\n      - item2", "array"),
+        ];
+        for (entry, kind) in cases {
+            let dir = tempdir().expect("tempdir");
+            let path = write_plugins(
+                dir.path(),
+                &format!("plugins:\n  p:\n    image: botwork/mcp-p:local\n    {entry}\n"),
+            );
+            let err = load(&path).expect_err(&format!("non-mapping config ({kind}) should fail"));
+            let err = err.to_string();
+            assert!(
+                err.contains("plugin 'p'") && err.contains("invalid 'config'"),
+                "error '{err}' should mention plugin and invalid config"
+            );
+        }
+    }
+
+    #[test]
+    fn load_config_rejects_oversized_value() {
+        // Build a mapping whose JSON serialization exceeds MAX_ENV_VALUE_BYTES.
+        // Each "kN: <64-char-string>" entry is ~74 bytes in JSON; 1000 entries ≈ 74 KB.
+        let entries: String = (0..1000)
+            .map(|i| format!("      k{i}: \"{}\"\n", "x".repeat(64)))
+            .collect();
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            &format!("plugins:\n  p:\n    image: botwork/mcp-p:local\n    config:\n{entries}"),
+        );
+        let err = load(&path).expect_err("oversized config should fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'") && err.contains("exceeds maximum size"),
+            "error should mention plugin and size: {err}"
+        );
+    }
+
+    #[test]
+    fn load_env_rejects_botwork_mcp_config() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    env:
+      BOTWORK_MCP_CONFIG: \"{}\"
+",
+        );
+        let err = load(&path).expect_err("BOTWORK_MCP_CONFIG in env should fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'"),
+            "error should mention plugin: {err}"
+        );
+        assert!(
+            err.contains("BOTWORK_MCP_CONFIG"),
+            "error should mention the reserved name: {err}"
+        );
+        assert!(
+            err.contains("'config:' field"),
+            "error should hint at the config: field: {err}"
         );
     }
 }
