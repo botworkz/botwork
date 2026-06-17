@@ -609,9 +609,16 @@ async fn schedule_grace_timer(state: AppState, sid: String, liveness: Arc<Sessio
         log_info(&format!(
             "liveness: session={sid_clone} grace expired, reaping"
         ));
+        // Remove the liveness entry ourselves before calling reap_session.
+        // teardown_session (called by reap_session) also calls liveness_remove,
+        // which aborts the grace_handle stored in the SessionLiveness entry.
+        // If we did NOT remove the entry here, that abort would cancel *this*
+        // task — aborting call_teardown and leaking the container.  Removing
+        // the entry first makes the liveness_remove inside teardown_session a
+        // no-op (entry already gone).  Dropping a JoinHandle without .abort()
+        // does not cancel the task, so we continue running safely.
+        state_clone.stream_liveness.lock().await.remove(&sid_clone);
         reap_session(&state_clone, &sid_clone).await;
-        // liveness_remove is called inside teardown_session (via reap_session);
-        // no extra removal is needed here.
     });
 
     *guard = Some(handle);
