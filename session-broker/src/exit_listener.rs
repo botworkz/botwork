@@ -189,6 +189,17 @@ pub async fn handle_container_exit(
         let mut sessions = state.transport_sessions.lock().await;
         sessions.remove(&mcp_session_id);
     }
+    // Cancel any pending grace timer so the container-exit and stream-close
+    // reapers don't race each other.
+    {
+        let entry = state.stream_liveness.lock().await.remove(&mcp_session_id);
+        if let Some(liveness) = entry {
+            let handle = liveness.grace_handle.lock().await.take();
+            if let Some(handle) = handle {
+                handle.abort();
+            }
+        }
+    }
 
     state.session_registry.record_teardown(container_name).await;
 

@@ -69,6 +69,7 @@ fn app_state_with_plugins_and_auth_and_path_and_upstream_auth(
         auth_broker_url,
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -82,6 +83,7 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         auth_broker_url: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -1497,6 +1499,7 @@ fn app_state_with_plugin_env_and_resources(
         auth_broker_url,
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -1843,6 +1846,7 @@ fn app_state_with_plugins_and_registry(
         auth_broker_url: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 

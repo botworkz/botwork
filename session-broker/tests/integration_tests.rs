@@ -359,6 +359,7 @@ fn app_state_for_registry(registry: Arc<SessionRegistry>) -> AppState {
         auth_broker_url: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 

@@ -8,9 +8,11 @@ pub mod session_registry;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 use crate::session_registry::SessionRegistry;
 use plugin_registry::PluginConfig;
@@ -30,6 +32,29 @@ pub const TOMBSTONE_TTL: Duration = Duration::from_secs(300);
 
 /// How long a container-liveness cache entry stays valid (5 minutes).
 pub const LIVENESS_TTL: Duration = Duration::from_secs(300);
+
+/// Default grace period before a fully-disconnected session is reaped.
+/// Overridden at runtime by `BOTWORK_BROKER_DISCONNECT_GRACE_SECS`.
+pub const DEFAULT_DISCONNECT_GRACE_SECS: u64 = 30;
+
+/// Per-session stream-liveness tracking.
+///
+/// Counts how many ext_proc streams are currently open for this session id.
+/// When the counter drops to zero a grace timer is armed; if no new stream
+/// arrives within the grace period the session is reaped automatically.
+pub struct SessionLiveness {
+    pub open_streams: AtomicUsize,
+    pub grace_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Default for SessionLiveness {
+    fn default() -> Self {
+        Self {
+            open_streams: AtomicUsize::new(0),
+            grace_handle: Mutex::new(None),
+        }
+    }
+}
 
 pub fn redact_token(value: &str) -> String {
     let prefix: String = value.chars().take(6).collect();
@@ -140,6 +165,11 @@ pub struct AppState {
     /// An entry present and not yet expired means the container was confirmed
     /// running within the last `LIVENESS_TTL` and no docker inspect is needed.
     pub liveness_cache: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    /// Per-session open-stream counter and grace-timer handle.
+    /// Keyed by `Mcp-Session-Id`.  When the counter drops to zero after the
+    /// last ext_proc stream closes, a grace timer is started; expiry triggers
+    /// automatic session teardown.
+    pub stream_liveness: Arc<Mutex<HashMap<String, Arc<SessionLiveness>>>>,
 }
 
 pub fn log_info(message: &str) {
@@ -200,7 +230,10 @@ pub async fn run() -> Result<(), String> {
         auth_broker_url,
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
     };
+
+    ext_proc::seed_startup_liveness(&state).await;
 
     log_info(&format!("starting admin HTTP server on {admin_addr}"));
     log_info(&format!("starting gRPC ext_proc service on {grpc_addr}"));

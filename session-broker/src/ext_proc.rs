@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -25,8 +26,9 @@ use crate::plugin_registry::{PluginConfig, UpstreamAuth};
 use crate::secrets;
 use crate::session_registry::{is_container_running, utc_now};
 use crate::{
-    log_info, redact_token, AppState, PendingInit, TransportState, COLD_START_TIMEOUT,
-    LIVENESS_TTL, NAMESPACE_RE, TENANT_NAMESPACE_PLUGIN_PATH_RE, TENANT_RE, TOMBSTONE_TTL,
+    log_info, redact_token, AppState, PendingInit, SessionLiveness, TransportState,
+    COLD_START_TIMEOUT, DEFAULT_DISCONNECT_GRACE_SECS, LIVENESS_TTL, NAMESPACE_RE,
+    TENANT_NAMESPACE_PLUGIN_PATH_RE, TENANT_RE, TOMBSTONE_TTL,
 };
 
 static TENANT_PATTERN: OnceLock<Regex> = OnceLock::new();
@@ -69,6 +71,9 @@ pub struct PerStreamState {
     pub trusted_tenant: String,
     pub cap: Option<String>,
     pub teardown_on_response: Option<TeardownInfo>,
+    /// Set to the `Mcp-Session-Id` whose liveness counter we incremented for
+    /// this stream.  Used by the end-of-stream cleanup to decrement the counter.
+    pub liveness_session_id: Option<String>,
 }
 
 impl Default for PerStreamState {
@@ -89,6 +94,7 @@ impl Default for PerStreamState {
             trusted_tenant: String::new(),
             cap: None,
             teardown_on_response: None,
+            liveness_session_id: None,
         }
     }
 }
@@ -486,6 +492,8 @@ fn logged_immediate_response(
 }
 
 async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
+    // Cancel any pending grace timer first so it doesn't fire after teardown.
+    liveness_remove(state, &teardown.mcp_session_id).await;
     call_teardown(
         &state.launcher_socket_path,
         &teardown.container_name,
@@ -507,6 +515,153 @@ async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
         .session_registry
         .record_teardown(&teardown.container_name)
         .await;
+}
+
+/// Cancels any pending grace timer and removes the liveness entry for
+/// `mcp_session_id`.  Called by all teardown paths so the grace timer cannot
+/// fire after a session has already been reaped by another code path.
+async fn liveness_remove(state: &AppState, mcp_session_id: &str) {
+    let entry = state.stream_liveness.lock().await.remove(mcp_session_id);
+    if let Some(liveness) = entry {
+        let handle = liveness.grace_handle.lock().await.take();
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+    }
+}
+
+/// Increments the open-stream counter for `mcp_session_id` and cancels any
+/// pending grace timer.  The caller must then set `stream.liveness_session_id`
+/// so the matching [`liveness_drop`] fires when the stream ends.
+async fn liveness_bump(state: &AppState, mcp_session_id: &str) {
+    let liveness = {
+        let mut map = state.stream_liveness.lock().await;
+        map.entry(mcp_session_id.to_string())
+            .or_insert_with(|| Arc::new(SessionLiveness::default()))
+            .clone()
+    };
+    liveness.open_streams.fetch_add(1, Ordering::SeqCst);
+    // Use an explicit binding for the guard so Rust can reason that it is
+    // dropped before `liveness` goes out of scope at the end of the function.
+    let handle = liveness.grace_handle.lock().await.take();
+    if let Some(handle) = handle {
+        handle.abort();
+        log_info(&format!(
+            "liveness: session={mcp_session_id} reconnected, grace cancelled"
+        ));
+    }
+}
+
+/// Decrements the open-stream counter for `mcp_session_id`.  When the counter
+/// reaches zero a grace timer is armed; if no new stream opens within the grace
+/// period the session is automatically reaped.
+async fn liveness_drop(state: &AppState, mcp_session_id: &str) {
+    let liveness = {
+        let map = state.stream_liveness.lock().await;
+        map.get(mcp_session_id).cloned()
+    };
+    let Some(liveness) = liveness else { return };
+    let prev = liveness.open_streams.fetch_sub(1, Ordering::SeqCst);
+    if prev == 1 {
+        // Was 1, now 0 — arm the grace timer.
+        schedule_grace_timer(state.clone(), mcp_session_id.to_string(), liveness).await;
+    }
+}
+
+/// Arms a grace timer for `sid`.  When the timer fires the session is reaped
+/// via [`reap_session`].  The timer handle is stored in `liveness` so it can be
+/// cancelled if the client reconnects before expiry.
+async fn schedule_grace_timer(state: AppState, sid: String, liveness: Arc<SessionLiveness>) {
+    let grace_secs = std::env::var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DISCONNECT_GRACE_SECS);
+    let grace = std::time::Duration::from_secs(grace_secs);
+
+    let state_clone = state.clone();
+    let sid_clone = sid.clone();
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+        log_info(&format!(
+            "liveness: session={sid_clone} grace expired, reaping"
+        ));
+        reap_session(&state_clone, &sid_clone).await;
+        // liveness_remove is called inside teardown_session (via reap_session);
+        // no extra removal is needed here.
+    });
+
+    // Use an explicit binding for the guard so its lifetime is clear.
+    let mut guard = liveness.grace_handle.lock().await;
+    *guard = Some(handle);
+    drop(guard);
+    log_info(&format!(
+        "liveness: session={sid} all streams closed, grace started ({grace:?})"
+    ));
+}
+
+/// Performs session teardown by looking up teardown info from
+/// `transport_sessions` (normal case) or falling back to the session registry
+/// (broker-restart reconciliation case where `transport_sessions` is empty).
+async fn reap_session(state: &AppState, mcp_session_id: &str) {
+    // Try transport_sessions first (normal running case).
+    let teardown = {
+        let sessions = state.transport_sessions.lock().await;
+        sessions.get(mcp_session_id).map(|t| TeardownInfo {
+            mcp_session_id: mcp_session_id.to_string(),
+            container_name: t.container_name.clone(),
+            staging_path: staging_path(&t.tenant_name, &t.staging_token),
+        })
+    };
+    // Fallback: scan registry (startup-reconciliation path).
+    let teardown = match teardown {
+        Some(t) => Some(t),
+        None => {
+            let reg = state.session_registry.read().await;
+            reg.sessions.values().find_map(|entry| {
+                if entry.mcp_session_id.as_deref() == Some(mcp_session_id) {
+                    Some(TeardownInfo {
+                        mcp_session_id: mcp_session_id.to_string(),
+                        container_name: entry.container.clone(),
+                        staging_path: entry.staging_path.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+        }
+    };
+
+    if let Some(teardown) = teardown {
+        teardown_session(state, &teardown).await;
+    } else {
+        log_info(&format!(
+            "liveness: session={mcp_session_id} grace expired but no teardown info found; skipping"
+        ));
+    }
+}
+
+/// Seeds a grace timer for every session already present in the on-disk
+/// registry at broker startup.  Sessions whose client does not reconnect within
+/// the grace period are reaped; sessions that do reconnect have the timer
+/// cancelled by the normal [`liveness_bump`] path.
+pub async fn seed_startup_liveness(state: &AppState) {
+    let reg_data = state.session_registry.read().await;
+    for entry in reg_data.sessions.values() {
+        let Some(ref mcp_session_id) = entry.mcp_session_id else {
+            continue;
+        };
+        let liveness = Arc::new(SessionLiveness::default());
+        state
+            .stream_liveness
+            .lock()
+            .await
+            .insert(mcp_session_id.clone(), Arc::clone(&liveness));
+        let state_clone = state.clone();
+        let sid = mcp_session_id.clone();
+        tokio::spawn(async move {
+            schedule_grace_timer(state_clone, sid, liveness).await;
+        });
+    }
 }
 
 /// Returns `true` if `mcp_session_id` is currently tombstoned (i.e. a session
@@ -565,6 +720,7 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
     log_info(&format!(
         "liveness_check: evicting dead session={mcp_session_id} container={container_name}"
     ));
+    liveness_remove(state, mcp_session_id).await;
     {
         let mut tombstones = state.tombstones.lock().await;
         tombstones.insert(mcp_session_id.to_string(), Instant::now() + TOMBSTONE_TTL);
@@ -775,6 +931,12 @@ impl ExternalProcessorService {
             let (upstream_authorization, strip_authorization) =
                 route_authorization_for_transport(state, Some(mcp_session_id), &transport);
             stream.chosen_upstream = Some(upstream(&transport.container_name, transport.port));
+            // Clone before calling bump so the &str borrow on stream.mcp_session_id
+            // is released; split-field borrows let us write to liveness_session_id
+            // in the same expression as reading from mcp_session_id.
+            let lsid = mcp_session_id.to_string();
+            liveness_bump(state, &lsid).await;
+            stream.liveness_session_id = Some(lsid);
             log_phase(
                 stream,
                 "request_headers",
@@ -956,6 +1118,8 @@ impl ExternalProcessorService {
                         route_authorization_for_transport(state, Some(mcp_session_id), &transport);
                     stream.chosen_upstream =
                         Some(upstream(&transport.container_name, transport.port));
+                    liveness_bump(state, mcp_session_id).await;
+                    stream.liveness_session_id = Some(mcp_session_id.clone());
                     log_phase(
                         stream,
                         "request_headers",
@@ -1337,6 +1501,8 @@ impl ExternalProcessorService {
             .session_registry
             .record_mcp_session_id(&pending.container_name, &mcp_session_id)
             .await;
+        liveness_bump(state, &mcp_session_id).await;
+        stream.liveness_session_id = Some(mcp_session_id);
 
         log_phase(
             stream,
@@ -1409,8 +1575,17 @@ impl ExternalProcessor for ExternalProcessorService {
                     break;
                 }
             }
-            let mut pending_init = state.pending_init.lock().await;
-            pending_init.remove(&stream_state.stream_id);
+            {
+                let mut pending_init = state.pending_init.lock().await;
+                pending_init.remove(&stream_state.stream_id);
+            }
+            // Decrement the open-stream counter.  This is the single exit
+            // path for every stream regardless of how it ends (clean close,
+            // error, or envoy-initiated disconnect), so the grace timer is
+            // always armed when the last stream for a session closes.
+            if let Some(ref sid) = stream_state.liveness_session_id {
+                liveness_drop(&state, sid).await;
+            }
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -1464,6 +1639,7 @@ mod tests {
             auth_broker_url: "http://127.0.0.1:1".to_string(),
             tombstones: Arc::new(Mutex::new(HashMap::new())),
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+            stream_liveness: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
