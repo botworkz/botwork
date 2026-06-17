@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use botwork_session_broker::config_broker::UpstreamAuth;
 use botwork_session_broker::ext_proc::{
     seed_startup_liveness, ExternalProcessorService, PerStreamState,
 };
@@ -51,12 +52,12 @@ fn make_state() -> AppState {
 
 fn make_state_with_registry(registry: Arc<SessionRegistry>) -> AppState {
     AppState {
-        plugin_registry: HashMap::new(),
         session_registry: registry,
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path: "/tmp/missing-launcher.sock".to_string(),
         auth_broker_url: "http://127.0.0.1:1".to_string(),
+        config_broker_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -79,6 +80,7 @@ async fn insert_transport(state: &AppState, mcp_session_id: &str, container: &st
             plugin_name: "plugin-a".to_string(),
             port: 8000,
             path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::None,
             upstream_authorization: None,
             agent_id: None,
         },

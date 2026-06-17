@@ -9,8 +9,8 @@ use serde_json::Value;
 use tokio::net::{TcpStream, UnixStream};
 use tokio::time::timeout;
 
+use crate::config_broker::PluginResources;
 use crate::log_info;
-use crate::plugin_registry::PluginResources;
 use crate::PROBE_SLEEP;
 
 #[derive(Debug, thiserror::Error)]

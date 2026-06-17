@@ -49,9 +49,29 @@ jobs:
     - name: Smoke test session-broker
       run: |
         set -euo pipefail
-        output="$(docker run --rm botwork/session-broker:local 2>&1 || true)"
-        echo "$output"
-        echo "$output" | grep -q "plugin registry file not found"
+        # Pre-config-broker session-broker fail-fast asserted on a missing
+        # plugins.yaml. After the cutover session-broker no longer reads
+        # plugins.yaml at all (config-broker owns it), so a no-env-vars launch
+        # starts cleanly and serves forever.
+        #
+        # `timeout` is the wrong tool here:
+        #   1. it only sends SIGTERM by default, and session-broker has no
+        #      graceful-shutdown handler — so `timeout` itself waits forever
+        #      for the foreground `docker run` to return,
+        #   2. even SIGKILL on the docker CLI does not stop the container —
+        #      the container is owned by dockerd, the CLI is just attached.
+        #
+        # Instead: run detached, give it a beat to bind, read accumulated
+        # stdout, and force-remove via trap. The trap fires regardless of
+        # whether the grep passes, the assertion fails, or the job is
+        # cancelled — so no container is leaked into the runner.
+        name="botwork-smoke-session-broker-$$"
+        trap "docker rm -f ${name} >/dev/null 2>&1 || true" EXIT
+        docker run -d --name "${name}" botwork/session-broker:local >/dev/null
+        sleep 3
+        output="$(docker logs "${name}" 2>&1)"
+        echo "${output}"
+        echo "${output}" | grep -q "starting gRPC ext_proc service on 0.0.0.0:9001"
     - name: Build config-broker
       run: |
         set -euo pipefail
@@ -61,5 +81,5 @@ jobs:
         set -euo pipefail
         # config-broker refuses to start when plugins.yaml is missing.
         output="$(docker run --rm botwork/config-broker:local 2>&1 || true)"
-        echo "$output"
-        echo "$output" | grep -q "plugin registry file not found"
+        echo "${output}"
+        echo "${output}" | grep -q "plugin registry file not found"

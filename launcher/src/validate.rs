@@ -101,7 +101,7 @@ impl Validators {
 /// This contract is enforced in three places that must stay in sync:
 ///   * `launcher/src/validate.rs::is_sensitive_env` (this file): which env
 ///     values get routed to docker via stdin instead of argv.
-///   * `session-broker/src/plugin_registry.rs`: rejects user-supplied static
+///   * `config-broker/src/registry.rs`: rejects user-supplied static
 ///     env entries that use this prefix (reserved for vault-derived values).
 ///   * `session-broker/src/secrets.rs::SECRET_ENV_PREFIX`: where the broker
 ///     stamps secrets it fetched from the auth-broker before forwarding to
