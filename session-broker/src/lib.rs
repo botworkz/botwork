@@ -33,6 +33,10 @@ pub const TOMBSTONE_TTL: Duration = Duration::from_secs(300);
 /// How long a container-liveness cache entry stays valid (5 minutes).
 pub const LIVENESS_TTL: Duration = Duration::from_secs(300);
 
+/// Default grace period before a fully-disconnected session is reaped.
+/// Overridden at runtime by `BOTWORK_BROKER_DISCONNECT_GRACE_SECS`.
+pub const DEFAULT_DISCONNECT_GRACE_SECS: u64 = 30;
+
 /// Per-session stream-liveness tracking.
 ///
 /// Counts how many ext_proc streams are currently open for this session id.

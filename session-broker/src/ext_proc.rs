@@ -27,8 +27,8 @@ use crate::secrets;
 use crate::session_registry::{is_container_running, utc_now};
 use crate::{
     log_info, redact_token, AppState, PendingInit, SessionLiveness, TransportState,
-    COLD_START_TIMEOUT, LIVENESS_TTL, NAMESPACE_RE, TENANT_NAMESPACE_PLUGIN_PATH_RE, TENANT_RE,
-    TOMBSTONE_TTL,
+    COLD_START_TIMEOUT, DEFAULT_DISCONNECT_GRACE_SECS, LIVENESS_TTL, NAMESPACE_RE,
+    TENANT_NAMESPACE_PLUGIN_PATH_RE, TENANT_RE, TOMBSTONE_TTL,
 };
 
 static TENANT_PATTERN: OnceLock<Regex> = OnceLock::new();
@@ -575,7 +575,7 @@ async fn schedule_grace_timer(state: AppState, sid: String, liveness: Arc<Sessio
     let grace_secs = std::env::var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(30);
+        .unwrap_or(DEFAULT_DISCONNECT_GRACE_SECS);
     let grace = std::time::Duration::from_secs(grace_secs);
 
     let state_clone = state.clone();
@@ -586,7 +586,8 @@ async fn schedule_grace_timer(state: AppState, sid: String, liveness: Arc<Sessio
             "liveness: session={sid_clone} grace expired, reaping"
         ));
         reap_session(&state_clone, &sid_clone).await;
-        state_clone.stream_liveness.lock().await.remove(&sid_clone);
+        // liveness_remove is called inside teardown_session (via reap_session);
+        // no extra removal is needed here.
     });
 
     // Use an explicit binding for the guard so its lifetime is clear.
@@ -612,21 +613,22 @@ async fn reap_session(state: &AppState, mcp_session_id: &str) {
         })
     };
     // Fallback: scan registry (startup-reconciliation path).
-    let teardown = if teardown.is_none() {
-        let reg = state.session_registry.read().await;
-        reg.sessions.values().find_map(|entry| {
-            if entry.mcp_session_id.as_deref() == Some(mcp_session_id) {
-                Some(TeardownInfo {
-                    mcp_session_id: mcp_session_id.to_string(),
-                    container_name: entry.container.clone(),
-                    staging_path: entry.staging_path.clone(),
-                })
-            } else {
-                None
-            }
-        })
-    } else {
-        teardown
+    let teardown = match teardown {
+        Some(t) => Some(t),
+        None => {
+            let reg = state.session_registry.read().await;
+            reg.sessions.values().find_map(|entry| {
+                if entry.mcp_session_id.as_deref() == Some(mcp_session_id) {
+                    Some(TeardownInfo {
+                        mcp_session_id: mcp_session_id.to_string(),
+                        container_name: entry.container.clone(),
+                        staging_path: entry.staging_path.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+        }
     };
 
     if let Some(teardown) = teardown {

@@ -278,9 +278,6 @@ async fn multi_stream_counter_increments_and_decrements() {
 
 #[tokio::test]
 async fn grace_timer_arms_when_last_stream_closes() {
-    // Use a very short grace so we don't need to wait long.
-    std::env::set_var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS", "300");
-
     let state = make_state();
     insert_transport(&state, "sess-grace", "mcp_session_grace").await;
 
@@ -320,8 +317,6 @@ async fn grace_timer_arms_when_last_stream_closes() {
         .open_streams
         .load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(now, 0, "counter must be 0 after decrement");
-
-    std::env::remove_var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS");
 }
 
 // ---------------------------------------------------------------------------
