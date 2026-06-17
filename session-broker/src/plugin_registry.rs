@@ -186,8 +186,7 @@ fn parse_env(
 
         if key == CONFIG_ENV_NAME {
             return Err(PluginRegistryError::Invalid(format!(
-                "plugin '{plugin_name}' env key '{key}': '{}' is reserved for structured config injection; use the 'config:' field instead",
-                CONFIG_ENV_NAME
+                "plugin '{plugin_name}' env key '{key}': reserved for structured config injection; use the 'config:' field instead"
             )));
         }
 

@@ -2420,8 +2420,8 @@ async fn spawn_config_env_absent_when_config_not_set() {
     let launcher_payload: serde_json::Value =
         serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
             .expect("launcher json");
-    // When config is None the launcher payload should have no env at all
-    // (no static env + no config entry).
+    // When config is None the env array may be absent entirely (no static env,
+    // no config entry) or present but must not contain BOTWORK_MCP_CONFIG.
     assert!(
         launcher_payload.get("env").is_none()
             || launcher_payload["env"]
