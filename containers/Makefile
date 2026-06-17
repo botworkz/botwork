@@ -4,7 +4,7 @@ SHELL := /bin/bash
 
 VERSION := $(shell [ -f ../VERSION ] && tr -d '[:space:]' < ../VERSION || echo 0.0.0-dev)
 GHCR_PREFIX := ghcr.io/botworkz/botwork
-SERVICES := session-broker
+SERVICES := session-broker config-broker
 EARTHLY ?= earthly
 
 .PHONY: containers tarballs clean $(SERVICES)
@@ -19,6 +19,10 @@ endef
 containers: $(SERVICES)
 
 session-broker:
+	cd .. && $(EARTHLY) +$@-image
+	$(call tag_image,$@)
+
+config-broker:
 	cd .. && $(EARTHLY) +$@-image
 	$(call tag_image,$@)
 

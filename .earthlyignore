@@ -4,8 +4,13 @@ containers/*
 !containers/session-broker/
 containers/session-broker/*
 !containers/session-broker/Dockerfile
+!containers/config-broker/
+containers/config-broker/*
+!containers/config-broker/Dockerfile
 !session-broker/
 !session-broker/**
+!config-broker/
+!config-broker/**
 !launcher/
 !launcher/**
 !tools/
