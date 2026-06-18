@@ -112,100 +112,6 @@ struct PostBody {
     egress_policy: Option<serde_json::Value>,
 }
 
-fn validate_post(body: PostBody) -> Result<SessionRecord, Response> {
-    let session_id = body.session_id.ok_or_else(|| {
-        warn!("{PREFIX} post: invalid_request — missing 'session_id'");
-        error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "missing required field 'session_id'",
-        )
-    })?;
-    let container_ip_raw = body.container_ip.ok_or_else(|| {
-        warn!("{PREFIX} post: invalid_request — missing 'container_ip'");
-        error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "missing required field 'container_ip'",
-        )
-    })?;
-    let tenant = body.tenant.ok_or_else(|| {
-        warn!("{PREFIX} post: invalid_request — missing 'tenant'");
-        error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "missing required field 'tenant'",
-        )
-    })?;
-    let namespace = body.namespace.ok_or_else(|| {
-        warn!("{PREFIX} post: invalid_request — missing 'namespace'");
-        error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "missing required field 'namespace'",
-        )
-    })?;
-    let plugin = body.plugin.ok_or_else(|| {
-        warn!("{PREFIX} post: invalid_request — missing 'plugin'");
-        error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "missing required field 'plugin'",
-        )
-    })?;
-
-    if !session_id_re().is_match(&session_id) {
-        warn!("{PREFIX} post: invalid_request — bad session_id '{session_id}'");
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            format!("invalid session_id '{session_id}': must match {SESSION_ID_RE}"),
-        ));
-    }
-    if !name_re().is_match(&tenant) {
-        warn!("{PREFIX} post: invalid_request — bad tenant '{tenant}'");
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            format!("invalid tenant '{tenant}': must match {NAME_RE}"),
-        ));
-    }
-    if !name_re().is_match(&namespace) {
-        warn!("{PREFIX} post: invalid_request — bad namespace '{namespace}'");
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            format!("invalid namespace '{namespace}': must match {NAME_RE}"),
-        ));
-    }
-    if !name_re().is_match(&plugin) {
-        warn!("{PREFIX} post: invalid_request — bad plugin '{plugin}'");
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            format!("invalid plugin '{plugin}': must match {NAME_RE}"),
-        ));
-    }
-
-    let container_ip: Ipv4Addr = container_ip_raw.parse().map_err(|_| {
-        warn!("{PREFIX} post: invalid_request — bad container_ip '{container_ip_raw}'");
-        error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            format!("invalid container_ip '{container_ip_raw}': must be IPv4 dotted-quad"),
-        )
-    })?;
-
-    Ok(SessionRecord {
-        session_id,
-        container_ip,
-        tenant,
-        namespace,
-        plugin,
-        egress_policy: body.egress_policy.unwrap_or(serde_json::Value::Null),
-    })
-}
-
 async fn post_session(State(state): State<AppState>, body: Option<Json<PostBody>>) -> Response {
     let Some(Json(payload)) = body else {
         warn!("{PREFIX} post: invalid_request — missing or unparseable JSON body");
@@ -216,9 +122,104 @@ async fn post_session(State(state): State<AppState>, body: Option<Json<PostBody>
         );
     };
 
-    let record = match validate_post(payload) {
-        Ok(record) => record,
-        Err(response) => return response,
+    // Validate inline rather than via `Result<SessionRecord, Response>`:
+    // axum's `Response` is large (>128 bytes), and routing the failures
+    // back through a `Result` trips `clippy::result_large_err`. Same
+    // pattern config-broker uses in `handler::resolve` for the same
+    // reason.
+    let Some(session_id) = payload.session_id else {
+        warn!("{PREFIX} post: invalid_request — missing 'session_id'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing required field 'session_id'",
+        );
+    };
+    let Some(container_ip_raw) = payload.container_ip else {
+        warn!("{PREFIX} post: invalid_request — missing 'container_ip'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing required field 'container_ip'",
+        );
+    };
+    let Some(tenant) = payload.tenant else {
+        warn!("{PREFIX} post: invalid_request — missing 'tenant'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing required field 'tenant'",
+        );
+    };
+    let Some(namespace) = payload.namespace else {
+        warn!("{PREFIX} post: invalid_request — missing 'namespace'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing required field 'namespace'",
+        );
+    };
+    let Some(plugin) = payload.plugin else {
+        warn!("{PREFIX} post: invalid_request — missing 'plugin'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing required field 'plugin'",
+        );
+    };
+
+    if !session_id_re().is_match(&session_id) {
+        warn!("{PREFIX} post: invalid_request — bad session_id '{session_id}'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("invalid session_id '{session_id}': must match {SESSION_ID_RE}"),
+        );
+    }
+    if !name_re().is_match(&tenant) {
+        warn!("{PREFIX} post: invalid_request — bad tenant '{tenant}'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("invalid tenant '{tenant}': must match {NAME_RE}"),
+        );
+    }
+    if !name_re().is_match(&namespace) {
+        warn!("{PREFIX} post: invalid_request — bad namespace '{namespace}'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("invalid namespace '{namespace}': must match {NAME_RE}"),
+        );
+    }
+    if !name_re().is_match(&plugin) {
+        warn!("{PREFIX} post: invalid_request — bad plugin '{plugin}'");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("invalid plugin '{plugin}': must match {NAME_RE}"),
+        );
+    }
+
+    let container_ip: Ipv4Addr = match container_ip_raw.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            warn!("{PREFIX} post: invalid_request — bad container_ip '{container_ip_raw}'");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                format!("invalid container_ip '{container_ip_raw}': must be IPv4 dotted-quad"),
+            );
+        }
+    };
+
+    let record = SessionRecord {
+        session_id,
+        container_ip,
+        tenant,
+        namespace,
+        plugin,
+        egress_policy: payload.egress_policy.unwrap_or(serde_json::Value::Null),
     };
 
     let session_id = record.session_id.clone();

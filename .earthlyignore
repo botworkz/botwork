@@ -7,10 +7,15 @@ containers/session-broker/*
 !containers/config-broker/
 containers/config-broker/*
 !containers/config-broker/Dockerfile
+!containers/control-plane/
+containers/control-plane/*
+!containers/control-plane/Dockerfile
 !session-broker/
 !session-broker/**
 !config-broker/
 !config-broker/**
+!control-plane/
+!control-plane/**
 !launcher/
 !launcher/**
 !tools/
