@@ -95,14 +95,16 @@ struct ResolveResponse {
     /// when the operator did not set `config:` on this plugin.
     #[serde(skip_serializing_if = "Option::is_none")]
     config_blob: Option<String>,
-    /// Verbatim `egress:` block from `plugins.yaml`, shipped as a JSON
-    /// object so session-broker can forward it straight through to
-    /// control-plane (botwork #81) without ever interpreting the schema.
-    /// Omitted when the operator did not set `egress:`. An explicit empty
-    /// mapping is preserved as `{}` -- see the `egress` field on
-    /// `PluginEntry` for why absent and `{}` are distinct.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    egress: Option<serde_json::Value>,
+    /// `egress:` block from `plugins.yaml`, validated by config-broker
+    /// (one of: `{ "mode": "all" }`, `{ "mode": "none" }`, or
+    /// `{ "allow": [ { "host", "ports": [...] }, ... ] }`) and shipped
+    /// verbatim. session-broker forwards it straight through to
+    /// control-plane (botwork #81) as the `egress_policy` of a
+    /// `SessionRecord`. The xDS materialiser owns the schema; config-
+    /// broker just refuses to ship anything that does not match one of
+    /// the three forms. Always present (the field is required at the
+    /// `plugins.yaml` level as of 0.1.9).
+    egress: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -240,6 +242,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn entry_for_test() -> PluginEntry {
+        // Tests pick `egress: { mode: "all" }` -- the wire shape of
+        // `egress: all` from plugins.yaml -- because it is the smallest
+        // value that satisfies the required-field schema without
+        // implying any policy structure.
         PluginEntry {
             image: "botwork/mcp-test:local".to_string(),
             port: 8000,
@@ -248,7 +254,7 @@ mod tests {
             env: vec![("FOO".to_string(), "bar".to_string())],
             resources: PluginResources::default(),
             config: None,
-            egress: None,
+            egress: serde_json::json!({ "mode": "all" }),
         }
     }
 
@@ -313,45 +319,45 @@ mod tests {
     }
 
     #[test]
-    fn render_descriptor_omits_egress_when_absent() {
-        // The wire shape distinguishes "operator did not set egress" from
-        // "operator set empty egress" by *omitting* the key in the former
-        // case. control-plane uses absence as the cue to apply its
-        // default-open posture.
+    fn render_descriptor_emits_all_keyword_as_mode_object() {
+        // `egress: all` in plugins.yaml is normalised by the registry to
+        // `{ mode: "all" }` and round-trips verbatim through the wire.
         let descriptor = render_descriptor(&entry_for_test());
         let json = serde_json::to_value(&descriptor).expect("ser");
-        assert!(
-            json.get("egress").is_none(),
-            "egress must be omitted when entry.egress is None: {json}"
-        );
+        assert_eq!(json["egress"], serde_json::json!({ "mode": "all" }));
     }
 
     #[test]
-    fn render_descriptor_preserves_empty_egress() {
+    fn render_descriptor_emits_none_keyword_as_mode_object() {
+        // Same shape as `mode: all` but the wire value is `none`. The
+        // materialiser (xDS feeder) is responsible for translating
+        // `mode: none` into "no upstream clusters for this session".
         let mut entry = entry_for_test();
-        entry.egress = Some(serde_json::json!({}));
+        entry.egress = serde_json::json!({ "mode": "none" });
         let descriptor = render_descriptor(&entry);
         let json = serde_json::to_value(&descriptor).expect("ser");
-        assert_eq!(json["egress"], serde_json::json!({}));
+        assert_eq!(json["egress"], serde_json::json!({ "mode": "none" }));
     }
 
     #[test]
-    fn render_descriptor_emits_full_egress_verbatim() {
-        // config-broker is opaque to the egress schema -- shape is the
-        // contract, not the content. This test pins that any operator
-        // payload round-trips byte-for-byte.
+    fn render_descriptor_emits_full_allow_list_verbatim() {
+        // config-broker doesn't interpret the schema -- shape is the
+        // contract, content is the materialiser's problem. This test
+        // pins that any validated mapping payload round-trips byte-
+        // for-byte through the wire so downstream consumers always
+        // see exactly what the operator typed.
         let mut entry = entry_for_test();
-        entry.egress = Some(serde_json::json!({
+        entry.egress = serde_json::json!({
             "allow": [
                 { "host": "api.github.com", "ports": [443] },
+                { "host": "codeload.github.com", "ports": [443, 80] },
             ],
-            "deny_metadata": true,
-        }));
+        });
         let descriptor = render_descriptor(&entry);
         let json = serde_json::to_value(&descriptor).expect("ser");
         assert_eq!(json["egress"]["allow"][0]["host"], "api.github.com");
         assert_eq!(json["egress"]["allow"][0]["ports"][0], 443);
-        assert_eq!(json["egress"]["deny_metadata"], true);
+        assert_eq!(json["egress"]["allow"][1]["ports"][1], 80);
     }
 
     fn state_with(plugin: &str) -> AppState {

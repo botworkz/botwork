@@ -71,6 +71,7 @@ plugins:
     resources:
       memory: 1g
       pids: 256
+    egress: none
 "#;
 
 #[tokio::test]
@@ -309,7 +310,11 @@ async fn resolve_known_plugin_includes_egress_when_set() {
 }
 
 #[tokio::test]
-async fn resolve_plugin_with_no_egress_omits_egress() {
+async fn resolve_plugin_with_none_egress_returns_mode_none() {
+    // 0.1.9 default-deny means every plugin declares egress. The `none`
+    // string form is normalised to `{ mode: "none" }` on the wire so
+    // consumers branch on the same key shape they use for the
+    // structured form.
     let server = spawn_server(BASIC_YAML).await;
     let base = &server.base;
     let client = reqwest::Client::new();
@@ -323,8 +328,34 @@ async fn resolve_plugin_with_no_egress_omits_egress() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = response.json().await.expect("json");
-    assert!(
-        body.get("egress").is_none(),
-        "egress must be omitted when not set: {body}"
-    );
+    let egress = body.get("egress").expect("egress always present");
+    assert_eq!(egress, &serde_json::json!({ "mode": "none" }));
+}
+
+#[tokio::test]
+async fn registry_load_fails_when_plugin_missing_egress() {
+    // The fail-loud path. config-broker refuses to start if any plugin
+    // in plugins.yaml lacks an explicit egress declaration. The error
+    // surfaces in build_app_state, which spawn_server expects to succeed
+    // -- so we drive the failure via build_app_state directly here.
+    //
+    // `expect_err` is unavailable because AppState doesn't impl Debug;
+    // match on the Result so the failure message stays explicit.
+    let dir = TempDir::new().expect("tempdir");
+    let yaml_path = dir.path().join("plugins.yaml");
+    std::fs::write(
+        &yaml_path,
+        "plugins:\n  oops:\n    image: botwork/mcp-oops:local\n",
+    )
+    .expect("write plugins.yaml");
+    match build_app_state(&yaml_path) {
+        Ok(_) => panic!("missing egress must fail registry load"),
+        Err(err) => {
+            let err = err.to_string();
+            assert!(
+                err.contains("plugin 'oops'") && err.contains("missing required 'egress' field"),
+                "error should name the plugin + the missing field: {err}"
+            );
+        }
+    }
 }
