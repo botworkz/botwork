@@ -84,7 +84,12 @@ async fn resolve_known_plugin_returns_full_descriptor() {
     let body: serde_json::Value = response.json().await.expect("json");
     assert_eq!(body["image"], "botwork/mcp-github:local");
     assert_eq!(body["port"], 8000);
-    assert_eq!(body["network"], "botwork");
+    // `network` was removed from the wire shape in 0.1.4: network membership
+    // is configured at the launcher level (BOTWORK_LAUNCHER_DEFAULT_NETWORK).
+    assert!(
+        body.get("network").is_none(),
+        "wire shape must not include 'network': {body}"
+    );
     assert_eq!(body["path"], "/");
     assert_eq!(body["upstream_auth"], "bearer/github.com");
     assert_eq!(body["env"][0]["name"], "GITHUB_TOOLSETS");

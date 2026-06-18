@@ -1,7 +1,7 @@
 //! Plugin registry: parses `plugins.yaml` into `PluginEntry` values that the
 //! handler renders into wire-shape `PluginDescriptor` JSON.
 //!
-//! Lifted verbatim from `session-broker/src/plugin_registry.rs`. Validation
+//! Lifted from session-broker (since deleted) in 0.1.3 / #75. Validation
 //! rules (env name regex, size caps, `BOTWORK_MCP_CONFIG` reservation,
 //! `upstream_auth` grammar, resources schema) are unchanged.
 //!
@@ -52,7 +52,6 @@ fn plugin_name_re() -> &'static Regex {
 pub struct PluginEntry {
     pub image: String,
     pub port: u16,
-    pub network: String,
     pub path: String,
     pub upstream_auth: UpstreamAuth,
     pub env: Vec<(String, String)>,
@@ -439,20 +438,21 @@ pub fn load(path: &str) -> Result<PluginRegistry, RegistryError> {
             p as u16
         };
 
-        let network = if config_val["network"].is_null() {
-            "botwork".to_string()
-        } else {
-            config_val["network"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| {
-                    RegistryError::Invalid(format!(
-                        "plugin '{name}' has invalid 'network': expected non-empty string"
-                    ))
-                })?
-                .trim()
-                .to_string()
-        };
+        // The `network:` field on a plugin entry was removed in 0.1.4.  Network
+        // membership is now a deploy-topology decision owned by the launcher
+        // via BOTWORK_LAUNCHER_DEFAULT_NETWORK — plugins do not (and must not)
+        // get to pick their own docker network. Fail fast at registry load
+        // so an operator with a stale plugins.yaml sees a clear error rather
+        // than discovering at first spawn that their override was silently
+        // ignored.
+        if !config_val["network"].is_null() {
+            return Err(RegistryError::Invalid(format!(
+                "plugin '{name}' has 'network' set, but the field was removed in \
+                 0.1.4: network membership is configured at the launcher level \
+                 via BOTWORK_LAUNCHER_DEFAULT_NETWORK. Remove 'network:' from the \
+                 plugin entry."
+            )));
+        }
 
         let path = if config_val["path"].is_null() {
             "/".to_string()
@@ -501,7 +501,6 @@ pub fn load(path: &str) -> Result<PluginRegistry, RegistryError> {
             PluginEntry {
                 image,
                 port,
-                network,
                 path,
                 upstream_auth,
                 env,
@@ -574,6 +573,30 @@ mod tests {
                 "error '{err}' should mention '{expected}'"
             );
         }
+    }
+
+    #[test]
+    fn load_rejects_network_field() {
+        // Post-0.1.4: plugins must not declare their own network. The
+        // launcher's BOTWORK_LAUNCHER_DEFAULT_NETWORK is the single source
+        // of truth for network membership, so a stale plugins.yaml that
+        // still sets `network:` is rejected at load time with a clear
+        // message pointing at the migration.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    network: botwork\n",
+        );
+        let err = load(&path).expect_err("network field should be rejected");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p' has 'network' set"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("BOTWORK_LAUNCHER_DEFAULT_NETWORK"),
+            "error should name the launcher env var: {err}"
+        );
     }
 
     #[test]

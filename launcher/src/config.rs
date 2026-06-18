@@ -24,6 +24,12 @@ pub struct Config {
     pub container_memory_limit: String,
     pub container_read_only_rootfs: bool,
     pub broker_socket_path: String,
+    /// Docker network name plugin containers are spawned into. Required —
+    /// `from_env` refuses to construct a `Config` if `BOTWORK_LAUNCHER_DEFAULT_NETWORK`
+    /// is unset, because the launcher cannot guess which network is correct
+    /// in the deployment and silently picking one would defeat the network
+    /// isolation boundary it exists to enforce.
+    pub default_network: String,
 }
 
 impl Config {
@@ -81,6 +87,25 @@ impl Config {
             parse_bool_env("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS")?.unwrap_or(false);
         let broker_socket_path = env::var("BOTWORK_BROKER_SOCKET_PATH")
             .unwrap_or_else(|_| DEFAULT_BROKER_SOCKET_PATH.to_string());
+        let default_network = env::var("BOTWORK_LAUNCHER_DEFAULT_NETWORK").map_err(|_| {
+            "BOTWORK_LAUNCHER_DEFAULT_NETWORK must be set: the launcher refuses to \
+             guess which docker network plugin containers belong to. Set it to the \
+             network alias plugins should join (e.g. `botwork-plugin`)."
+                .to_string()
+        })?;
+        let default_network = default_network.trim().to_string();
+        if default_network.is_empty() {
+            return Err("BOTWORK_LAUNCHER_DEFAULT_NETWORK must not be empty".to_string());
+        }
+        if !default_network
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        {
+            return Err(format!(
+                "BOTWORK_LAUNCHER_DEFAULT_NETWORK has invalid characters: {default_network}; \
+                 expected ^[a-z0-9_-]+$ (must match docker network naming)"
+            ));
+        }
 
         Ok(Self {
             socket_path,
@@ -95,6 +120,7 @@ impl Config {
             container_memory_limit,
             container_read_only_rootfs,
             broker_socket_path,
+            default_network,
         })
     }
 }
@@ -221,19 +247,67 @@ mod tests {
     fn from_env_uses_default_cpu_limit_when_unset() {
         let _guard = env_lock().lock().expect("env lock");
         std::env::remove_var("BOTWORK_LAUNCHER_CPU_LIMIT");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
         let config = Config::from_env().expect("config");
         assert_eq!(config.container_cpu_limit, DEFAULT_CONTAINER_CPU_LIMIT);
+        assert_eq!(config.default_network, "botwork-plugin");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
     fn from_env_rejects_empty_cpu_limit() {
         let _guard = env_lock().lock().expect("env lock");
         std::env::set_var("BOTWORK_LAUNCHER_CPU_LIMIT", "   ");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
         assert_eq!(
             Config::from_env().expect_err("empty cpu limit should fail"),
             "invalid BOTWORK_LAUNCHER_CPU_LIMIT: must not be empty"
         );
         std::env::remove_var("BOTWORK_LAUNCHER_CPU_LIMIT");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn from_env_rejects_missing_default_network() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+        let err = Config::from_env().expect_err("missing default network should fail");
+        assert!(
+            err.contains("BOTWORK_LAUNCHER_DEFAULT_NETWORK must be set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_empty_default_network() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "   ");
+        let err = Config::from_env().expect_err("empty default network should fail");
+        assert_eq!(err, "BOTWORK_LAUNCHER_DEFAULT_NETWORK must not be empty");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn from_env_rejects_default_network_with_invalid_characters() {
+        let _guard = env_lock().lock().expect("env lock");
+        // Whitespace, slashes, uppercase, dots — anything outside [a-z0-9_-] —
+        // must be rejected at construction time so an operator typo cannot
+        // produce a runtime docker error after the launcher has accepted the
+        // config.
+        for bad in [
+            "botwork plugin",
+            "botwork/plugin",
+            "Botwork",
+            "botwork.plugin",
+        ] {
+            std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", bad);
+            let err = Config::from_env().expect_err("invalid network should fail");
+            assert!(
+                err.contains("has invalid characters"),
+                "unexpected error for {bad:?}: {err}"
+            );
+        }
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     fn current_group_name(gid: u32) -> String {

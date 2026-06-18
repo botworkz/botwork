@@ -272,7 +272,6 @@ fn sample_plugin_config_with_path_and_auth(
     PluginDescriptor {
         image: "botwork/plugin-a:local".to_string(),
         port: 8000,
-        network: "botwork".to_string(),
         path: path.to_string(),
         upstream_auth,
         env: vec![],
@@ -1527,7 +1526,6 @@ fn descriptor_default() -> PluginDescriptor {
     PluginDescriptor {
         image: "botwork/plugin-a:local".to_string(),
         port: 8000,
-        network: "botwork".to_string(),
         path: "/mcp".to_string(),
         upstream_auth: UpstreamAuth::None,
         resources: PluginResources::default(),
@@ -1884,7 +1882,6 @@ fn render_descriptor_json(descriptor: &PluginDescriptor) -> String {
     let mut json = serde_json::json!({
         "image": descriptor.image,
         "port": descriptor.port,
-        "network": descriptor.network,
         "path": descriptor.path,
         "upstream_auth": upstream_auth,
         "resources": {},

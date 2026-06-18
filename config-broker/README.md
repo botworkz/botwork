@@ -5,7 +5,7 @@ on every spawn. It owns the parsed view of `/etc/botwork/plugins.yaml` and
 serves it over HTTP+JSON; session-broker no longer reads `plugins.yaml` itself.
 
 This v0 is a **faithful relocation** of the registry that previously lived in
-`session-broker/src/plugin_registry.rs`. There is no behaviour change: the same
+session-broker's old `plugin_registry.rs` (deleted in #79). There is no behaviour change: the same
 validation rules apply, the same defaults are filled in, and namespace policy
 is unchanged ("anything that matches the regex is fine"). Future work — per-
 tenant overrides, ORM-backed sources, schema enforcement — slots in behind the
@@ -18,7 +18,7 @@ context.
 
 For each `POST /resolve` call, config-broker looks up `plugin` in the in-memory
 registry loaded from `plugins.yaml` at startup and returns the resolved
-descriptor (image, port, network, path, upstream_auth, env, resources,
+descriptor (image, port, path, upstream_auth, env, resources,
 config_blob). Session-broker uses that descriptor to launch the per-session
 container.
 
@@ -43,7 +43,6 @@ Success response (200):
 {
   "image": "botwork/mcp-github:local",
   "port": 8000,
-  "network": "botwork",
   "path": "/",
   "upstream_auth": "bearer/github.com",
   "resources": { "memory": "4g", "pids": 1024 },
@@ -52,7 +51,7 @@ Success response (200):
 }
 ```
 
-- `image`, `port`, `network`, `path`, `upstream_auth` are always present.
+- `image`, `port`, `path`, `upstream_auth` are always present.
 - `resources` is always present but is an object whose individual fields
   (`cpus`, `memory`, `pids`) are each omitted when not set.
 - `env` is always an array; may be empty.
@@ -149,7 +148,7 @@ Successful response:
 HTTP/1.1 200 OK
 Content-Type: application/json
 
-{"image":"botwork/mcp-github:local","port":8000,"network":"botwork","path":"/","upstream_auth":"bearer/github.com","resources":{"memory":"4g","pids":1024},"env":[{"name":"GITHUB_TOOLSETS","value":"default,actions"}],"config_blob":"{\"routes\":[{\"owner\":\"botworkz\"}]}"}
+{"image":"botwork/mcp-github:local","port":8000,"path":"/","upstream_auth":"bearer/github.com","resources":{"memory":"4g","pids":1024},"env":[{"name":"GITHUB_TOOLSETS","value":"default,actions"}],"config_blob":"{\\"routes\\":[{\\"owner\\":\\"botworkz\\"}]}"}
 ```
 
 Unknown-plugin response:
