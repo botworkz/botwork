@@ -78,6 +78,68 @@ by config-broker availability — once a session is bound the policy
 (`upstream_auth`, `port`, `path`) is captured on `TransportState` and routing
 proceeds locally without further config-broker calls.
 
+## Control-plane gate (0.1.5)
+
+When a spawn reaches `probe_ready` (the container is up and listening),
+session-broker performs one further round-trip before allowing the
+container to receive client traffic:
+
+```
+POST {BOTWORK_CONTROL_PLANE_ENDPOINT}/sessions
+  {
+    "session_id":    "<container_name>",
+    "container_ip":  "<ipv4>",
+    "tenant":        "<tenant>",
+    "namespace":     "<ns>",
+    "plugin":        "<name>",
+    "egress_policy": <opaque JSON | null>
+  }
+```
+
+This is the **hard gate**: a non-2xx from control-plane (or a transport
+failure) is a hard fail for that spawn. The launcher is told to tear
+the container down, and the originating client sees 503. The single
+load-bearing property is that **no plugin container ever serves a
+single byte of client traffic without being announced to
+control-plane**. See [issue #81](https://github.com/botworkz/botwork/issues/81)
+for the full design.
+
+| Result                                          | Client-facing status                                              |
+|-------------------------------------------------|-------------------------------------------------------------------|
+| 2xx                                             | Spawn proceeds; transport is installed; client gets the response. |
+| 4xx (`invalid_request` / `already_exists`)      | 503. 4xx from control-plane is a session-broker bug, not the client's. |
+| 5xx / transport / timeout                       | 503. Container is torn down. New sessions fail closed.            |
+
+On the cleanup side (`exit_listener`), when the launcher reports a
+container exit session-broker fires-and-forgets `DELETE /sessions/<id>`
+to control-plane. Failures there are logged and ignored: the container
+has already exited, and any drift between session-broker and
+control-plane is reconciled by the recovery-sync flow on the next
+control-plane cold start (control-plane polls session-broker's
+`/control-plane/sessions` admin endpoint described below).
+
+## Admin endpoints
+
+session-broker exposes two read-only HTTP endpoints on
+`BOTWORK_SESSION_BROKER_ADMIN_ADDR` (default `0.0.0.0:9002`):
+
+- `GET /sessions` — full session registry (one row per spawned
+  container, with staging path, image, agent id, etc.). Unchanged in
+  shape since 0.1.0.
+- `GET /control-plane/sessions` — recovery-sync surface for
+  control-plane. Returns one entry per live transport session in
+  `control-plane`-`SessionRecord`-wire-shape:
+  `{ session_id, container_ip, tenant, namespace, plugin, egress_policy }`.
+  Sorted by `session_id`. Only sessions that have reached
+  `response_headers` (and therefore have a populated `Mcp-Session-Id`)
+  appear; pre-`response_headers` records are deliberately excluded
+  because control-plane only cares about sessions that could actually
+  be hit by an inbound request.
+
+Neither endpoint authenticates. They are reachable on the
+`botwork-internal` docker network only — the trust boundary is network
+membership, not the endpoint.
+
 ## Plugin registry: ownership note
 
 The fields documented below — `config`, `env`, `resources`, `upstream_auth`,
@@ -272,6 +334,7 @@ spawn fails with a 5xx so operators can fix vault state explicitly.
 - `BOTWORK_LAUNCHER_SOCKET_PATH` (default `/run/botwork/launcher.sock`).
 - `BOTWORK_AUTH_BROKER_URL` (default `http://auth_broker:9100`).
 - `BOTWORK_CONFIG_BROKER_ENDPOINT` (default `http://config_broker:9200`).
+- `BOTWORK_CONTROL_PLANE_ENDPOINT` (default `http://control_plane:9300`).
 - `BOTWORK_BROKER_SOCKET_PATH` (default `/run/botwork/broker.sock`).
 - `BOTWORK_SESSION_REGISTRY_PATH` (default `/var/lib/botwork/sessions.json`).
 - `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` (default `30`).

@@ -88,7 +88,7 @@ async fn handle_launch(
     let payload = parse_json_object(request).await?;
     let launch = parse_launch_payload(&payload, &state.validators, &state.config.default_network)?;
 
-    let status = docker::ensure_container(
+    let outcome = docker::ensure_container(
         &ContainerLaunch {
             name: launch.name,
             image: launch.image,
@@ -113,17 +113,27 @@ async fn handle_launch(
     )?;
 
     log_info(&format!(
-        "launch ok: name={} image={} network={} staging_path={} env_count={}",
+        "launch ok: name={} image={} network={} staging_path={} env_count={} ip={}",
         launch.name,
         launch.image,
         launch.network,
         launch.staging_path,
-        launch.env.len()
+        launch.env.len(),
+        outcome.container_ip,
     ));
 
+    // `container_ip` is new in 0.1.5; older session-broker builds tolerate
+    // unknown fields (serde default-on-missing) so this is wire-compatible.
     Ok(json_response(
         StatusCode::OK,
-        &["name", launch.name, "status", status],
+        &[
+            "name",
+            launch.name,
+            "status",
+            outcome.status,
+            "container_ip",
+            outcome.container_ip.as_str(),
+        ],
     ))
 }
 

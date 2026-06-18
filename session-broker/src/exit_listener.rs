@@ -20,6 +20,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::UnixListener;
 use tokio::time::timeout;
 
+use crate::control_plane;
 use crate::ext_proc::liveness_remove;
 use crate::launcher::call_teardown;
 use crate::{log_info, AppState, TOMBSTONE_TTL};
@@ -202,6 +203,29 @@ pub async fn handle_container_exit(
     let container_name_owned = container_name.to_string();
     tokio::spawn(async move {
         call_teardown(&launcher_path, &container_name_owned, &staging_path).await;
+    });
+
+    // Best-effort: tell control-plane the session is gone. A failure
+    // here is logged but ignored -- the container has already exited,
+    // and control-plane's cold-start recovery sync (control-plane polls
+    // session-broker `/sessions` on restart) will reconcile any drift.
+    // Blocking exit cleanup on control-plane reachability would punish
+    // the steady-state cleanup path for a transient outage the system
+    // heals on its own. See session-broker::control_plane module docs.
+    let control_plane_endpoint = state.control_plane_endpoint.clone();
+    let session_id_owned = mcp_session_id.clone();
+    tokio::spawn(async move {
+        if let Err(err) = control_plane::delete_session(
+            &control_plane_endpoint,
+            &session_id_owned,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        {
+            log_info(&format!(
+                "control-plane delete failed (non-fatal) session_id={session_id_owned}: {err}"
+            ));
+        }
     });
 
     Ok(json_response(StatusCode::OK, r#"{"status":"ok"}"#))
