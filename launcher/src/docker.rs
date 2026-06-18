@@ -136,31 +136,12 @@ pub fn ensure_container(
 
 /// Asks docker for the container's IPv4 address on `network`.
 ///
-/// Uses `--format '{{.NetworkSettings.Networks.<net>.IPAddress}}'`. The
-/// network name is embedded in the format string; we validate it against the
-/// same character class docker itself accepts so an attacker who somehow
-/// reached this code path with a malicious network name still can't break
-/// the template.
-///
 /// Returns `LauncherError::Internal` when the inspect exits non-zero, when
 /// the IP is empty (container not attached to that network), or when it
 /// doesn't parse as IPv4. The launcher never returns 200 with an unknown
 /// IP -- see `LaunchOutcome` for the rationale.
 fn inspect_container_ip(network: &str, name: &str) -> Result<String, LauncherError> {
-    if !network
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        // Defence in depth: validators already accept the launcher's
-        // configured default network, but ensure_container's caller could
-        // be passing a payload-supplied value too. Refuse anything that
-        // could escape the Go template grammar.
-        return Err(LauncherError::Internal(format!(
-            "invalid network name '{network}' for inspect"
-        )));
-    }
-
-    let format = format!("{{{{.NetworkSettings.Networks.{network}.IPAddress}}}}");
+    let format = inspect_ip_format(network)?;
     let inspect = run_command(&[
         "docker".to_string(),
         "inspect".to_string(),
@@ -191,6 +172,52 @@ fn inspect_container_ip(network: &str, name: &str) -> Result<String, LauncherErr
     }
 
     Ok(ip)
+}
+
+/// Builds the `--format` string passed to `docker inspect` to read the
+/// container's IPv4 on `network`.
+///
+/// Go `text/template` parses identifiers as
+/// `[a-zA-Z_][a-zA-Z0-9_]*`, with `-` interpreted as the subtraction
+/// operator. That means the dotted shape
+/// `{{.NetworkSettings.Networks.<net>.IPAddress}}` only works for
+/// networks whose names don't contain a hyphen. The default in
+/// production is `botwork-plugin`, which trips this immediately:
+///
+/// ```text
+/// template parsing error: template: :1: bad character U+002D '-'
+/// ```
+///
+/// The fix is to look up the network via the template `index` builtin,
+/// which takes the map key as a string literal and so escapes the
+/// identifier grammar entirely:
+///
+/// ```text
+/// {{(index .NetworkSettings.Networks "botwork-plugin").IPAddress}}
+/// ```
+///
+/// `network` is still validated against a conservative character class
+/// because it is interpolated into the format string -- a `"` in the
+/// name would break out of the string literal and let an attacker
+/// inject arbitrary template actions.
+fn inspect_ip_format(network: &str) -> Result<String, LauncherError> {
+    if !network
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        // Defence in depth: validators already accept the launcher's
+        // configured default network, but ensure_container's caller could
+        // be passing a payload-supplied value too. Refuse anything that
+        // could escape the Go template grammar (in particular `"`,
+        // which would close the string literal below).
+        return Err(LauncherError::Internal(format!(
+            "invalid network name '{network}' for inspect"
+        )));
+    }
+
+    Ok(format!(
+        r#"{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}"#
+    ))
 }
 
 pub fn teardown(
@@ -330,8 +357,8 @@ fn sensitive_env_stdin(env: &[(String, String)]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        docker_run_args, is_no_such_container, is_no_such_object, sensitive_env_stdin,
-        ContainerLaunch,
+        docker_run_args, inspect_ip_format, is_no_such_container, is_no_such_object,
+        sensitive_env_stdin, ContainerLaunch,
     };
 
     #[test]
@@ -529,5 +556,76 @@ mod tests {
             stdin.is_empty(),
             "stdin bytes must be empty for non-sensitive env"
         );
+    }
+
+    // ── inspect_ip_format ──────────────────────────────────────────────────
+    //
+    // The shape of the `--format` string passed to `docker inspect` is wire
+    // contract between launcher and the docker CLI. Go `text/template`
+    // parses identifiers as `[a-zA-Z_][a-zA-Z0-9_]*` and reads `-` as the
+    // subtraction operator, so the dotted form
+    // `{{.NetworkSettings.Networks.<net>.IPAddress}}` blows up at parse
+    // time for any network with a hyphen -- including our production
+    // `botwork-plugin`. We use the `index` builtin (which takes the key
+    // as a quoted string literal) to escape the identifier grammar.
+
+    #[test]
+    fn inspect_ip_format_uses_index_for_hyphenated_network() {
+        // Production case: this is the format string that blew up
+        // before the fix.
+        let format = inspect_ip_format("botwork-plugin").expect("valid network");
+        assert_eq!(
+            format,
+            r#"{{(index .NetworkSettings.Networks "botwork-plugin").IPAddress}}"#
+        );
+    }
+
+    #[test]
+    fn inspect_ip_format_uses_index_for_simple_network() {
+        // Identifier-safe names go through the same `index` shape rather
+        // than the dotted form so both code paths use one template
+        // grammar -- no second variant to drift.
+        let format = inspect_ip_format("bridge").expect("valid network");
+        assert_eq!(
+            format,
+            r#"{{(index .NetworkSettings.Networks "bridge").IPAddress}}"#
+        );
+    }
+
+    #[test]
+    fn inspect_ip_format_rejects_double_quote() {
+        // `"` would close the string literal in the `index ...` call and
+        // let a payload inject arbitrary template actions. The validator
+        // accepts only a conservative character class; everything else
+        // (including `"`, `{`, `}`, spaces) is refused at this layer.
+        let err = inspect_ip_format(r#"x"y"#).expect_err("must reject quote");
+        let crate::error::LauncherError::Internal(msg) = err else {
+            panic!("expected Internal, got: {err:?}");
+        };
+        assert!(msg.contains("invalid network name"), "{msg}");
+    }
+
+    #[test]
+    fn inspect_ip_format_rejects_curly_braces() {
+        // Same posture as the quote case -- defence in depth against any
+        // future caller that lets a network name slip through.
+        for bad in ["{x", "x}", "x{y}", " "] {
+            assert!(
+                inspect_ip_format(bad).is_err(),
+                "must reject network name {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inspect_ip_format_accepts_alphanumeric_dot_dash_underscore() {
+        // Mirror the validator's accepted class so a future tightening
+        // of the validator is caught here too.
+        for ok in ["a", "ABC", "x1", "x-y", "x_y", "x.y", "x-y_z.0"] {
+            assert!(
+                inspect_ip_format(ok).is_ok(),
+                "must accept network name {ok:?}"
+            );
+        }
     }
 }
