@@ -18,7 +18,6 @@ use crate::config_broker::{PluginDescriptor, UpstreamAuth};
 use crate::session_registry::SessionRegistry;
 
 pub const PREFIX: &str = "[session-broker]";
-pub const SESSION_NETWORK: &str = "botwork";
 pub const SESSION_PORT: u16 = 8000;
 pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROBE_SLEEP: Duration = Duration::from_millis(100);

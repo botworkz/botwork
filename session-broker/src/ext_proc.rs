@@ -772,7 +772,6 @@ async fn spawn_new_container(
         &container_name,
         &descriptor.image,
         &staging_path,
-        &descriptor.network,
         env,
         &descriptor.resources,
     )

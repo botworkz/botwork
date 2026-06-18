@@ -90,14 +90,17 @@ pub async fn launch_session(
     name: &str,
     image: &str,
     staging_path: &str,
-    network: &str,
     env: &[(String, String)],
     resources: &PluginResources,
 ) -> Result<Value, LauncherError> {
+    // network is intentionally not threaded from session-broker into the
+    // launcher payload (post-0.1.4). The launcher resolves it from its own
+    // BOTWORK_LAUNCHER_DEFAULT_NETWORK env, because "which docker network
+    // do plugin containers belong to" is a deploy-topology concern owned
+    // by the launcher's systemd unit, not a per-plugin-registry setting.
     let mut payload = serde_json::Map::from_iter([
         ("name".to_string(), Value::String(name.to_string())),
         ("image".to_string(), Value::String(image.to_string())),
-        ("network".to_string(), Value::String(network.to_string())),
         (
             "staging_path".to_string(),
             Value::String(staging_path.to_string()),
@@ -260,6 +263,20 @@ mod tests {
         assert_eq!(parsed["resources"]["pids"], 1024);
     }
 
+    #[tokio::test]
+    async fn launcher_post_omits_network_field() {
+        // Post-0.1.4: session-broker never sets `network` in the launch
+        // payload — the launcher resolves it from its configured default.
+        // This is a wire-contract test: a regression that re-introduced
+        // `"network":` would silently re-couple session-broker to a
+        // deploy-topology decision it shouldn't own.
+        let body = capture_launch_body(&[], &PluginResources::default()).await;
+        assert!(
+            !body.contains("\"network\""),
+            "launch payload must not include 'network': {body}"
+        );
+    }
+
     async fn capture_launch_body(env: &[(String, String)], resources: &PluginResources) -> String {
         let temp = tempdir().expect("tempdir");
         let socket_path = temp.path().join("launcher.sock");
@@ -292,7 +309,6 @@ Connection: close
             "mcp_session_abc",
             "botwork/mcp-a:local",
             "/tmp/staging",
-            "botwork",
             env,
             resources,
         )

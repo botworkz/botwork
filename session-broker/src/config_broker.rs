@@ -43,7 +43,6 @@ pub const CONFIG_ENV_NAME: &str = "BOTWORK_MCP_CONFIG";
 pub struct PluginDescriptor {
     pub image: String,
     pub port: u16,
-    pub network: String,
     pub path: String,
     pub upstream_auth: UpstreamAuth,
     #[serde(default)]
@@ -362,7 +361,6 @@ mod tests {
         let body = r#"{
             "image": "botwork/x:local",
             "port": 8000,
-            "network": "botwork",
             "path": "/",
             "upstream_auth": "none"
         }"#;
@@ -378,7 +376,6 @@ mod tests {
         let body = r#"{
             "image": "botwork/github:local",
             "port": 8001,
-            "network": "botwork",
             "path": "/mcp",
             "upstream_auth": "bearer/github.com",
             "resources": { "memory": "4g", "pids": 1024 },

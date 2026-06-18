@@ -6,7 +6,7 @@
 //!     `{ "tenant": "<tenant>", "namespace": "<ns>", "plugin": "<name>" }`
 //!
 //! Response 200:
-//!     `{ "image", "port", "network", "path", "upstream_auth",
+//!     `{ "image", "port", "path", "upstream_auth",
 //!        "resources": { "cpus"?, "memory"?, "pids"? },
 //!        "env": [ { "name", "value" }, … ],
 //!        "config_blob"?: "<compact JSON string>" }`
@@ -87,7 +87,6 @@ struct ResourcesView {
 struct ResolveResponse {
     image: String,
     port: u16,
-    network: String,
     path: String,
     upstream_auth: String,
     resources: ResourcesView,
@@ -116,7 +115,6 @@ fn render_descriptor(entry: &PluginEntry) -> ResolveResponse {
     ResolveResponse {
         image: entry.image.clone(),
         port: entry.port,
-        network: entry.network.clone(),
         path: entry.path.clone(),
         upstream_auth: entry.upstream_auth.to_wire(),
         resources: ResourcesView {
@@ -236,7 +234,6 @@ mod tests {
         PluginEntry {
             image: "botwork/mcp-test:local".to_string(),
             port: 8000,
-            network: "botwork".to_string(),
             path: "/".to_string(),
             upstream_auth: UpstreamAuth::None,
             env: vec![("FOO".to_string(), "bar".to_string())],
@@ -250,7 +247,6 @@ mod tests {
         let descriptor = render_descriptor(&entry_for_test());
         assert_eq!(descriptor.image, "botwork/mcp-test:local");
         assert_eq!(descriptor.port, 8000);
-        assert_eq!(descriptor.network, "botwork");
         assert_eq!(descriptor.path, "/");
         assert_eq!(descriptor.upstream_auth, "none");
         assert!(descriptor.config_blob.is_none());

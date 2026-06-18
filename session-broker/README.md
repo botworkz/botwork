@@ -55,7 +55,7 @@ POST {BOTWORK_CONFIG_BROKER_ENDPOINT}/resolve
   { "tenant": "<tenant>", "namespace": "<ns>", "plugin": "<name>" }
 ```
 
-Successful response is the plugin's full descriptor (image, port, network,
+Successful response is the plugin's full descriptor (image, port,
 path, upstream_auth, resources, env, config_blob). See
 [`config-broker/README.md`](../config-broker/README.md) for the wire shape.
 
@@ -81,7 +81,7 @@ proceeds locally without further config-broker calls.
 ## Plugin registry: ownership note
 
 The fields documented below — `config`, `env`, `resources`, `upstream_auth`,
-plus `image`, `port`, `network`, `path` — are the operator-facing shape of
+plus `image`, `port`, `path` — are the operator-facing shape of
 `/etc/botwork/plugins.yaml`. **The file lives with config-broker, not
 session-broker.** session-broker no longer reads it. The grammar and rules
 documented here are still authoritative — they're enforced at config-broker

@@ -26,7 +26,10 @@ pub struct AppState {
 struct LaunchRequest<'a> {
     name: &'a str,
     image: &'a str,
-    network: &'a str,
+    /// Resolved at parse time: the payload may omit `network` and inherit the
+    /// launcher's `BOTWORK_LAUNCHER_DEFAULT_NETWORK`. Owned so the resolved
+    /// value can outlive the original payload borrow.
+    network: String,
     staging_path: &'a str,
     with_workspace: bool,
     pids_limit: Option<u32>,
@@ -83,13 +86,13 @@ async fn handle_launch(
     state: &AppState,
 ) -> Result<Response<Full<Bytes>>, LauncherError> {
     let payload = parse_json_object(request).await?;
-    let launch = parse_launch_payload(&payload, &state.validators)?;
+    let launch = parse_launch_payload(&payload, &state.validators, &state.config.default_network)?;
 
     let status = docker::ensure_container(
         &ContainerLaunch {
             name: launch.name,
             image: launch.image,
-            network: launch.network,
+            network: &launch.network,
             staging_path: launch.staging_path,
             with_workspace: launch.with_workspace,
             plugin_uid: state.config.plugin_uid,
@@ -215,6 +218,7 @@ fn parse_json_bytes(body: &[u8]) -> Result<Value, LauncherError> {
 fn parse_launch_payload<'a>(
     payload: &'a Map<String, Value>,
     validators: &Validators,
+    default_network: &str,
 ) -> Result<LaunchRequest<'a>, LauncherError> {
     const MAX_ENV_ENTRIES: usize = 64;
     const MAX_ENV_VALUE_LEN: usize = 64 * 1024;
@@ -237,15 +241,28 @@ fn parse_launch_payload<'a>(
         return Err(LauncherError::BadRequest("image not allowed".to_string()));
     }
 
-    let network = payload
-        .get("network")
-        .and_then(Value::as_str)
-        .ok_or_else(|| LauncherError::BadRequest("invalid docker network".to_string()))?;
-    if !validators.valid_network(network) {
-        return Err(LauncherError::BadRequest(
-            "invalid docker network".to_string(),
-        ));
-    }
+    // network: optional in the payload (post-0.1.4). When the caller (session-broker)
+    // does not specify a network, fall back to the launcher's configured default
+    // (BOTWORK_LAUNCHER_DEFAULT_NETWORK). This makes the deploy-time topology
+    // decision ("which docker network do plugin containers live in?") a property
+    // of *where the launcher runs*, not a per-plugin-registry setting — which is
+    // the right granularity since plugins don't get to pick their own network.
+    let network: String = match payload.get("network") {
+        None | Some(Value::Null) => default_network.to_string(),
+        Some(Value::String(value)) => {
+            if !validators.valid_network(value) {
+                return Err(LauncherError::BadRequest(
+                    "invalid docker network".to_string(),
+                ));
+            }
+            value.clone()
+        }
+        Some(_) => {
+            return Err(LauncherError::BadRequest(
+                "invalid docker network".to_string(),
+            ))
+        }
+    };
 
     let staging_path = payload
         .get("staging_path")
@@ -493,6 +510,9 @@ mod tests {
     }
 
     fn valid_launch_payload() -> Map<String, Value> {
+        // Deliberately omits `network`: parse_launch_payload falls back to
+        // the configured default. Tests that exercise explicit-network handling
+        // insert it themselves.
         let mut payload = Map::new();
         payload.insert(
             "name".to_string(),
@@ -502,7 +522,6 @@ mod tests {
             "image".to_string(),
             Value::String("botwork/mcp-echo:local".to_string()),
         );
-        payload.insert("network".to_string(), Value::String("botwork".to_string()));
         payload.insert(
             "staging_path".to_string(),
             Value::String("/var/lib/botwork/tenants/acme/staging/aabbccddeeff".to_string()),
@@ -536,7 +555,7 @@ mod tests {
         payload.remove("staging_path");
 
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid staging_path"
         ));
 
@@ -550,7 +569,7 @@ mod tests {
         );
 
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid with_workspace"
         ));
     }
@@ -567,7 +586,8 @@ mod tests {
             ]),
         );
 
-        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-test").expect("launch payload");
         assert_eq!(
             parsed.env,
             vec![
@@ -588,7 +608,8 @@ mod tests {
         let validators = validators();
         let payload = valid_launch_payload();
 
-        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-test").expect("launch payload");
         assert!(parsed.env.is_empty());
     }
 
@@ -598,7 +619,8 @@ mod tests {
         let mut payload = valid_launch_payload();
         payload.insert("env".to_string(), Value::Null);
 
-        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-test").expect("launch payload");
         assert!(parsed.env.is_empty());
     }
 
@@ -612,7 +634,7 @@ mod tests {
         );
 
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid env"
         ));
     }
@@ -631,7 +653,7 @@ mod tests {
         ] {
             payload.insert("env".to_string(), env);
             assert!(matches!(
-                parse_launch_payload(&payload, &validators),
+                parse_launch_payload(&payload, &validators, "botwork-test"),
                 Err(LauncherError::BadRequest(msg)) if msg == "invalid env entry"
             ));
         }
@@ -654,7 +676,7 @@ mod tests {
                 serde_json::json!([{"name": invalid_name, "value": "x"}]),
             );
             assert!(matches!(
-                parse_launch_payload(&payload, &validators),
+                parse_launch_payload(&payload, &validators, "botwork-test"),
                 Err(LauncherError::BadRequest(msg)) if msg == format!("invalid env name: {invalid_name}")
             ));
         }
@@ -665,7 +687,7 @@ mod tests {
                 serde_json::json!([{"name": reserved, "value": "x"}]),
             );
             assert!(matches!(
-                parse_launch_payload(&payload, &validators),
+                parse_launch_payload(&payload, &validators, "botwork-test"),
                 Err(LauncherError::BadRequest(msg)) if msg == format!("invalid env name: {reserved}")
             ));
         }
@@ -675,7 +697,7 @@ mod tests {
             serde_json::json!([{"name": "DOCKER_FOO", "value": "x"}]),
         );
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid env name: DOCKER_FOO"
         ));
     }
@@ -691,8 +713,8 @@ mod tests {
                 {"name": "USER", "value": "botwork"}
             ]),
         );
-        let parsed =
-            parse_launch_payload(&payload, &validators).expect("HOME and USER should be accepted");
+        let parsed = parse_launch_payload(&payload, &validators, "botwork-test")
+            .expect("HOME and USER should be accepted");
         assert_eq!(
             parsed.env,
             vec![
@@ -712,7 +734,7 @@ mod tests {
         );
 
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid env value"
         ));
     }
@@ -727,7 +749,7 @@ mod tests {
         );
 
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg))
                 if msg == "sensitive env value must not contain newline"
         ));
@@ -744,7 +766,7 @@ mod tests {
             serde_json::json!([{"name": "BOTWORK_FOO", "value": "line1\nline2"}]),
         );
 
-        let parsed = parse_launch_payload(&payload, &validators)
+        let parsed = parse_launch_payload(&payload, &validators, "botwork-test")
             .expect("non-sensitive env with newline should be accepted");
         assert_eq!(parsed.env[0].1, "line1\nline2");
     }
@@ -762,7 +784,7 @@ mod tests {
         );
 
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "duplicate env name: BOTWORK_SECRET"
         ));
     }
@@ -777,7 +799,7 @@ mod tests {
         payload.insert("env".to_string(), Value::Array(entries));
 
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::PayloadTooLarge(msg)) if msg == "too many env entries"
         ));
     }
@@ -793,7 +815,7 @@ mod tests {
         );
 
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::PayloadTooLarge(msg)) if msg == "env value too large"
         ));
     }
@@ -802,14 +824,16 @@ mod tests {
     fn launch_payload_resources_omitted_or_null_defaults_to_none() {
         let validators = validators();
         let payload = valid_launch_payload();
-        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-test").expect("launch payload");
         assert_eq!(parsed.cpu_limit, None);
         assert_eq!(parsed.memory_limit, None);
         assert_eq!(parsed.pids_limit, None);
 
         let mut payload = valid_launch_payload();
         payload.insert("resources".to_string(), Value::Null);
-        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-test").expect("launch payload");
         assert_eq!(parsed.cpu_limit, None);
         assert_eq!(parsed.memory_limit, None);
         assert_eq!(parsed.pids_limit, None);
@@ -827,7 +851,8 @@ mod tests {
             }),
         );
 
-        let parsed = parse_launch_payload(&payload, &validators).expect("launch payload");
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-test").expect("launch payload");
         assert_eq!(parsed.cpu_limit, None);
         assert_eq!(parsed.memory_limit, Some("4g"));
         assert_eq!(parsed.pids_limit, Some(1024));
@@ -839,7 +864,7 @@ mod tests {
         let mut payload = valid_launch_payload();
         payload.insert("resources".to_string(), Value::String("4g".to_string()));
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid resources"
         ));
 
@@ -851,7 +876,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            parse_launch_payload(&payload, &validators),
+            parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid resources"
         ));
     }
@@ -867,7 +892,7 @@ mod tests {
         ] {
             payload.insert("resources".to_string(), resources);
             assert!(matches!(
-                parse_launch_payload(&payload, &validators),
+                parse_launch_payload(&payload, &validators, "botwork-test"),
                 Err(LauncherError::BadRequest(msg)) if msg == "invalid resources.cpus"
             ));
         }
@@ -878,7 +903,7 @@ mod tests {
         ] {
             payload.insert("resources".to_string(), resources);
             assert!(matches!(
-                parse_launch_payload(&payload, &validators),
+                parse_launch_payload(&payload, &validators, "botwork-test"),
                 Err(LauncherError::BadRequest(msg)) if msg == "invalid resources.memory"
             ));
         }
@@ -891,10 +916,67 @@ mod tests {
         ] {
             payload.insert("resources".to_string(), resources);
             assert!(matches!(
-                parse_launch_payload(&payload, &validators),
+                parse_launch_payload(&payload, &validators, "botwork-test"),
                 Err(LauncherError::BadRequest(msg)) if msg == "invalid resources.pids"
             ));
         }
+    }
+
+    #[test]
+    fn launch_payload_network_falls_back_to_default_when_absent() {
+        let validators = validators();
+        let payload = valid_launch_payload();
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-plugin").expect("launch payload");
+        assert_eq!(parsed.network, "botwork-plugin");
+    }
+
+    #[test]
+    fn launch_payload_network_falls_back_to_default_when_null() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert("network".to_string(), Value::Null);
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-plugin").expect("launch payload");
+        assert_eq!(parsed.network, "botwork-plugin");
+    }
+
+    #[test]
+    fn launch_payload_network_explicit_override_wins_over_default() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "network".to_string(),
+            Value::String("botwork-override".to_string()),
+        );
+        let parsed =
+            parse_launch_payload(&payload, &validators, "botwork-plugin").expect("launch payload");
+        assert_eq!(parsed.network, "botwork-override");
+    }
+
+    #[test]
+    fn launch_payload_network_invalid_string_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "network".to_string(),
+            Value::String("bad network".to_string()),
+        );
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-plugin"),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid docker network"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_network_wrong_type_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert("network".to_string(), Value::Number(42.into()));
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-plugin"),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid docker network"
+        ));
     }
 
     #[tokio::test]
