@@ -19,8 +19,14 @@ context.
 For each `POST /resolve` call, config-broker looks up `plugin` in the in-memory
 registry loaded from `plugins.yaml` at startup and returns the resolved
 descriptor (image, port, path, upstream_auth, env, resources,
-config_blob). Session-broker uses that descriptor to launch the per-session
-container.
+config_blob, egress). Session-broker uses that descriptor to launch the
+per-session container and forwards the `egress` block to control-plane as
+the session's policy.
+
+> **0.1.9 breaking change**: `egress:` is required on every plugin in
+> `plugins.yaml`. config-broker refuses to start if any plugin lacks an
+> explicit egress declaration. See the `egress` bullet below for the
+> three accepted forms.
 
 ## Endpoints
 
@@ -63,14 +69,25 @@ Success response (200):
   injection in session-broker). When present, it is already a compact-JSON
   string — session-broker drops it verbatim into `BOTWORK_MCP_CONFIG`.
 - `upstream_auth` is one of `"none"` or `"bearer/<service>"`.
-- `egress` is **omitted** when the operator did not set `egress:` on the
-  plugin; an explicit `egress: {}` is preserved as `{}` (operator chose an
-  empty policy, distinct from absent). When present it is a JSON object
-  whose internal schema is **owned by control-plane** (botwork #81),
-  not by config-broker — config-broker only verifies "must be a mapping"
-  and shuttles the value through verbatim. session-broker is similarly
-  opaque to the schema; it forwards the block to control-plane as the
-  `egress_policy` of a `SessionRecord`.
+- `egress` is **always present** as of 0.1.9 — config-broker enforces a
+  default-deny schema where every plugin in `plugins.yaml` MUST declare
+  one of three forms (any other shape, or a missing field, fails the
+  whole registry at load time so the policy choice is always visible):
+
+    * `egress: all` (YAML) -> `{ "mode": "all" }` on the wire — opt-in
+      unrestricted egress
+    * `egress: none` (YAML) -> `{ "mode": "none" }` on the wire — no
+      egress at all
+    * `egress: { allow: [ { host, ports: [<port>, ...] }, ... ] }`
+      (YAML) -> verbatim on the wire — explicit allow-list of exact-
+      match hostnames and TCP ports
+
+  config-broker validates the shape (forms, host/ports types, port
+  ranges, no wildcards in v0); the **policy semantics** live with
+  the xDS materialiser, which is what compiles the wire shape into
+  envoy RBAC. session-broker is opaque to all of it — it forwards
+  the block to control-plane as the `egress_policy` of a
+  `SessionRecord` (botwork #81).
 
 ### Error envelope
 
@@ -138,8 +155,11 @@ session-broker maps these onto client-facing responses:
 - Per-tenant / per-namespace config overrides.
 - ORM/DB-backed config sources.
 - Schema validation of the `config_blob` content.
-- Schema validation of the `egress` content (control-plane owns the schema;
-  config-broker only enforces "must be a mapping").
+- Policy semantics of the `egress` block. config-broker validates the
+  shape (three accepted forms; required `host`/`ports` keys; port ranges;
+  no wildcards), but does not compile or enforce the policy — that
+  lives with the xDS materialiser (control-plane consumer, lands in a
+  follow-up cycle).
 - Hot reload (SIGHUP).
 - Caching / TTL / invalidation hooks.
 - Audit log surface, version stamping, dashboards.

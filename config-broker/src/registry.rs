@@ -60,19 +60,25 @@ pub struct PluginEntry {
     /// to compact JSON at the wire boundary. `None` means the operator did not
     /// set `config:` and the env var must not be injected.
     pub config: Option<serde_json::Value>,
-    /// Verbatim `egress:` block from `plugins.yaml`. config-broker does not
-    /// parse this — it is shuttled opaquely to session-broker, which forwards
-    /// it to control-plane (botwork #81) as the `egress_policy` of a
-    /// `SessionRecord`. The xDS materialiser owns the schema; config-broker
-    /// only enforces "must be a mapping" so we fail fast on obvious garbage.
+    /// `egress:` block from `plugins.yaml`. config-broker 0.1.9+ enforces a
+    /// required, default-deny schema: every plugin entry MUST set one of:
     ///
-    /// `None` means the operator did not set `egress:` on this plugin; the
-    /// wire response omits the field entirely (rather than emitting `null` or
-    /// `{}`) so control-plane can apply its default-open posture. An explicit
-    /// `egress: {}` is preserved as `Some({})` — that is "operator chose an
-    /// empty policy", which is meaningfully different from absent and may
-    /// diverge from the default in a future iteration.
-    pub egress: Option<serde_json::Value>,
+    ///   * `egress: all`                   -- unrestricted egress
+    ///   * `egress: none`                  -- no egress at all
+    ///   * `egress: { allow: [...] }`      -- explicit allow-list of
+    ///     { host, ports } entries
+    ///
+    /// Missing or otherwise-shaped `egress:` rejects the whole registry at
+    /// load time -- making the policy decision implicit by accident is the
+    /// failure mode we want to make impossible.
+    ///
+    /// Stored as `serde_json::Value` so the wire path is "validate-and-
+    /// forward": session-broker passes the same shape to control-plane (botwork
+    /// #81) as the `egress_policy` of a `SessionRecord`, and the future xDS
+    /// materialiser walks it from there. config-broker does not interpret
+    /// the policy beyond shape validation; intent + drift live with the
+    /// materialiser.
+    pub egress: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -294,36 +300,112 @@ fn parse_config(
     Ok(Some(json_val))
 }
 
+/// Parse + validate a plugin's required `egress:` block.
+///
+/// As of config-broker 0.1.9 egress is **default-deny**: every plugin in
+/// `plugins.yaml` MUST declare one of:
+///
+///   * `egress: all`  -- string literal. Wire shape: `{ "mode": "all" }`.
+///     The opt-in "old behaviour"; reviewers should see this as "we
+///     explicitly chose not to lock down".
+///   * `egress: none` -- string literal. Wire shape: `{ "mode": "none" }`.
+///     "Plugin must never egress." Useful for compute-only plugins (echo,
+///     exec-*-without-network) and as the safe default for anything new.
+///   * `egress: { allow: [ { host, ports }, ... ] }` -- explicit allow
+///     list, exact-match hostnames + TCP port lists. Wire shape passes
+///     through verbatim; the materialiser is what compiles it into envoy
+///     RBAC.
+///
+/// Missing `egress:` -- or any other shape -- fails the whole registry at
+/// load time. The point of default-deny is that "I forgot" cannot become
+/// "allow everything"; the loud error makes the policy choice visible.
+///
+/// Wire shape is deliberately verbatim: control-plane stores it as opaque
+/// JSON, the materialiser owns the schema, and config-broker doesn't add
+/// transformation surface.
 fn parse_egress(
     plugin_name: &str,
     config_val: &serde_yaml::Value,
-) -> Result<Option<serde_json::Value>, RegistryError> {
+) -> Result<serde_json::Value, RegistryError> {
     let raw = &config_val["egress"];
+
+    // Required field. Default-deny means absence is an error, not an
+    // implicit "all" / "none" / anything else.
     if raw.is_null() {
-        return Ok(None);
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' is missing required 'egress' field: every plugin must declare one of `egress: all`, `egress: none`, or `egress: {{ allow: [...] }}` -- default-deny means there is no implicit fallback"
+        )));
     }
 
-    // YAML -> JSON round-trip is fine for any structure config-broker is
-    // willing to ship across the wire. Failures here mean the operator used
-    // a YAML construct with no JSON equivalent.
-    let json_val: serde_json::Value = serde_json::to_value(raw).map_err(|e| {
+    // String forms: `all` / `none`. We normalise to a `{ "mode": "<value>" }`
+    // object on the wire so consumers branch on the same key shape they use
+    // for the structured form (i.e. they never have to test "is this value a
+    // string or a map?").
+    if let Some(s) = raw.as_str() {
+        return match s {
+            "all" => Ok(serde_json::json!({ "mode": "all" })),
+            "none" => Ok(serde_json::json!({ "mode": "none" })),
+            other => Err(RegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'egress': string form must be 'all' or 'none' (got {other:?})"
+            ))),
+        };
+    }
+
+    // Mapping form: must have `allow:`. Reject mappings with `mode:` -- that
+    // shape is reserved for the wire emission of the string forms above and
+    // operators must use the string sugar.
+    let mapping = raw.as_mapping().ok_or_else(|| {
+        RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress': expected 'all', 'none', or a mapping (got {})",
+            yaml_val_type_name(raw),
+        ))
+    })?;
+
+    if mapping.contains_key(serde_yaml::Value::String("mode".to_string())) {
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress': 'mode:' is reserved for the wire encoding of the 'all'/'none' string forms; use `egress: all` or `egress: none` directly"
+        )));
+    }
+
+    let allow_val = mapping
+        .get(serde_yaml::Value::String("allow".to_string()))
+        .ok_or_else(|| {
+            RegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'egress': mapping form must contain 'allow:' (use `egress: none` for no egress, or `egress: all` for unrestricted)"
+            ))
+        })?;
+
+    let allow_seq = allow_val.as_sequence().ok_or_else(|| {
+        RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow': expected a sequence of {{ host, ports }} entries (got {})",
+            yaml_val_type_name(allow_val),
+        ))
+    })?;
+
+    // Reject extra keys at the top level so a typo (e.g. `denny: [...]`)
+    // doesn't silently become a no-op. We accept exactly `allow:` here.
+    for (key, _) in mapping {
+        let key_str = key.as_str().unwrap_or("(non-string)");
+        if key_str != "allow" {
+            return Err(RegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'egress': unknown key {key_str:?} (mapping form supports only 'allow:')"
+            )));
+        }
+    }
+
+    for (i, entry) in allow_seq.iter().enumerate() {
+        validate_allow_entry(plugin_name, i, entry)?;
+    }
+
+    let json_val = serde_json::to_value(raw).map_err(|e| {
         RegistryError::Invalid(format!(
             "plugin '{plugin_name}' has invalid 'egress': cannot represent as JSON: {e}"
         ))
     })?;
 
-    if !json_val.is_object() {
-        return Err(RegistryError::Invalid(format!(
-            "plugin '{plugin_name}' has invalid 'egress': expected a mapping (got {})",
-            json_val_type_name(&json_val)
-        )));
-    }
-
-    // Unlike `config:`, an explicit empty mapping is preserved as `Some({})`.
-    // The downstream consumer (control-plane) distinguishes "operator did not
-    // set egress" from "operator explicitly set an empty egress policy" so a
-    // future inheritance / default-override story has something to bite on.
-
+    // Size guard. The allow list is the only growable surface so this caps
+    // operator mistakes (generated 10k-entry policies, etc) but is unlikely
+    // to bite on hand-written entries.
     let serialized =
         serde_json::to_string(&json_val).expect("Value already validated as JSON-serializable");
     if serialized.len() > MAX_ENV_VALUE_BYTES {
@@ -332,7 +414,119 @@ fn parse_egress(
         )));
     }
 
-    Ok(Some(json_val))
+    Ok(json_val)
+}
+
+/// Validate one entry in the `egress.allow:` sequence.
+///
+/// An entry must be a mapping with exactly:
+///   * `host:` -- non-empty string, no whitespace, no scheme/path
+///   * `ports:` -- non-empty sequence of integers in 1..=65535
+///
+/// `host` is validated for shape, not DNS resolvability: the materialiser
+/// is responsible for failing closed if a hostname doesn't resolve.
+fn validate_allow_entry(
+    plugin_name: &str,
+    index: usize,
+    entry: &serde_yaml::Value,
+) -> Result<(), RegistryError> {
+    let mapping = entry.as_mapping().ok_or_else(|| {
+        RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow[{index}]': expected a mapping (got {})",
+            yaml_val_type_name(entry),
+        ))
+    })?;
+
+    for (key, _) in mapping {
+        let key_str = key.as_str().unwrap_or("(non-string)");
+        if key_str != "host" && key_str != "ports" {
+            return Err(RegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'egress.allow[{index}]': unknown key {key_str:?} (entries support only 'host' and 'ports')"
+            )));
+        }
+    }
+
+    let host_val = mapping
+        .get(serde_yaml::Value::String("host".to_string()))
+        .ok_or_else(|| {
+            RegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'egress.allow[{index}]': missing required 'host'"
+            ))
+        })?;
+    let host = host_val.as_str().ok_or_else(|| {
+        RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow[{index}].host': expected non-empty string (got {})",
+            yaml_val_type_name(host_val),
+        ))
+    })?;
+    if host.trim().is_empty() {
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow[{index}].host': must not be empty"
+        )));
+    }
+    if host.chars().any(char::is_whitespace) {
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow[{index}].host': must not contain whitespace (got {host:?})"
+        )));
+    }
+    if host.contains("://") || host.contains('/') {
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow[{index}].host': must be a bare hostname (no scheme or path; got {host:?})"
+        )));
+    }
+    // Wildcards are deliberately not supported in v0. The risk with
+    // suffix matching is "matched too much" being invisible until something
+    // exfils; start strict and relax later if a real consumer needs it.
+    if host.contains('*') {
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow[{index}].host': wildcards are not supported in v0; list each hostname explicitly (got {host:?})"
+        )));
+    }
+
+    let ports_val = mapping
+        .get(serde_yaml::Value::String("ports".to_string()))
+        .ok_or_else(|| {
+            RegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'egress.allow[{index}]': missing required 'ports' (TCP ports list -- use [443] for HTTPS-only)"
+            ))
+        })?;
+    let ports = ports_val.as_sequence().ok_or_else(|| {
+        RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow[{index}].ports': expected a sequence of integers (got {})",
+            yaml_val_type_name(ports_val),
+        ))
+    })?;
+    if ports.is_empty() {
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress.allow[{index}].ports': must not be empty (use a different `host:` if no ports apply, or `egress: none` for the whole plugin)"
+        )));
+    }
+    for port_val in ports {
+        let port = port_val.as_u64().ok_or_else(|| {
+            RegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'egress.allow[{index}].ports': each port must be an integer 1-65535"
+            ))
+        })?;
+        if port == 0 || port > 65535 {
+            return Err(RegistryError::Invalid(format!(
+                "plugin '{plugin_name}' has invalid 'egress.allow[{index}].ports': each port must be an integer 1-65535 (got {port})"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn yaml_val_type_name(v: &serde_yaml::Value) -> &'static str {
+    match v {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "bool",
+        serde_yaml::Value::Number(_) => "number",
+        serde_yaml::Value::String(_) => "string",
+        serde_yaml::Value::Sequence(_) => "sequence",
+        serde_yaml::Value::Mapping(_) => "mapping",
+        serde_yaml::Value::Tagged(_) => "tagged",
+    }
 }
 
 fn json_val_type_name(v: &serde_json::Value) -> &'static str {
@@ -588,12 +782,15 @@ mod tests {
             "plugins:
   a:
     image: botwork/mcp-a:local
+    egress: all
   b:
     image: botwork/mcp-b:local
     path: /mcp
+    egress: all
   c:
     image: botwork/mcp-c:local
     path: /api/v1
+    egress: all
 ",
         );
         let loaded = load(&path).expect("load plugins");
@@ -619,7 +816,7 @@ mod tests {
             let path = write_plugins(
                 dir.path(),
                 &format!(
-                    "plugins:\n  p:\n    image: botwork/mcp-p:local\n    path: \"{bad_path}\"\n"
+                    "plugins:\n  p:\n    image: botwork/mcp-p:local\n    path: \"{bad_path}\"\n    egress: all\n"
                 ),
             );
             let err = load(&path).expect_err("invalid path should fail");
@@ -641,7 +838,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    network: botwork\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    network: botwork\n    egress: all\n",
         );
         let err = load(&path).expect_err("network field should be rejected");
         let err = err.to_string();
@@ -660,7 +857,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: all\n",
         );
 
         let loaded = load(&path).expect("load plugins");
@@ -672,7 +869,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    upstream_auth: none\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    upstream_auth: none\n    egress: all\n",
         );
 
         let loaded = load(&path).expect("load plugins");
@@ -684,7 +881,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    upstream_auth: bearer/github.com\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    upstream_auth: bearer/github.com\n    egress: all\n",
         );
 
         let loaded = load(&path).expect("load plugins");
@@ -750,7 +947,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: all\n",
         );
         let loaded = load(&path).expect("load plugins");
         assert!(loaded["p"].env.is_empty());
@@ -761,7 +958,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: all\n",
         );
         let loaded = load(&path).expect("load plugins");
         assert_eq!(loaded["p"].resources, PluginResources::default());
@@ -775,6 +972,7 @@ mod tests {
             "plugins:
   p:
     image: botwork/mcp-p:local
+    egress: all
     resources:
       memory: 4g
       pids: 1024
@@ -827,6 +1025,7 @@ mod tests {
             "plugins:
   p:
     image: botwork/mcp-p:local
+    egress: all
     env:
       GITHUB_TOOLSETS: default,actions
       GITHUB_TERSE_DESCRIPTIONS: \"true\"
@@ -881,7 +1080,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: all\n",
         );
         let loaded = load(&path).expect("load plugins");
         assert!(loaded["p"].config.is_none());
@@ -892,7 +1091,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    config: {}\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    config: {}\n    egress: all\n",
         );
         let loaded = load(&path).expect("load plugins");
         assert!(loaded["p"].config.is_none());
@@ -906,6 +1105,7 @@ mod tests {
             "plugins:
   p:
     image: botwork/mcp-p:local
+    egress: all
     config:
       routes:
         - owner: botworkz
@@ -997,39 +1197,75 @@ mod tests {
     }
 
     #[test]
-    fn load_egress_defaults_none_when_absent() {
-        // Absent egress: forwarded to control-plane as the field's
-        // "operator did not set this" sentinel (Option::None), which the
-        // /resolve wire shape then omits entirely.
+    fn load_egress_rejects_missing_field() {
+        // Default-deny: every plugin must declare an explicit egress policy.
+        // Absence is an error, not an implicit anything.
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
             "plugins:\n  p:\n    image: botwork/mcp-p:local\n",
         );
-        let loaded = load(&path).expect("load plugins");
-        assert!(loaded["p"].egress.is_none());
+        let err = load(&path).expect_err("missing egress must fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'") && err.contains("missing required 'egress' field"),
+            "should call out the missing field: {err}"
+        );
     }
 
     #[test]
-    fn load_egress_preserves_explicit_empty_mapping() {
-        // `egress: {}` is meaningfully different from absent: it expresses
-        // "operator chose an empty policy". Preserve it so a future
-        // inheritance/default-override iteration can distinguish the cases.
+    fn load_egress_accepts_all_keyword() {
+        // String form `egress: all` -> wire shape `{ "mode": "all" }`.
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: {}\n",
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: all\n",
         );
         let loaded = load(&path).expect("load plugins");
-        let egress = loaded["p"].egress.as_ref().expect("egress should be Some");
-        assert_eq!(*egress, serde_json::json!({}));
+        assert_eq!(loaded["p"].egress, serde_json::json!({ "mode": "all" }));
     }
 
     #[test]
-    fn load_egress_accepts_nested_structure() {
-        // We deliberately make no claim about the schema: control-plane
-        // owns it. config-broker only verifies "is a JSON-representable
-        // mapping" and shuttles the value through verbatim.
+    fn load_egress_accepts_none_keyword() {
+        // String form `egress: none` -> wire shape `{ "mode": "none" }`.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: none\n",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert_eq!(loaded["p"].egress, serde_json::json!({ "mode": "none" }));
+    }
+
+    #[test]
+    fn load_egress_rejects_other_string_values() {
+        // Only "all" / "none" are accepted string forms. Anything else
+        // is a typo (or aspirational shorthand) and would silently be
+        // wrong if we accepted it.
+        // `yes`/`no`/`true` are YAML-coerced to booleans and trip the
+        // mapping-or-string-form check, not this one; only test values that
+        // YAML actually parses as strings.
+        for bad in ["allow", "deny", "default"] {
+            let dir = tempdir().expect("tempdir");
+            let path = write_plugins(
+                dir.path(),
+                &format!("plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: {bad}\n"),
+            );
+            let err = load(&path).expect_err(&format!("egress: {bad} must fail"));
+            let err = err.to_string();
+            assert!(
+                err.contains("plugin 'p'")
+                    && err.contains("invalid 'egress'")
+                    && err.contains("'all' or 'none'"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_egress_accepts_full_allow_list() {
+        // Mapping form: { allow: [{ host, ports }] }. Round-trips
+        // verbatim into the wire `egress:` field.
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
@@ -1040,26 +1276,28 @@ mod tests {
       allow:
         - host: api.github.com
           ports: [443]
-        - host: registry-1.docker.io
-          ports: [443]
-      deny_metadata: true
+        - host: codeload.github.com
+          ports: [443, 80]
 ",
         );
         let loaded = load(&path).expect("load plugins");
-        let egress = loaded["p"].egress.as_ref().expect("egress should be Some");
+        let egress = &loaded["p"].egress;
         let allow = egress["allow"].as_array().expect("allow array");
         assert_eq!(allow.len(), 2);
         assert_eq!(allow[0]["host"].as_str().unwrap(), "api.github.com");
-        assert_eq!(egress["deny_metadata"].as_bool(), Some(true));
+        assert_eq!(allow[0]["ports"][0].as_u64(), Some(443));
+        assert_eq!(allow[1]["ports"][1].as_u64(), Some(80));
     }
 
     #[test]
-    fn load_egress_rejects_non_mapping() {
+    fn load_egress_rejects_non_string_non_mapping_egress() {
+        // Numbers, bools, sequences at the top level are all errors.
+        // The point is to force the choice to one of the documented
+        // forms.
         let cases = [
-            ("egress: \"a string\"", "string"),
             ("egress: 42", "number"),
             ("egress: true", "bool"),
-            ("egress:\n      - item1\n      - item2", "array"),
+            ("egress:\n      - item1\n      - item2", "sequence"),
         ];
         for (entry, kind) in cases {
             let dir = tempdir().expect("tempdir");
@@ -1067,26 +1305,248 @@ mod tests {
                 dir.path(),
                 &format!("plugins:\n  p:\n    image: botwork/mcp-p:local\n    {entry}\n"),
             );
-            let err = load(&path).expect_err(&format!("non-mapping egress ({kind}) should fail"));
+            let err = load(&path).expect_err(&format!("egress ({kind}) must fail"));
             let err = err.to_string();
             assert!(
                 err.contains("plugin 'p'") && err.contains("invalid 'egress'"),
-                "error '{err}' should mention plugin and invalid egress"
+                "{kind}: {err}"
             );
         }
     }
 
     #[test]
-    fn load_egress_rejects_oversized_value() {
-        // Same 64 KiB cap as config: oversized policy is almost certainly
-        // an operator mistake and would bloat every spawn round-trip.
-        let entries: String = (0..1000)
-            .map(|i| format!("      k{i}: \"{}\"\n", "x".repeat(64)))
+    fn load_egress_mapping_must_have_allow() {
+        // Mapping form with no `allow:` is rejected: the alternative
+        // would be "infer `egress: none`" and that defeats the point of
+        // explicit declarations.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: {}\n",
+        );
+        let err = load(&path).expect_err("empty mapping must fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'") && err.contains("must contain 'allow:'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn load_egress_mapping_rejects_unknown_keys() {
+        // Typo-detection: `denny:` is rejected as an unknown key rather
+        // than silently treated as a no-op.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - host: api.github.com
+          ports: [443]
+      denny:
+        - host: malicious.example.com
+",
+        );
+        let err = load(&path).expect_err("unknown egress key must fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'") && err.contains("unknown key") && err.contains("denny"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn load_egress_mapping_rejects_mode_key() {
+        // `mode:` is the wire-side encoding of the all/none string forms;
+        // operators must use the string sugar so the shape `{ allow: ... }`
+        // never collides with `{ mode: ... }`.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress:\n      mode: all\n",
+        );
+        let err = load(&path).expect_err("mode: reserved");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'") && err.contains("'mode:' is reserved"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn load_egress_allow_entry_requires_host_and_ports() {
+        // Each allow[] entry must have both keys. Missing either is an
+        // error -- "ports defaults to 443" would be a foot-gun for the
+        // one plugin that needs :80.
+        let dir1 = tempdir().expect("tempdir");
+        let path1 = write_plugins(
+            dir1.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - ports: [443]
+",
+        );
+        let err = load(&path1).expect_err("missing host");
+        assert!(err.to_string().contains("missing required 'host'"), "{err}");
+
+        let dir2 = tempdir().expect("tempdir");
+        let path2 = write_plugins(
+            dir2.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - host: api.github.com
+",
+        );
+        let err = load(&path2).expect_err("missing ports");
+        assert!(
+            err.to_string().contains("missing required 'ports'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn load_egress_allow_entry_rejects_unknown_keys() {
+        // `path:` or `scheme:` would imply L7 awareness we don't have
+        // in v0; reject so an aspirational entry doesn't silently
+        // become "host + ports only, the rest is ignored".
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - host: api.github.com
+          ports: [443]
+          path: /repos/*
+",
+        );
+        let err = load(&path).expect_err("unknown allow-entry key");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'") && err.contains("unknown key") && err.contains("path"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn load_egress_allow_entry_rejects_bad_host_shape() {
+        // host: must be a bare hostname. URLs, paths, wildcards, and
+        // empty/whitespace values are all rejected with shape-specific
+        // messages.
+        let cases: &[(&str, &str)] = &[
+            ("\"\"", "must not be empty"),
+            // All-whitespace trips the trim-then-empty check first; the
+            // "whitespace" branch is for hosts with embedded spaces.
+            ("\"   \"", "must not be empty"),
+            ("\"api github.com\"", "whitespace"),
+            ("\"https://api.github.com\"", "bare hostname"),
+            ("\"api.github.com/foo\"", "bare hostname"),
+            ("\"*.github.com\"", "wildcards are not supported"),
+        ];
+        for (host_literal, fragment) in cases {
+            let dir = tempdir().expect("tempdir");
+            let path = write_plugins(
+                dir.path(),
+                &format!(
+                    "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - host: {host_literal}
+          ports: [443]
+"
+                ),
+            );
+            let err = load(&path).expect_err(&format!("host {host_literal} should fail"));
+            let err = err.to_string();
+            assert!(
+                err.contains(fragment),
+                "host {host_literal}: expected fragment {fragment:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_egress_allow_entry_rejects_bad_ports() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - host: api.github.com
+          ports: []
+",
+        );
+        let err = load(&path).expect_err("empty ports");
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - host: api.github.com
+          ports: [0]
+",
+        );
+        let err = load(&path).expect_err("port 0");
+        assert!(err.to_string().contains("1-65535"), "{err}");
+
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - host: api.github.com
+          ports: [65536]
+",
+        );
+        let err = load(&path).expect_err("port 65536");
+        assert!(err.to_string().contains("1-65535"), "{err}");
+    }
+
+    #[test]
+    fn load_egress_rejects_oversized_allow_list() {
+        // Same 64 KiB cap as `config:`. An operator-generated 10k-entry
+        // policy would bloat every spawn round-trip; force them to look
+        // at the size limit.
+        //
+        // Build an allow list that exceeds 64 KiB serialised. Each entry
+        // is ~50 bytes JSON-serialised, so 2000 entries = ~100 KiB.
+        let entries: String = (0..2000)
+            .map(|i| {
+                format!(
+                    "        - host: hostname-with-some-padding-{i}.example.invalid\n          ports: [443]\n"
+                )
+            })
             .collect();
         let dir = tempdir().expect("tempdir");
         let path = write_plugins(
             dir.path(),
-            &format!("plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress:\n{entries}"),
+            &format!(
+                "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress:\n      allow:\n{entries}"
+            ),
         );
         let err = load(&path).expect_err("oversized egress should fail");
         let err = err.to_string();
@@ -1094,7 +1554,7 @@ mod tests {
             err.contains("plugin 'p'")
                 && err.contains("invalid 'egress'")
                 && err.contains("exceeds maximum size"),
-            "error should mention plugin and size: {err}"
+            "{err}"
         );
     }
 }
