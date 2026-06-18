@@ -60,6 +60,19 @@ pub struct PluginEntry {
     /// to compact JSON at the wire boundary. `None` means the operator did not
     /// set `config:` and the env var must not be injected.
     pub config: Option<serde_json::Value>,
+    /// Verbatim `egress:` block from `plugins.yaml`. config-broker does not
+    /// parse this — it is shuttled opaquely to session-broker, which forwards
+    /// it to control-plane (botwork #81) as the `egress_policy` of a
+    /// `SessionRecord`. The xDS materialiser owns the schema; config-broker
+    /// only enforces "must be a mapping" so we fail fast on obvious garbage.
+    ///
+    /// `None` means the operator did not set `egress:` on this plugin; the
+    /// wire response omits the field entirely (rather than emitting `null` or
+    /// `{}`) so control-plane can apply its default-open posture. An explicit
+    /// `egress: {}` is preserved as `Some({})` — that is "operator chose an
+    /// empty policy", which is meaningfully different from absent and may
+    /// diverge from the default in a future iteration.
+    pub egress: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -281,6 +294,47 @@ fn parse_config(
     Ok(Some(json_val))
 }
 
+fn parse_egress(
+    plugin_name: &str,
+    config_val: &serde_yaml::Value,
+) -> Result<Option<serde_json::Value>, RegistryError> {
+    let raw = &config_val["egress"];
+    if raw.is_null() {
+        return Ok(None);
+    }
+
+    // YAML -> JSON round-trip is fine for any structure config-broker is
+    // willing to ship across the wire. Failures here mean the operator used
+    // a YAML construct with no JSON equivalent.
+    let json_val: serde_json::Value = serde_json::to_value(raw).map_err(|e| {
+        RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress': cannot represent as JSON: {e}"
+        ))
+    })?;
+
+    if !json_val.is_object() {
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress': expected a mapping (got {})",
+            json_val_type_name(&json_val)
+        )));
+    }
+
+    // Unlike `config:`, an explicit empty mapping is preserved as `Some({})`.
+    // The downstream consumer (control-plane) distinguishes "operator did not
+    // set egress" from "operator explicitly set an empty egress policy" so a
+    // future inheritance / default-override story has something to bite on.
+
+    let serialized =
+        serde_json::to_string(&json_val).expect("Value already validated as JSON-serializable");
+    if serialized.len() > MAX_ENV_VALUE_BYTES {
+        return Err(RegistryError::Invalid(format!(
+            "plugin '{plugin_name}' has invalid 'egress': serialized JSON exceeds maximum size of {MAX_ENV_VALUE_BYTES} bytes"
+        )));
+    }
+
+    Ok(Some(json_val))
+}
+
 fn json_val_type_name(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
@@ -495,6 +549,7 @@ pub fn load(path: &str) -> Result<PluginRegistry, RegistryError> {
         let env = parse_env(name, config_val)?;
         let resources = parse_resources(name, config_val)?;
         let config = parse_config(name, config_val)?;
+        let egress = parse_egress(name, config_val)?;
 
         result.insert(
             name.to_string(),
@@ -506,6 +561,7 @@ pub fn load(path: &str) -> Result<PluginRegistry, RegistryError> {
                 env,
                 resources,
                 config,
+                egress,
             },
         );
     }
@@ -938,5 +994,107 @@ mod tests {
                 "error: {err}"
             );
         }
+    }
+
+    #[test]
+    fn load_egress_defaults_none_when_absent() {
+        // Absent egress: forwarded to control-plane as the field's
+        // "operator did not set this" sentinel (Option::None), which the
+        // /resolve wire shape then omits entirely.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n",
+        );
+        let loaded = load(&path).expect("load plugins");
+        assert!(loaded["p"].egress.is_none());
+    }
+
+    #[test]
+    fn load_egress_preserves_explicit_empty_mapping() {
+        // `egress: {}` is meaningfully different from absent: it expresses
+        // "operator chose an empty policy". Preserve it so a future
+        // inheritance/default-override iteration can distinguish the cases.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress: {}\n",
+        );
+        let loaded = load(&path).expect("load plugins");
+        let egress = loaded["p"].egress.as_ref().expect("egress should be Some");
+        assert_eq!(*egress, serde_json::json!({}));
+    }
+
+    #[test]
+    fn load_egress_accepts_nested_structure() {
+        // We deliberately make no claim about the schema: control-plane
+        // owns it. config-broker only verifies "is a JSON-representable
+        // mapping" and shuttles the value through verbatim.
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            "plugins:
+  p:
+    image: botwork/mcp-p:local
+    egress:
+      allow:
+        - host: api.github.com
+          ports: [443]
+        - host: registry-1.docker.io
+          ports: [443]
+      deny_metadata: true
+",
+        );
+        let loaded = load(&path).expect("load plugins");
+        let egress = loaded["p"].egress.as_ref().expect("egress should be Some");
+        let allow = egress["allow"].as_array().expect("allow array");
+        assert_eq!(allow.len(), 2);
+        assert_eq!(allow[0]["host"].as_str().unwrap(), "api.github.com");
+        assert_eq!(egress["deny_metadata"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn load_egress_rejects_non_mapping() {
+        let cases = [
+            ("egress: \"a string\"", "string"),
+            ("egress: 42", "number"),
+            ("egress: true", "bool"),
+            ("egress:\n      - item1\n      - item2", "array"),
+        ];
+        for (entry, kind) in cases {
+            let dir = tempdir().expect("tempdir");
+            let path = write_plugins(
+                dir.path(),
+                &format!("plugins:\n  p:\n    image: botwork/mcp-p:local\n    {entry}\n"),
+            );
+            let err = load(&path).expect_err(&format!("non-mapping egress ({kind}) should fail"));
+            let err = err.to_string();
+            assert!(
+                err.contains("plugin 'p'") && err.contains("invalid 'egress'"),
+                "error '{err}' should mention plugin and invalid egress"
+            );
+        }
+    }
+
+    #[test]
+    fn load_egress_rejects_oversized_value() {
+        // Same 64 KiB cap as config: oversized policy is almost certainly
+        // an operator mistake and would bloat every spawn round-trip.
+        let entries: String = (0..1000)
+            .map(|i| format!("      k{i}: \"{}\"\n", "x".repeat(64)))
+            .collect();
+        let dir = tempdir().expect("tempdir");
+        let path = write_plugins(
+            dir.path(),
+            &format!("plugins:\n  p:\n    image: botwork/mcp-p:local\n    egress:\n{entries}"),
+        );
+        let err = load(&path).expect_err("oversized egress should fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("plugin 'p'")
+                && err.contains("invalid 'egress'")
+                && err.contains("exceeds maximum size"),
+            "error should mention plugin and size: {err}"
+        );
     }
 }

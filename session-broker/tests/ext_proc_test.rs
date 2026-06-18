@@ -277,6 +277,7 @@ fn sample_plugin_config_with_path_and_auth(
         env: vec![],
         resources: PluginResources::default(),
         config_blob: None,
+        egress: None,
     }
 }
 
@@ -1531,6 +1532,7 @@ fn descriptor_default() -> PluginDescriptor {
         resources: PluginResources::default(),
         env: vec![],
         config_blob: None,
+        egress: None,
     }
 }
 

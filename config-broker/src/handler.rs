@@ -95,6 +95,14 @@ struct ResolveResponse {
     /// when the operator did not set `config:` on this plugin.
     #[serde(skip_serializing_if = "Option::is_none")]
     config_blob: Option<String>,
+    /// Verbatim `egress:` block from `plugins.yaml`, shipped as a JSON
+    /// object so session-broker can forward it straight through to
+    /// control-plane (botwork #81) without ever interpreting the schema.
+    /// Omitted when the operator did not set `egress:`. An explicit empty
+    /// mapping is preserved as `{}` -- see the `egress` field on
+    /// `PluginEntry` for why absent and `{}` are distinct.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    egress: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,6 +142,7 @@ fn render_descriptor(entry: &PluginEntry) -> ResolveResponse {
             serde_json::to_string(v)
                 .expect("config Value re-serialises; validated at registry load")
         }),
+        egress: entry.egress.clone(),
     }
 }
 
@@ -239,6 +248,7 @@ mod tests {
             env: vec![("FOO".to_string(), "bar".to_string())],
             resources: PluginResources::default(),
             config: None,
+            egress: None,
         }
     }
 
@@ -300,6 +310,48 @@ mod tests {
         assert_eq!(resources["memory"], "4g");
         assert_eq!(resources["pids"], 1024);
         assert!(resources.get("cpus").is_none());
+    }
+
+    #[test]
+    fn render_descriptor_omits_egress_when_absent() {
+        // The wire shape distinguishes "operator did not set egress" from
+        // "operator set empty egress" by *omitting* the key in the former
+        // case. control-plane uses absence as the cue to apply its
+        // default-open posture.
+        let descriptor = render_descriptor(&entry_for_test());
+        let json = serde_json::to_value(&descriptor).expect("ser");
+        assert!(
+            json.get("egress").is_none(),
+            "egress must be omitted when entry.egress is None: {json}"
+        );
+    }
+
+    #[test]
+    fn render_descriptor_preserves_empty_egress() {
+        let mut entry = entry_for_test();
+        entry.egress = Some(serde_json::json!({}));
+        let descriptor = render_descriptor(&entry);
+        let json = serde_json::to_value(&descriptor).expect("ser");
+        assert_eq!(json["egress"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn render_descriptor_emits_full_egress_verbatim() {
+        // config-broker is opaque to the egress schema -- shape is the
+        // contract, not the content. This test pins that any operator
+        // payload round-trips byte-for-byte.
+        let mut entry = entry_for_test();
+        entry.egress = Some(serde_json::json!({
+            "allow": [
+                { "host": "api.github.com", "ports": [443] },
+            ],
+            "deny_metadata": true,
+        }));
+        let descriptor = render_descriptor(&entry);
+        let json = serde_json::to_value(&descriptor).expect("ser");
+        assert_eq!(json["egress"]["allow"][0]["host"], "api.github.com");
+        assert_eq!(json["egress"]["allow"][0]["ports"][0], 443);
+        assert_eq!(json["egress"]["deny_metadata"], true);
     }
 
     fn state_with(plugin: &str) -> AppState {

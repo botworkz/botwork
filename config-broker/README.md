@@ -47,7 +47,10 @@ Success response (200):
   "upstream_auth": "bearer/github.com",
   "resources": { "memory": "4g", "pids": 1024 },
   "env": [ { "name": "GITHUB_TOOLSETS", "value": "default,actions" } ],
-  "config_blob": "{\"routes\":[{\"owner\":\"botworkz\"}]}"
+  "config_blob": "{\"routes\":[{\"owner\":\"botworkz\"}]}",
+  "egress": {
+    "allow": [ { "host": "api.github.com", "ports": [443] } ]
+  }
 }
 ```
 
@@ -60,6 +63,14 @@ Success response (200):
   injection in session-broker). When present, it is already a compact-JSON
   string — session-broker drops it verbatim into `BOTWORK_MCP_CONFIG`.
 - `upstream_auth` is one of `"none"` or `"bearer/<service>"`.
+- `egress` is **omitted** when the operator did not set `egress:` on the
+  plugin; an explicit `egress: {}` is preserved as `{}` (operator chose an
+  empty policy, distinct from absent). When present it is a JSON object
+  whose internal schema is **owned by control-plane** (botwork #81),
+  not by config-broker — config-broker only verifies "must be a mapping"
+  and shuttles the value through verbatim. session-broker is similarly
+  opaque to the schema; it forwards the block to control-plane as the
+  `egress_policy` of a `SessionRecord`.
 
 ### Error envelope
 
@@ -127,6 +138,8 @@ session-broker maps these onto client-facing responses:
 - Per-tenant / per-namespace config overrides.
 - ORM/DB-backed config sources.
 - Schema validation of the `config_blob` content.
+- Schema validation of the `egress` content (control-plane owns the schema;
+  config-broker only enforces "must be a mapping").
 - Hot reload (SIGHUP).
 - Caching / TTL / invalidation hooks.
 - Audit log surface, version stamping, dashboards.

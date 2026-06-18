@@ -59,6 +59,12 @@ plugins:
       routes:
         - owner: botworkz
           token_env: BOTWORK_SECRET_GITHUB_BOTWORKZ
+    egress:
+      allow:
+        - host: api.github.com
+          ports: [443]
+        - host: codeload.github.com
+          ports: [443]
   fs:
     image: botwork/mcp-fs:local
     path: /mcp
@@ -275,4 +281,50 @@ async fn resolve_other_path_returns_404() {
         .expect("send");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn resolve_known_plugin_includes_egress_when_set() {
+    let server = spawn_server(BASIC_YAML).await;
+    let base = &server.base;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{base}/resolve"))
+        .header("content-type", "application/json")
+        .body(body("phlax", "mcp", "github"))
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("json");
+    // The egress block is forwarded verbatim. config-broker is opaque to
+    // the schema; the shape is the contract.
+    let egress = body.get("egress").expect("egress present");
+    let allow = egress["allow"].as_array().expect("allow array");
+    assert_eq!(allow.len(), 2);
+    assert_eq!(allow[0]["host"], "api.github.com");
+    assert_eq!(allow[0]["ports"][0], 443);
+    assert_eq!(allow[1]["host"], "codeload.github.com");
+}
+
+#[tokio::test]
+async fn resolve_plugin_with_no_egress_omits_egress() {
+    let server = spawn_server(BASIC_YAML).await;
+    let base = &server.base;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{base}/resolve"))
+        .header("content-type", "application/json")
+        .body(body("phlax", "mcp", "fs"))
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("json");
+    assert!(
+        body.get("egress").is_none(),
+        "egress must be omitted when not set: {body}"
+    );
 }

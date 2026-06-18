@@ -53,6 +53,15 @@ pub struct PluginDescriptor {
     /// `BOTWORK_MCP_CONFIG`; do not re-parse and do not re-serialise.
     #[serde(default)]
     pub config_blob: Option<String>,
+    /// Verbatim `egress:` block from the plugin's `plugins.yaml` entry, as
+    /// returned by config-broker. session-broker does not interpret this;
+    /// it gets forwarded to control-plane (botwork #81) as the
+    /// `egress_policy` of the per-session `SessionRecord`. Absent (rather
+    /// than empty `{}`) means "operator did not set egress" -- control-plane
+    /// then applies its default-open posture. The shape is the contract
+    /// here, not the content; the xDS materialiser owns the schema.
+    #[serde(default)]
+    pub egress: Option<serde_json::Value>,
 }
 
 /// Upstream-auth policy parsed from the wire string `"none"` or
@@ -369,6 +378,11 @@ mod tests {
         assert!(descriptor.env.is_empty());
         assert_eq!(descriptor.resources, PluginResources::default());
         assert!(descriptor.config_blob.is_none());
+        // Absent `egress` (the wire shape omits the key when the
+        // operator did not set it) deserialises to None; the future
+        // hard-gate consumer treats that as "no policy" and surfaces
+        // the default to control-plane.
+        assert!(descriptor.egress.is_none());
     }
 
     #[test]
@@ -380,7 +394,8 @@ mod tests {
             "upstream_auth": "bearer/github.com",
             "resources": { "memory": "4g", "pids": 1024 },
             "env": [ { "name": "GITHUB_TOOLSETS", "value": "default,actions" } ],
-            "config_blob": "{\"routes\":[]}"
+            "config_blob": "{\"routes\":[]}",
+            "egress": { "allow": [ { "host": "api.github.com", "ports": [443] } ] }
         }"#;
         let descriptor: PluginDescriptor = serde_json::from_str(body).expect("decode");
         assert_eq!(descriptor.path, "/mcp");
@@ -395,6 +410,28 @@ mod tests {
         assert!(descriptor.resources.cpus.is_none());
         assert_eq!(descriptor.env.len(), 1);
         assert_eq!(descriptor.config_blob.as_deref(), Some(r#"{"routes":[]}"#));
+        // Egress is round-tripped opaquely; the schema lives in the
+        // future xDS materialiser, not here.
+        let egress = descriptor.egress.as_ref().expect("egress present");
+        assert_eq!(egress["allow"][0]["host"], "api.github.com");
+        assert_eq!(egress["allow"][0]["ports"][0], 443);
+    }
+
+    #[test]
+    fn descriptor_decodes_explicit_empty_egress() {
+        // `egress: {}` is meaningfully different from absent on the
+        // operator side, and config-broker preserves the distinction;
+        // session-broker round-trips it untouched.
+        let body = r#"{
+            "image": "botwork/x:local",
+            "port": 8000,
+            "path": "/",
+            "upstream_auth": "none",
+            "egress": {}
+        }"#;
+        let descriptor: PluginDescriptor = serde_json::from_str(body).expect("decode");
+        let egress = descriptor.egress.as_ref().expect("egress present");
+        assert!(egress.as_object().expect("object").is_empty());
     }
 
     #[test]
