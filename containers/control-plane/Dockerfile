@@ -1,6 +1,6 @@
 # Build from the repository root:
-#   docker build -t botwork/config-broker:local \
-#     -f containers/config-broker/Dockerfile .
+#   docker build -t botwork/control-plane:local \
+#     -f containers/control-plane/Dockerfile .
 
 # Pin builder to bookworm so the binary links against glibc 2.36, matching
 # the distroless base-nossl-debian12 runtime. The default rust:1.90-slim
@@ -22,7 +22,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN cargo build --release --package botwork-config-broker
+RUN cargo build --release --package botwork-control-plane
 
 # Runtime
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
@@ -38,9 +38,9 @@ LABEL org.opencontainers.image.source="https://github.com/botworkz/botwork"
 COPY --from=builder /lib/x86_64-linux-gnu/libgcc_s.so.1 \
     /lib/x86_64-linux-gnu/libgcc_s.so.1
 
-COPY --from=builder /build/target/release/botwork-config-broker \
-    /usr/local/bin/botwork-config-broker
+COPY --from=builder /build/target/release/botwork-control-plane \
+    /usr/local/bin/botwork-control-plane
 
-EXPOSE 9200
+EXPOSE 9300
 
-ENTRYPOINT ["/usr/local/bin/botwork-config-broker"]
+ENTRYPOINT ["/usr/local/bin/botwork-control-plane"]

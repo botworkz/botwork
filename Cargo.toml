@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "config-broker",
+    "control-plane",
     "launcher",
     "session-broker",
     "tools",

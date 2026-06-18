@@ -16,6 +16,15 @@ config-broker-image:
         .
     SAVE IMAGE botwork/config-broker:local
 
+control-plane-image:
+    ARG GIT_SHA=""
+    FROM DOCKERFILE --platform=linux/amd64 \
+        -f containers/control-plane/Dockerfile \
+        --build-arg GIT_SHA=${GIT_SHA} \
+        .
+    SAVE IMAGE botwork/control-plane:local
+
 images:
     BUILD +session-broker-image
     BUILD +config-broker-image
+    BUILD +control-plane-image
