@@ -137,6 +137,40 @@ jobs:
         docker push "${REPO}:${VERSION}"
         docker push "${REPO}:latest"
 
+    # ── Container: build and push control-plane ─────────────────────────────
+    # Symmetric to session-broker/config-broker: build the image with the
+    # triggering commit baked into the revision label, refuse to push if
+    # the label does not match GITHUB_SHA (catches any future ARG/LABEL
+    # regression in the Dockerfile), then tag :VERSION + :latest.
+    #
+    # The image landed in the codebase via PR #82 but was not added to
+    # the publish pipeline at the time; this step closes that gap so the
+    # vm side can shasset-pin against control-plane in lock-step with
+    # session-broker and config-broker.
+    - name: Build and push control-plane container
+      if: steps.version.outputs.is_release == 'true'
+      run: |
+        set -euo pipefail
+        VERSION="${{ steps.version.outputs.version }}"
+        REPO="ghcr.io/botworkz/botwork/control-plane"
+        # Platform is pinned in Earthfile via FROM DOCKERFILE --platform=linux/amd64.
+        earthly --no-cache --build-arg GIT_SHA="${GITHUB_SHA}" +control-plane-image
+        expected="${GITHUB_SHA}"
+        actual="$(docker image inspect botwork/control-plane:local \
+          --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+        if [[ "${actual}" != "${expected}" ]]; then
+          echo "ERROR: built image has revision label '${actual}' but workflow was triggered by commit '${expected}'." >&2
+          echo "Refusing to push a release container whose provenance does not match the triggering commit." >&2
+          echo "Also dumping all labels on the built image for diagnosis:" >&2
+          docker image inspect botwork/control-plane:local --format '{{ json .Config.Labels }}' >&2
+          exit 1
+        fi
+        echo "verified: image revision label matches GITHUB_SHA (${expected})"
+        docker tag botwork/control-plane:local "${REPO}:${VERSION}"
+        docker tag botwork/control-plane:local "${REPO}:latest"
+        docker push "${REPO}:${VERSION}"
+        docker push "${REPO}:latest"
+
     # ── Binaries: build botwork-launcher and botwork-tools ──────────────────
     - uses: dtolnay/rust-toolchain@stable
       if: steps.version.outputs.is_release == 'true'
