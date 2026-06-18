@@ -235,6 +235,7 @@ fn app_state_for_registry(registry: Arc<SessionRegistry>) -> AppState {
         launcher_socket_path: "/tmp/launcher.sock".to_string(),
         auth_broker_url: "http://127.0.0.1:1".to_string(),
         config_broker_endpoint: "http://127.0.0.1:1".to_string(),
+        control_plane_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -391,4 +392,125 @@ async fn session_registry_record_teardown_absent_container_is_noop() {
     let data = registry.read().await;
     assert_eq!(data.sessions.len(), 1);
     assert!(data.sessions.contains_key("mcp_session_other"));
+}
+
+#[tokio::test]
+async fn admin_get_control_plane_sessions_returns_transport_sessions_in_record_shape() {
+    // This is the recovery-sync surface: control-plane queries this on
+    // cold start to seed its in-memory store. The shape must match
+    // control-plane's `SessionRecord` exactly so the consumer doesn't
+    // need a shim layer.
+    use botwork_session_broker::config_broker::UpstreamAuth;
+    use botwork_session_broker::TransportState;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+    let registry = Arc::new(SessionRegistry::new(path.to_str().unwrap()));
+
+    let state = app_state_for_registry(Arc::clone(&registry));
+
+    // Seed two transport entries with realistic shapes -- one with an
+    // explicit egress policy, one without (recovery-sync needs both
+    // cases to round-trip correctly).
+    {
+        let mut sessions = state.transport_sessions.lock().await;
+        sessions.insert(
+            "mcp_session_b".to_string(),
+            TransportState {
+                container_name: "mcp_session_b".to_string(),
+                container_ip: "172.20.0.6".to_string(),
+                staging_token: "tokenb".to_string(),
+                tenant_name: "phlax".to_string(),
+                namespace: "mcp".to_string(),
+                plugin_name: "fetch".to_string(),
+                port: 8000,
+                path: "/mcp".to_string(),
+                upstream_auth: UpstreamAuth::None,
+                upstream_authorization: None,
+                agent_id: None,
+                egress_policy: None,
+            },
+        );
+        sessions.insert(
+            "mcp_session_a".to_string(),
+            TransportState {
+                container_name: "mcp_session_a".to_string(),
+                container_ip: "172.20.0.5".to_string(),
+                staging_token: "tokena".to_string(),
+                tenant_name: "phlax".to_string(),
+                namespace: "mcp".to_string(),
+                plugin_name: "github".to_string(),
+                port: 8000,
+                path: "/mcp".to_string(),
+                upstream_auth: UpstreamAuth::None,
+                upstream_authorization: None,
+                agent_id: None,
+                egress_policy: Some(serde_json::json!({
+                    "allow": [{"host": "api.github.com", "ports": [443]}]
+                })),
+            },
+        );
+    }
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .uri("/control-plane/sessions")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let sessions = json["sessions"].as_array().expect("sessions array");
+    // Sorted by session_id; "a" before "b".
+    let ids: Vec<&str> = sessions
+        .iter()
+        .map(|s| s["session_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["mcp_session_a", "mcp_session_b"]);
+
+    // Wire shape must match control-plane's SessionRecord: session_id,
+    // container_ip, tenant, namespace, plugin, egress_policy. Nothing
+    // else (no agent_id, no upstream_auth, no transport plumbing).
+    let a = &sessions[0];
+    assert_eq!(a["session_id"], "mcp_session_a");
+    assert_eq!(a["container_ip"], "172.20.0.5");
+    assert_eq!(a["tenant"], "phlax");
+    assert_eq!(a["namespace"], "mcp");
+    assert_eq!(a["plugin"], "github");
+    assert_eq!(a["egress_policy"]["allow"][0]["host"], "api.github.com");
+
+    let b = &sessions[1];
+    assert_eq!(b["session_id"], "mcp_session_b");
+    assert_eq!(b["plugin"], "fetch");
+    // Absent egress is rendered as JSON null, not omitted -- so the
+    // recovery-sync consumer can branch on shape uniformly.
+    assert!(b["egress_policy"].is_null());
+}
+
+#[tokio::test]
+async fn admin_get_control_plane_sessions_empty_when_no_transport_sessions() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+    let registry = Arc::new(SessionRegistry::new(path.to_str().unwrap()));
+
+    let app = build_router(app_state_for_registry(Arc::clone(&registry)));
+    let request = Request::builder()
+        .uri("/control-plane/sessions")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["sessions"].as_array().unwrap().is_empty(),
+        "sessions must be empty when no transports are registered: {json}"
+    );
 }
