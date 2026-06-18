@@ -20,10 +20,29 @@ pub struct ContainerLaunch<'a> {
     pub env: &'a [(String, String)],
 }
 
+/// Outcome of `ensure_container`: lifecycle status plus the container's
+/// IPv4 address on its docker network.
+///
+/// `status` is the same machine-readable shape session-broker already
+/// consumes today (`"already_running"` or `"started"`); `container_ip` is
+/// new in 0.1.5 -- session-broker forwards it to control-plane
+/// (botwork #81) as part of the per-session hard-gate POST.
+///
+/// `container_ip` is **always populated on success** by an inspect call
+/// chained after `docker run`. We treat a missing/unparseable IP as a
+/// launch failure (the launcher never returns 200 with an unknown
+/// address): every downstream that uses this shape requires it, and a
+/// silently-empty IP would surface as a confusing control-plane 400
+/// hours later instead of an immediate launcher 500.
+pub struct LaunchOutcome {
+    pub status: &'static str,
+    pub container_ip: String,
+}
+
 pub fn ensure_container(
     request: &ContainerLaunch<'_>,
     validators: &Validators,
-) -> Result<&'static str, LauncherError> {
+) -> Result<LaunchOutcome, LauncherError> {
     let inspect = run_command(&[
         "docker".to_string(),
         "inspect".to_string(),
@@ -36,8 +55,19 @@ pub fn ensure_container(
     if inspect.returncode == 0 {
         let status = inspect.stdout.trim();
         if status == "running" {
-            log_info(&format!("{} already running", request.name));
-            return Ok("already_running");
+            // Reuse the existing container's address rather than tear it
+            // down and re-spawn; downstream consumers (control-plane gate)
+            // require an IP either way. An unparseable inspect here is a
+            // launch failure -- same posture as a fresh spawn.
+            let container_ip = inspect_container_ip(request.network, request.name)?;
+            log_info(&format!(
+                "{} already running (ip={container_ip})",
+                request.name
+            ));
+            return Ok(LaunchOutcome {
+                status: "already_running",
+                container_ip,
+            });
         }
 
         let remove = run_command(&[
@@ -87,11 +117,80 @@ pub fn ensure_container(
         )));
     }
 
+    // `docker run` exits as soon as the container is started; the IPAM
+    // address is assigned synchronously by docker's userland networking
+    // layer, so the immediate inspect call below is race-free in
+    // practice. If a future driver makes this async we'll need to retry
+    // -- but failing closed on missing IP is still the right posture.
+    let container_ip = inspect_container_ip(request.network, request.name)?;
+
     log_info(&format!(
-        "started {} with image={} network={} staging={}",
-        request.name, request.image, request.network, request.staging_path
+        "started {} with image={} network={} staging={} ip={}",
+        request.name, request.image, request.network, request.staging_path, container_ip
     ));
-    Ok("started")
+    Ok(LaunchOutcome {
+        status: "started",
+        container_ip,
+    })
+}
+
+/// Asks docker for the container's IPv4 address on `network`.
+///
+/// Uses `--format '{{.NetworkSettings.Networks.<net>.IPAddress}}'`. The
+/// network name is embedded in the format string; we validate it against the
+/// same character class docker itself accepts so an attacker who somehow
+/// reached this code path with a malicious network name still can't break
+/// the template.
+///
+/// Returns `LauncherError::Internal` when the inspect exits non-zero, when
+/// the IP is empty (container not attached to that network), or when it
+/// doesn't parse as IPv4. The launcher never returns 200 with an unknown
+/// IP -- see `LaunchOutcome` for the rationale.
+fn inspect_container_ip(network: &str, name: &str) -> Result<String, LauncherError> {
+    if !network
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        // Defence in depth: validators already accept the launcher's
+        // configured default network, but ensure_container's caller could
+        // be passing a payload-supplied value too. Refuse anything that
+        // could escape the Go template grammar.
+        return Err(LauncherError::Internal(format!(
+            "invalid network name '{network}' for inspect"
+        )));
+    }
+
+    let format = format!("{{{{.NetworkSettings.Networks.{network}.IPAddress}}}}");
+    let inspect = run_command(&[
+        "docker".to_string(),
+        "inspect".to_string(),
+        "--format".to_string(),
+        format,
+        name.to_string(),
+    ])
+    .map_err(LauncherError::Internal)?;
+
+    if inspect.returncode != 0 {
+        log_docker_failure("inspect-ip", &inspect);
+        return Err(LauncherError::Internal(fallback_message(
+            &inspect.stderr,
+            format!("failed to inspect IP for {name} on {network}"),
+        )));
+    }
+
+    let ip = inspect.stdout.trim().to_string();
+    if ip.is_empty() {
+        return Err(LauncherError::Internal(format!(
+            "container {name} has no address on network {network} (inspect returned empty)"
+        )));
+    }
+    if ip.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err(LauncherError::Internal(format!(
+            "container {name} returned non-IPv4 address {ip:?} on network {network}"
+        )));
+    }
+
+    Ok(ip)
 }
 
 pub fn teardown(

@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod config_broker;
+pub mod control_plane;
 pub mod exit_listener;
 pub mod ext_proc;
 pub mod launcher;
@@ -101,6 +102,12 @@ pub mod test_support {
 #[derive(Clone)]
 pub struct TransportState {
     pub container_name: String,
+    /// IPv4 address the spawned plugin container holds on the plugin
+    /// docker network. Captured at spawn time so the exit-listener path
+    /// can build a SessionRecord-shaped DELETE without re-inspecting
+    /// docker. Always populated (the launcher refuses to return 200
+    /// without an IP since 0.1.5).
+    pub container_ip: String,
     pub staging_token: String,
     pub tenant_name: String,
     pub namespace: String,
@@ -110,12 +117,19 @@ pub struct TransportState {
     pub upstream_auth: UpstreamAuth,
     pub upstream_authorization: Option<String>,
     pub agent_id: Option<String>,
+    /// Verbatim `egress:` block from the resolved PluginDescriptor.
+    /// Cached on the transport so the admin `/sessions` endpoint can
+    /// surface it for control-plane's cold-start recovery sync, and so
+    /// future routing decisions can consult it without going back to
+    /// config-broker.
+    pub egress_policy: Option<serde_json::Value>,
 }
 
 impl fmt::Debug for TransportState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TransportState")
             .field("container_name", &self.container_name)
+            .field("container_ip", &self.container_ip)
             .field("staging_token", &self.staging_token)
             .field("tenant_name", &self.tenant_name)
             .field("namespace", &self.namespace)
@@ -128,6 +142,7 @@ impl fmt::Debug for TransportState {
                 &self.upstream_authorization.as_deref().map(redact_token),
             )
             .field("agent_id", &self.agent_id)
+            .field("egress_policy", &self.egress_policy)
             .finish()
     }
 }
@@ -135,6 +150,11 @@ impl fmt::Debug for TransportState {
 #[derive(Clone)]
 pub struct PendingInit {
     pub container_name: String,
+    /// IPv4 address on the plugin network, returned by the launcher's
+    /// `/launch` response. Threaded through `PendingInit` so it's still
+    /// in hand at `response_headers` time when we install the
+    /// `TransportState`.
+    pub container_ip: String,
     pub staging_token: String,
     pub tenant_name: String,
     pub namespace: String,
@@ -148,6 +168,7 @@ impl fmt::Debug for PendingInit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PendingInit")
             .field("container_name", &self.container_name)
+            .field("container_ip", &self.container_ip)
             .field("staging_token", &self.staging_token)
             .field("tenant_name", &self.tenant_name)
             .field("namespace", &self.namespace)
@@ -171,6 +192,12 @@ pub struct AppState {
     pub auth_broker_url: String,
     /// Base URL for `botwork-config-broker` (`POST /resolve` is appended).
     pub config_broker_endpoint: String,
+    /// Base URL for `botwork-control-plane`. `POST /sessions` and
+    /// `DELETE /sessions/<id>` are appended. Set to the plugin-network
+    /// alias `http://control_plane:9300` in production; the test/unit
+    /// path injects a `127.0.0.1:0` URL pointing at a fake server.
+    /// See botwork #81 for the wire contract.
+    pub control_plane_endpoint: String,
     /// Tombstoned `Mcp-Session-Id` values: maps session-id → expiry `Instant`.
     /// Requests referencing a tombstoned id receive an immediate 404 without a
     /// transport-session lookup, preventing re-spawn races on stale clients.
@@ -223,6 +250,8 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "http://auth_broker:9100".to_string());
     let config_broker_endpoint = std::env::var("BOTWORK_CONFIG_BROKER_ENDPOINT")
         .unwrap_or_else(|_| "http://config_broker:9200".to_string());
+    let control_plane_endpoint = std::env::var("BOTWORK_CONTROL_PLANE_ENDPOINT")
+        .unwrap_or_else(|_| "http://control_plane:9300".to_string());
     let broker_socket_path = std::env::var("BOTWORK_BROKER_SOCKET_PATH")
         .unwrap_or_else(|_| "/run/botwork/broker.sock".to_string());
 
@@ -233,6 +262,7 @@ pub async fn run() -> Result<(), String> {
         launcher_socket_path,
         auth_broker_url,
         config_broker_endpoint,
+        control_plane_endpoint,
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -241,6 +271,10 @@ pub async fn run() -> Result<(), String> {
     log_info(&format!(
         "config-broker endpoint: {}",
         state.config_broker_endpoint
+    ));
+    log_info(&format!(
+        "control-plane endpoint: {}",
+        state.control_plane_endpoint
     ));
 
     ext_proc::seed_startup_liveness(&state).await;

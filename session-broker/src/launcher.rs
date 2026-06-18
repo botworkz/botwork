@@ -27,12 +27,20 @@ pub enum LauncherError {
     LaunchInvalidJson,
     #[error("timed out waiting for {host}:{port} to become ready")]
     ProbeTimeout { host: String, port: u16 },
+    /// Hard-gate denial: the spawned container reached probe-ready, but
+    /// control-plane refused (or failed) to record it. The container
+    /// has been torn down already; this variant exists so the
+    /// request-headers path can surface a distinct 503 to the client
+    /// rather than a generic 502.
+    #[error("control-plane denied session: {0}")]
+    ControlPlane(crate::control_plane::ControlPlaneError),
 }
 
 impl LauncherError {
     pub fn status_code(&self) -> u32 {
         match self {
             LauncherError::ProbeTimeout { .. } => 504,
+            LauncherError::ControlPlane(err) => err.status_code(),
             _ => 502,
         }
     }
@@ -85,6 +93,18 @@ pub async fn launcher_post(
     Ok((status, response_body))
 }
 
+/// Outcome of a successful `POST /launch` to the launcher socket.
+///
+/// `container_ip` is required since 0.1.5 -- the launcher refuses to
+/// return 200 without an IP, and the call site treats a missing IP as
+/// a launch failure. `raw` is the verbatim launcher response, kept so
+/// the spawn path's existing logging continues to surface unknown
+/// fields.
+pub struct LaunchOutcome {
+    pub container_ip: String,
+    pub raw: Value,
+}
+
 pub async fn launch_session(
     socket_path: &str,
     name: &str,
@@ -92,7 +112,7 @@ pub async fn launch_session(
     staging_path: &str,
     env: &[(String, String)],
     resources: &PluginResources,
-) -> Result<Value, LauncherError> {
+) -> Result<LaunchOutcome, LauncherError> {
     // network is intentionally not threaded from session-broker into the
     // launcher payload (post-0.1.4). The launcher resolves it from its own
     // BOTWORK_LAUNCHER_DEFAULT_NETWORK env, because "which docker network
@@ -148,7 +168,29 @@ pub async fn launch_session(
         return Err(LauncherError::LaunchHttp { status, detail });
     }
 
-    serde_json::from_slice(&body).map_err(|_| LauncherError::LaunchInvalidJson)
+    let raw: Value = serde_json::from_slice(&body).map_err(|_| LauncherError::LaunchInvalidJson)?;
+    let container_ip = raw
+        .get("container_ip")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            // 0.1.5 contract: the launcher always populates this. A
+            // missing field means we are pointing at a stale launcher
+            // (and would otherwise silently drop a session-without-IP
+            // on the floor at control-plane gate time).
+            LauncherError::LaunchHttp {
+                status: 200,
+                detail: "launcher response missing required 'container_ip' field".to_string(),
+            }
+        })?
+        .to_string();
+    if container_ip.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err(LauncherError::LaunchHttp {
+            status: 200,
+            detail: format!("launcher response has non-IPv4 'container_ip': {container_ip:?}"),
+        });
+    }
+
+    Ok(LaunchOutcome { container_ip, raw })
 }
 
 pub async fn call_bind_agent(
@@ -290,12 +332,15 @@ mod tests {
                 .nth(1)
                 .expect("request body")
                 .to_string();
-            let response = r#"HTTP/1.1 200 OK
-Content-Type: application/json
-Content-Length: 20
-Connection: close
-
-{"status":"started"}"#;
+            // 0.1.5 wire shape: launcher always populates `container_ip`.
+            // The fake response must include it; otherwise the new
+            // launch_session decoder rejects it as a stale launcher.
+            let body_json =
+                r#"{"name":"mcp_session_abc","status":"started","container_ip":"172.20.0.5"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\nContent-Type: application/json\nContent-Length: {}\nConnection: close\n\n{body_json}",
+                body_json.len()
+            );
             let response = response.replace('\n', "\r\n");
             stream
                 .write_all(response.as_bytes())

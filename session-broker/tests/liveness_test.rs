@@ -58,6 +58,7 @@ fn make_state_with_registry(registry: Arc<SessionRegistry>) -> AppState {
         launcher_socket_path: "/tmp/missing-launcher.sock".to_string(),
         auth_broker_url: "http://127.0.0.1:1".to_string(),
         config_broker_endpoint: "http://127.0.0.1:1".to_string(),
+        control_plane_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -74,6 +75,7 @@ async fn insert_transport(state: &AppState, mcp_session_id: &str, container: &st
         mcp_session_id.to_string(),
         TransportState {
             container_name: container.to_string(),
+            container_ip: "172.20.0.5".to_string(),
             staging_token: "aabbccdd".to_string(),
             tenant_name: "tenant1".to_string(),
             namespace: "mcp".to_string(),
@@ -83,6 +85,7 @@ async fn insert_transport(state: &AppState, mcp_session_id: &str, container: &st
             upstream_auth: UpstreamAuth::None,
             upstream_authorization: None,
             agent_id: None,
+            egress_policy: None,
         },
     );
 }

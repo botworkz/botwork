@@ -60,6 +60,7 @@ fn app_state_with_plugins_and_endpoints(
         launcher_socket_path,
         auth_broker_url,
         config_broker_endpoint,
+        control_plane_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -108,6 +109,7 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         launcher_socket_path,
         auth_broker_url: "http://127.0.0.1:1".to_string(),
         config_broker_endpoint: "http://127.0.0.1:1".to_string(),
+        control_plane_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -245,6 +247,7 @@ fn sample_transport_with_namespace_and_path(
 ) -> TransportState {
     TransportState {
         container_name: container.to_string(),
+        container_ip: "172.20.0.5".to_string(),
         staging_token: "abcdef".to_string(),
         tenant_name: tenant.to_string(),
         namespace: namespace.to_string(),
@@ -254,6 +257,7 @@ fn sample_transport_with_namespace_and_path(
         upstream_auth: UpstreamAuth::None,
         upstream_authorization: None,
         agent_id: None,
+        egress_policy: None,
     }
 }
 
@@ -284,6 +288,7 @@ fn sample_plugin_config_with_path_and_auth(
 fn sample_pending(tenant: &str, plugin: &str, container: &str) -> PendingInit {
     PendingInit {
         container_name: container.to_string(),
+        container_ip: "172.20.0.5".to_string(),
         staging_token: "abcdef".to_string(),
         tenant_name: tenant.to_string(),
         namespace: "mcp".to_string(),
@@ -1991,6 +1996,7 @@ fn app_state_with_session_registry(
         launcher_socket_path,
         auth_broker_url: "http://127.0.0.1:1".to_string(),
         config_broker_endpoint: "http://127.0.0.1:1".to_string(),
+        control_plane_endpoint: "http://127.0.0.1:1".to_string(),
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),

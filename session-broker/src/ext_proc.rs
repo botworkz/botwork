@@ -22,6 +22,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::config_broker::{self, EnvEntry, PluginDescriptor, UpstreamAuth, CONFIG_ENV_NAME};
+use crate::control_plane::{self, PostSessionRequest};
 use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_ready, LauncherError};
 use crate::secrets;
 use crate::session_registry::{is_container_running, utc_now};
@@ -767,7 +768,7 @@ async fn spawn_new_container(
     let container_name = format!("mcp_session_{token}");
     let staging_path = staging_path(tenant_name, &token);
     let start = Instant::now();
-    let launch_result = launch_session(
+    let launch_outcome = launch_session(
         &state.launcher_socket_path,
         &container_name,
         &descriptor.image,
@@ -776,7 +777,8 @@ async fn spawn_new_container(
         &descriptor.resources,
     )
     .await?;
-    if let Ok(serialized) = serde_json::to_string(&launch_result) {
+    let container_ip = launch_outcome.container_ip.clone();
+    if let Ok(serialized) = serde_json::to_string(&launch_outcome.raw) {
         log_info(&format!("launcher response: {serialized}"));
     }
     let elapsed = start.elapsed();
@@ -790,17 +792,49 @@ async fn spawn_new_container(
         )
         .await
     {
+        // Container is up but not listening. Tear down and surface
+        // probe-timeout; control-plane is never told about it.
+        teardown_unannounced_container(state, &container_name, &staging_path).await;
         return Err(LauncherError::ProbeTimeout {
             host: container_name,
             port: descriptor.port,
         });
     }
+
+    // Hard gate: control-plane MUST 2xx the POST before this container
+    // is allowed to serve traffic. Anything else (4xx, 5xx, transport
+    // failure, timeout) tears the container down and surfaces a 503 to
+    // the client. This is the load-bearing property the whole control-
+    // plane design is built on (botwork #81): no plugin container ever
+    // sees a single byte of client data without being announced.
+    let post_request = PostSessionRequest {
+        session_id: &container_name,
+        container_ip: &container_ip,
+        tenant: tenant_name,
+        namespace,
+        plugin: plugin_name,
+        egress_policy: &descriptor.egress,
+    };
+    if let Err(err) = control_plane::post_session(
+        &state.control_plane_endpoint,
+        &post_request,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    {
+        log_info(&format!(
+            "control-plane gate failed for {container_name}: {err}; tearing down"
+        ));
+        teardown_unannounced_container(state, &container_name, &staging_path).await;
+        return Err(LauncherError::ControlPlane(err));
+    }
+
     log_info(&format!(
-        "spawned container {} (plugin={} client={})",
-        container_name, plugin_name, client_addr
+        "spawned container {container_name} ip={container_ip} (plugin={plugin_name} client={client_addr})"
     ));
     Ok(PendingInit {
         container_name,
+        container_ip,
         staging_token: token,
         tenant_name: tenant_name.to_string(),
         namespace: namespace.to_string(),
@@ -809,6 +843,25 @@ async fn spawn_new_container(
         upstream_authorization,
         created_at: utc_now(),
     })
+}
+
+/// Best-effort teardown of a container that was spawned but never made
+/// it past the control-plane gate (or that timed out on probe_ready).
+/// Fire-and-forget on the launcher side; we do not wait. The launcher's
+/// docker-events watcher will fire the exit-listener handler on the
+/// actual container exit, but at that point there is no transport
+/// session to drop, so the cleanup is staging-mount-only.
+async fn teardown_unannounced_container(
+    state: &AppState,
+    container_name: &str,
+    staging_path: &str,
+) {
+    let launcher_path = state.launcher_socket_path.clone();
+    let container = container_name.to_string();
+    let staging = staging_path.to_string();
+    tokio::spawn(async move {
+        call_teardown(&launcher_path, &container, &staging).await;
+    });
 }
 
 #[derive(Clone)]
@@ -1512,6 +1565,7 @@ impl ExternalProcessorService {
                 mcp_session_id.clone(),
                 TransportState {
                     container_name: pending.container_name.clone(),
+                    container_ip: pending.container_ip.clone(),
                     staging_token: pending.staging_token.clone(),
                     tenant_name: pending.tenant_name.clone(),
                     namespace: pending.namespace.clone(),
@@ -1521,6 +1575,7 @@ impl ExternalProcessorService {
                     upstream_auth: pending.descriptor.upstream_auth.clone(),
                     upstream_authorization: pending.upstream_authorization.clone(),
                     agent_id: None,
+                    egress_policy: pending.descriptor.egress.clone(),
                 },
             );
         }
@@ -1654,6 +1709,7 @@ mod tests {
             launcher_socket_path: "/tmp/ext-proc-unit-launcher.sock".to_string(),
             auth_broker_url: "http://127.0.0.1:1".to_string(),
             config_broker_endpoint: "http://127.0.0.1:1".to_string(),
+            control_plane_endpoint: "http://127.0.0.1:1".to_string(),
             tombstones: Arc::new(Mutex::new(HashMap::new())),
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_liveness: Arc::new(Mutex::new(HashMap::new())),
@@ -2005,6 +2061,7 @@ mod tests {
         let _guard = log_capture_guard();
         let base_transport = TransportState {
             container_name: "mcp_session_123".to_string(),
+            container_ip: "172.20.0.5".to_string(),
             staging_token: "stage".to_string(),
             tenant_name: "tenant1".to_string(),
             namespace: "mcp".to_string(),
@@ -2016,6 +2073,7 @@ mod tests {
             },
             upstream_authorization: Some("ghp_SECRET".to_string()),
             agent_id: None,
+            egress_policy: None,
         };
         // Routing reads upstream_auth straight off TransportState; the
         // AppState argument is unused on the routing-of-known-sessions path
