@@ -29,15 +29,62 @@ session-broker and (future) the egress envoy's xDS subscription.
 
 - **No xDS server.** That's the next PR; this one is the agreed
   in-memory shape it will consume.
-- **No persistence.** State is in-memory; cold-start is empty. PR B
-  adds a recovery-sync where control-plane polls session-broker's
-  `/sessions` admin endpoint on startup to rebuild.
+- **No persistence.** State is in-memory. Cold-start rebuilds the
+  store by polling session-broker's `GET /control-plane/sessions`
+  admin endpoint (see [Cold-start recovery](#cold-start-recovery)
+  below); there is no on-disk snapshot.
 - **No caller authentication.** Network membership is the access
   control. The deployment **must not** publish control-plane's port to
   the host (no `-p`/`--publish`).
 - **No egress-policy schema enforcement.** The value is stored as
   opaque JSON. config-broker is the source of truth for the schema;
   control-plane is a fan-out, not a validator.
+
+## Cold-start recovery
+
+control-plane's `SessionStore` is in-memory: on every restart it
+starts empty. If left alone, that breaks the (future) xDS feeder
+the next time control-plane restarts mid-deployment -- SOTW xDS
+treats "absent from snapshot" as "removed", so the egress envoy
+would silently tear down every live route until each container
+exited and a fresh spawn re-registered.
+
+To avoid that, control-plane polls session-broker's
+`GET /control-plane/sessions` admin endpoint on startup and bulk-
+seeds the store before binding its own HTTP listener. session-broker
+is the source of truth for the live transport set (it owns
+`mcp_session_*` containers), so this is a one-way rebuild against
+the authoritative state.
+
+**Failure semantics (load-bearing):**
+
+| session-broker returns | Behaviour                                                                                  |
+|------------------------|--------------------------------------------------------------------------------------------|
+| `200 { sessions: [] }` | Legitimate cold start with no live sessions. Store stays empty; control-plane binds.       |
+| `200 { sessions: [N] }`| Recovered N sessions; store populated; control-plane binds.                                |
+| transport / non-2xx / bad envelope / bad record | Live state is unknown. Retry up to 30 × 5s, then **exit non-zero**. systemd's `Restart=always` keeps retrying. |
+
+The "refuse to start on uncertainty" posture is deliberate. An empty
+store is a *correct* recovery outcome only when session-broker
+*tells us* it's empty; an empty store reached by guessing is a
+silent break of the xDS feeder. session-broker's own in-process
+hard gate (#82) means a control-plane that is mid-recovery produces
+503s on *new* spawns but does not break the running ones, so the
+"refuse-to-start until session-broker is reachable" loop is bounded
+and observable.
+
+The recovery loop can be disabled via
+`BOTWORK_CONTROL_PLANE_DISABLE_RECOVERY=1` for break-glass scenarios
+where session-broker is unrecoverable. **This is not a supported
+production posture** — setting it is an explicit decision to start
+with an unknown live state.
+
+**Sequencing.** Recovery requires session-broker to be reachable.
+The supported systemd order is `After=botwork-session-broker.service`
+on the control-plane unit, with `Wants=` (not `Requires=`) in either
+direction: a hard mutual dependency deadlocks on first boot. The
+in-process gate is what actually enforces the security property; the
+systemd order is just sequencing convenience.
 
 ## Endpoints
 
@@ -144,6 +191,17 @@ request.
   `control_plane` alias, and its port is **never** published to the
   host. The docker network is the trust boundary, not the bind
   address. **Do not** add a port publish for this service.
+- `BOTWORK_SESSION_BROKER_ENDPOINT` (default:
+  `http://session_broker:9002`) — session-broker's admin server,
+  polled at startup for cold-start recovery. The default targets the
+  alias session-broker registers on `botwork-internal`. Override when
+  running control-plane out of the canonical docker network (e.g.
+  local iteration against a loopback session-broker).
+- `BOTWORK_CONTROL_PLANE_DISABLE_RECOVERY` — when set to `1`/`true`/
+  `yes`, skip the cold-start recovery sync and start with an empty
+  store. Break-glass only; see [Cold-start
+  recovery](#cold-start-recovery) above for why this is not a
+  supported posture.
 - `RUST_LOG` — standard `tracing-subscriber` filter; defaults to
   `info`.
 
