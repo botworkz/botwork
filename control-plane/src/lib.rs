@@ -7,6 +7,11 @@
 //!   sessions exist right now and what policy applies to each."
 //! * `handler` — axum router exposing `POST /sessions`,
 //!   `DELETE /sessions/<id>`, `GET /sessions/<id>`, `GET /sessions`.
+//! * `session_broker` + `recovery` — cold-start recovery sync. Polls
+//!   session-broker's `GET /control-plane/sessions` admin endpoint on
+//!   startup and bulk-seeds the store so an empty in-memory state
+//!   after a control-plane restart does not silently drop live
+//!   sessions from the (future) xDS feeder's view.
 //!
 //! Out of scope for this crate's v0:
 //!
@@ -14,9 +19,8 @@
 //!   resources. Lands in a follow-up PR once the resource-type and tonic
 //!   spikes are done (see botworkz/vm#84). Until then the store exists as
 //!   the agreed shape for that consumer.
-//! * Persistence. State is in-memory; control-plane rebuilds on restart by
-//!   polling session-broker's `/sessions` admin endpoint (which becomes
-//!   the source of truth for the runtime view in PR B).
+//! * Persistence. State is in-memory; control-plane rebuilds on
+//!   startup via recovery sync (see `recovery`).
 //! * Caller authentication. The trust boundary is the docker network
 //!   (`botwork-internal`), same posture as config-broker and auth-broker.
 //!
@@ -24,18 +28,21 @@
 //! full design.
 
 pub mod handler;
+pub mod recovery;
+pub mod session_broker;
 pub mod sessions;
 
 use std::sync::Arc;
 
 pub use handler::{build_router, AppState};
+pub use recovery::run_with_retries as run_recovery_with_retries;
+pub use session_broker::{fetch_sessions, SessionBrokerError};
 pub use sessions::{SessionRecord, SessionStore, StoreError};
 
 /// Build an `AppState` with an empty in-memory session store.
 ///
-/// Production callers always start from empty: cold-start recovery is the
-/// responsibility of a follow-up subscriber to session-broker's
-/// `GET /sessions`, not of this crate.
+/// Production callers populate it via `recovery::run_with_retries`
+/// before binding the HTTP server; tests typically use it as-is.
 pub fn build_app_state() -> AppState {
     AppState {
         sessions: Arc::new(SessionStore::new()),
