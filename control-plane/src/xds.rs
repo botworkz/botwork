@@ -136,15 +136,32 @@ impl AggregatedDiscoveryService for AdsServer {
         let sessions = self.sessions.clone();
         let mut inbound = request.into_inner();
 
-        // Hold a guard for the lifetime of this stream. The HTTP gate
-        // (POST /sessions wait_for_ack) reads
-        // SessionStore::xds_subscriber_count() to decide whether to
-        // block at all; while this guard is alive, that count is >=1.
-        let _subscriber = sessions.xds_subscriber_guard();
-
         let mut cluster_version_pushed = false;
 
+        // Acquire the subscriber guard and MOVE it into the
+        // try_stream block. The guard's Drop is what decrements the
+        // subscriber counter; if we bound it to a let-binding in the
+        // outer function it would be dropped here, before the
+        // try_stream! body runs, and the count would be 0 by the
+        // time envoy's first DiscoveryRequest landed.
+        //
+        // This was the cause of "no_xds_subscriber" 503s on every
+        // POST /sessions in CI even though the ADS stream itself
+        // was working fine: the egress envoy was connected and
+        // ACKing, but the counter never had a chance to be >=1
+        // because the guard had already been dropped.
+        //
+        // Moving it into the `move` block keeps it alive for the
+        // life of the future driving the stream -- which is
+        // exactly the life of the gRPC stream as a whole.
+        let subscriber_guard = sessions.xds_subscriber_guard();
+
         let output = try_stream! {
+            // `subscriber_guard` is captured by the move; explicitly
+            // bind it with `let _` so its lifetime is the full body
+            // and an unused-variable lint doesn't get clever and
+            // drop it early.
+            let _subscriber = subscriber_guard;
             let mut gen_rx = sessions.subscribe_generation();
             let mut nonce_counter: u64 = 0;
             let mut next_nonce = || {
