@@ -4,21 +4,26 @@
 //!
 //! * `sessions` — in-memory `SessionRecord` store with strict upsert/delete
 //!   semantics. The store is the authoritative runtime view of "which plugin
-//!   sessions exist right now and what policy applies to each."
+//!   sessions exist right now and what policy applies to each." A
+//!   `tokio::sync::watch::Sender<u64>` generation counter wakes the xDS
+//!   server on every mutation so subscribers reconcile against a fresh
+//!   snapshot.
 //! * `handler` — axum router exposing `POST /sessions`,
 //!   `DELETE /sessions/<id>`, `GET /sessions/<id>`, `GET /sessions`.
 //! * `session_broker` + `recovery` — cold-start recovery sync. Polls
 //!   session-broker's `GET /control-plane/sessions` admin endpoint on
 //!   startup and bulk-seeds the store so an empty in-memory state
 //!   after a control-plane restart does not silently drop live
-//!   sessions from the (future) xDS feeder's view.
+//!   sessions from the xDS feeder's view.
+//! * `policy` — pure compilation of `SessionRecord` snapshots into
+//!   envoy LDS / CDS resource protos. No IO; called from the xDS
+//!   server on every push.
+//! * `xds` — tonic `AggregatedDiscoveryService` impl. Serves a single
+//!   ADS stream per envoy connection; pushes a fresh LDS resource
+//!   on every generation bump.
 //!
 //! Out of scope for this crate's v0:
 //!
-//! * The xDS server that turns `SessionStore` into push-shaped envoy
-//!   resources. Lands in a follow-up PR once the resource-type and tonic
-//!   spikes are done (see botworkz/vm#84). Until then the store exists as
-//!   the agreed shape for that consumer.
 //! * Persistence. State is in-memory; control-plane rebuilds on
 //!   startup via recovery sync (see `recovery`).
 //! * Caller authentication. The trust boundary is the docker network
@@ -28,9 +33,11 @@
 //! full design.
 
 pub mod handler;
+pub mod policy;
 pub mod recovery;
 pub mod session_broker;
 pub mod sessions;
+pub mod xds;
 
 use std::sync::Arc;
 
@@ -38,6 +45,7 @@ pub use handler::{build_router, AppState};
 pub use recovery::run_with_retries as run_recovery_with_retries;
 pub use session_broker::{fetch_sessions, SessionBrokerError};
 pub use sessions::{SessionRecord, SessionStore, StoreError};
+pub use xds::AdsServer;
 
 /// Build an `AppState` with an empty in-memory session store.
 ///

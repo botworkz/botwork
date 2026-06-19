@@ -2,11 +2,18 @@
 
 `botwork-control-plane` owns the runtime view of every live plugin session
 in a botwork deployment, and fans that view out to consumers that need it
-in a push-shaped way. v0 ships the **session store and HTTP intake/read
-surface only**: session-broker `POST`s on spawn, `DELETE`s on container
-exit, and either side can `GET` for a recovery sync. The xDS server that
-turns the stored view into envoy resources lands in a follow-up PR (see
-[issue #81](https://github.com/botworkz/botwork/issues/81)).
+in a push-shaped way. It ships two transports against the same
+`Arc<SessionStore>`:
+
+* **HTTP intake/read surface** on `:9300`. session-broker `POST`s on
+  spawn, `DELETE`s on container exit, and either side can `GET` for a
+  recovery sync.
+* **xDS gRPC** on `:9301`. envoy's egress proxy subscribes via ADS
+  (Aggregated Discovery Service); control-plane pushes a fresh LDS
+  resource every time the session store mutates. The DFP cluster is
+  static and pushed exactly once per stream. See
+  [issue #81](https://github.com/botworkz/botwork/issues/81) for the
+  full design.
 
 There is intentionally no caller authentication yet — same posture as
 config-broker and auth-broker. The trust boundary is the docker network:
@@ -27,18 +34,18 @@ session-broker and (future) the egress envoy's xDS subscription.
 
 ## What it does NOT do (v0)
 
-- **No xDS server.** That's the next PR; this one is the agreed
-  in-memory shape it will consume.
 - **No persistence.** State is in-memory. Cold-start rebuilds the
   store by polling session-broker's `GET /control-plane/sessions`
   admin endpoint (see [Cold-start recovery](#cold-start-recovery)
   below); there is no on-disk snapshot.
 - **No caller authentication.** Network membership is the access
-  control. The deployment **must not** publish control-plane's port to
-  the host (no `-p`/`--publish`).
+  control. The deployment **must not** publish control-plane's HTTP
+  or xDS port to the host (no `-p`/`--publish`).
 - **No egress-policy schema enforcement.** The value is stored as
-  opaque JSON. config-broker is the source of truth for the schema;
-  control-plane is a fan-out, not a validator.
+  opaque JSON. config-broker is the source of truth for the schema
+  (botwork #88 enforces three forms: `all` / `none` / `{allow: [...]}`).
+  control-plane parses the verbatim value at xDS compile time and
+  fails closed on anything it can't recognise.
 
 ## Cold-start recovery
 
@@ -99,9 +106,21 @@ Request body (JSON):
   "tenant":        "phlax",
   "namespace":     "mcp",
   "plugin":        "fetch",
-  "egress_policy": { "allow_hosts": ["github.com"] }
+  "egress_policy": { "allow": [{"host": "github.com", "ports": [443]}] }
 }
 ```
+
+The three permitted top-level shapes for `egress_policy` (enforced
+upstream by config-broker, parsed here by `policy::permissions_for_egress`):
+
+* `"all"` — unrestricted egress.
+* `"none"` — no policy emitted; envoy default-no-match denies.
+* `{ "allow": [ {"host": "...", "ports": [443, ...]}, ... ] }` — exact
+  `:authority` allowlist.
+
+Anything else is **fail-closed**: no policy gets emitted for the
+session, and the egress envoy denies its traffic. This matches the
+hard-gate posture upstream (session-broker treats a bad ack as 503).
 
 - `session_id` must match `^mcp_session_[a-z0-9]+$` (the shape
   session-broker constructs in `ext_proc.rs`).
@@ -110,8 +129,11 @@ Request body (JSON):
   a schema change.
 - `tenant`, `namespace`, `plugin` must each match
   `^[a-z][a-z0-9-]{0,30}$` — same rule as config-broker.
-- `egress_policy` is optional; missing or `null` means "no policy /
-  default-open." It is stored verbatim.
+- `egress_policy` is optional on the wire; missing or `null` is
+  stored verbatim and treated by the xDS compiler as fail-closed
+  (no policy emitted → ALLOW + no match = denied). In practice
+  every wire-side caller (session-broker) is supposed to set it,
+  because config-broker's resolve always carries the field.
 
 Success response (201):
 
@@ -185,12 +207,18 @@ request.
 
 ## Environment variables
 
-- `BOTWORK_CONTROL_PLANE_BIND` (default: `0.0.0.0:9300`) — bind
-  address. The default is intentional: in the supported deployment,
-  control-plane runs on the `botwork-internal` docker network with the
-  `control_plane` alias, and its port is **never** published to the
-  host. The docker network is the trust boundary, not the bind
-  address. **Do not** add a port publish for this service.
+- `BOTWORK_CONTROL_PLANE_BIND` (default: `0.0.0.0:9300`) — HTTP bind
+  address (session intake/read surface). The default is intentional:
+  in the supported deployment, control-plane runs on the
+  `botwork-internal` docker network with the `control_plane` alias,
+  and its port is **never** published to the host. The docker network
+  is the trust boundary, not the bind address. **Do not** add a port
+  publish for this service.
+- `BOTWORK_CONTROL_PLANE_XDS_BIND` (default: `0.0.0.0:9301`) — xDS
+  gRPC bind address. envoy's ADS subscription connects here. Same
+  trust boundary as the HTTP port; separate listener because tonic h2
+  and axum h1 are different protocol stacks. The egress envoy
+  bootstrap pins this endpoint by alias (`control_plane:9301`).
 - `BOTWORK_SESSION_BROKER_ENDPOINT` (default:
   `http://session_broker:9002`) — session-broker's admin server,
   polled at startup for cold-start recovery. The default targets the
@@ -205,6 +233,44 @@ request.
 - `RUST_LOG` — standard `tracing-subscriber` filter; defaults to
   `info`.
 
+## xDS gRPC
+
+control-plane exposes the envoy [Aggregated Discovery Service
+(ADS)](https://www.envoyproxy.io/docs/envoy/latest/api-docs/xds_protocol)
+on `:9301`. The egress envoy opens one bidi stream
+(`StreamAggregatedResources`); over that stream control-plane serves
+two resource types:
+
+| Resource                                                              | Push trigger                                                                                       |
+|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
+| `Listener` (`type.googleapis.com/envoy.config.listener.v3.Listener`)  | On initial subscribe **and** every time the session store mutates (insert / remove / bulk_seed).   |
+| `Cluster` (`type.googleapis.com/envoy.config.cluster.v3.Cluster`)     | Once per stream. The dynamic_forward_proxy cluster is static; re-subscribes are silently ignored.  |
+
+The compiled listener carries:
+
+* One HCM with `CodecType::Http1` + a `CONNECT` upgrade entry (so
+  envoy doesn't 400 the CONNECT before RBAC runs).
+* RBAC filter (`action: ALLOW`) with one policy per session, keyed
+  by `direct_remote_ip(container_ip)`. `egress: all` → permission
+  `any: true`; `egress: {allow: [...]}` → one `:authority` exact
+  match per host:port; `egress: none` → no policy emitted (denied
+  by ALLOW + no match).
+* dynamic_forward_proxy HTTP filter pointed at the
+  `dynamic_forward_proxy_cache_config` DNS cache.
+* router filter (terminal).
+
+Filter order is **rbac → dfp → router** so denied CONNECTs are
+short-circuited before envoy bothers resolving DNS for them.
+
+SOTW only. `DeltaAggregatedResources` returns `unimplemented` to
+force envoy back to the SOTW endpoint our bootstrap pins; never set
+`ApiType::DeltaGrpc`.
+
+NACKs (a `DiscoveryRequest` carrying `error_detail`) are logged and
+held at the last-good version. envoy keeps the previous accepted
+config. The next mutation triggers another push; we don't retry on
+the NACK itself.
+
 ## Wire example
 
 ```
@@ -212,7 +278,7 @@ POST /sessions HTTP/1.1
 Host: control_plane:9300
 Content-Type: application/json
 
-{"session_id":"mcp_session_abc","container_ip":"172.20.0.5","tenant":"phlax","namespace":"mcp","plugin":"fetch","egress_policy":{"allow_hosts":["github.com"]}}
+{"session_id":"mcp_session_abc","container_ip":"172.20.0.5","tenant":"phlax","namespace":"mcp","plugin":"fetch","egress_policy":{"allow":[{"host":"github.com","ports":[443]}]}}
 ```
 
 Success response:
