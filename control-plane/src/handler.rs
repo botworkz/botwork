@@ -25,6 +25,7 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -35,7 +36,33 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::sessions::{SessionRecord, SessionStore, StoreError};
+use crate::sessions::{AckWaitError, SessionRecord, SessionStore, StoreError};
+
+/// How long `POST /sessions` / `DELETE /sessions/<id>` will block
+/// waiting for envoy to ACK the resulting LDS push before returning
+/// 503.
+///
+/// 5s is generous against the envoy hot path: ADS pushes typically
+/// ACK in <100ms, and even a freshly-bootstrapping envoy completes
+/// its first listener load in <1s in our setup. 5s gives us plenty
+/// of headroom for the "envoy is briefly paused / mid-config-load /
+/// has a slow protobuf decode" case without blocking spawns
+/// indefinitely.
+///
+/// Configurable via `BOTWORK_CONTROL_PLANE_ACK_WAIT_MS` (e.g. shorter
+/// in CI smoke tests for faster failure surfaces, longer if a future
+/// deployment puts more between envoy and control-plane).
+pub const DEFAULT_ACK_WAIT: Duration = Duration::from_secs(5);
+
+/// Global escape hatch matching the
+/// `BOTWORK_CONTROL_PLANE_DISABLE_RECOVERY` shape from #87. When set
+/// truthy, mutation handlers do NOT wait for the xDS ACK before
+/// returning 201/200; they revert to the pre-#92 behaviour of
+/// "stored in our table, hopefully envoy catches up." Intended for
+/// break-glass scenarios where envoy is unrecoverable and the
+/// operator needs spawns to proceed regardless; explicitly not a
+/// supported posture.
+pub const ACK_DISABLED_ENV: &str = "BOTWORK_CONTROL_PLANE_DISABLE_ACK_WAIT";
 
 const PREFIX: &str = "[control-plane]";
 
@@ -65,6 +92,29 @@ fn name_re() -> &'static Regex {
 #[derive(Clone)]
 pub struct AppState {
     pub sessions: Arc<SessionStore>,
+    /// Per-request budget for waiting on the egress envoy to ACK a
+    /// fresh Listener push after a successful mutation. Owned by
+    /// AppState (rather than read from env on every request) so:
+    ///   * tests can plug a short value without touching globals,
+    ///   * the binary reads env exactly once at startup, in `main.rs`.
+    pub ack_wait: Duration,
+    /// `true` flips the synchronous ack gate off — mutations return
+    /// success without waiting for envoy. Operator break-glass only.
+    /// See `ACK_DISABLED_ENV`.
+    pub ack_disabled: bool,
+}
+
+impl AppState {
+    /// Construct an AppState with the default ack-wait budget and the
+    /// gate enabled. Tests and `main.rs` use the struct-literal form
+    /// directly when they need to override; this is the convenience.
+    pub fn new(sessions: Arc<SessionStore>) -> Self {
+        Self {
+            sessions,
+            ack_wait: DEFAULT_ACK_WAIT,
+            ack_disabled: false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -228,7 +278,22 @@ async fn post_session(State(state): State<AppState>, body: Option<Json<PostBody>
 
     match state.sessions.insert(record).await {
         Ok(()) => {
-            info!("{PREFIX} post: ok session_id={session_id} plugin={plugin} ip={container_ip}");
+            // Capture the generation the insert just produced. xDS
+            // ships this as `version_info`, envoy ACKs it back, and
+            // `wait_for_ack` blocks on that ACK. See sessions.rs
+            // module docs.
+            let target_version = state.sessions.current_generation();
+            if let Err(err) = wait_for_xds_ack(&state, target_version, "post", &session_id).await {
+                // The store mutation succeeded but envoy hasn't
+                // confirmed. Roll back so the store reflects what
+                // envoy actually has, and 503 so session-broker
+                // tears the spawned container down.
+                rollback_after_ack_failure(&state, &session_id, "post").await;
+                return err;
+            }
+            info!(
+                "{PREFIX} post: ok session_id={session_id} plugin={plugin} ip={container_ip} version={target_version}"
+            );
             (
                 StatusCode::CREATED,
                 Json(AckBody {
@@ -267,8 +332,28 @@ async fn delete_session(State(state): State<AppState>, Path(id): Path<String>) -
 
     match state.sessions.remove(&id).await {
         Ok(record) => {
+            // Capture the post-delete generation and wait for envoy
+            // to ACK the smaller Listener. Symmetry with POST: a
+            // session whose policy is `egress: none` may have an
+            // active SSRF-style request mid-flight that the deletion
+            // is meant to terminate; returning 200 before the deny
+            // is live in envoy would leak that request through.
+            let target_version = state.sessions.current_generation();
+            if let Err(err) = wait_for_xds_ack(&state, target_version, "delete", &id).await {
+                // Re-insert the record so the store reflects what
+                // envoy still has. This is best-effort: a concurrent
+                // POST with the same id will lose its race here, but
+                // the alternative (silently letting the store and
+                // envoy diverge) is strictly worse.
+                if let Err(reinsert_err) = state.sessions.insert(record.clone()).await {
+                    warn!(
+                        "{PREFIX} delete: ack failed AND rollback re-insert failed for session_id={id}: {reinsert_err}; store now diverged from envoy"
+                    );
+                }
+                return err;
+            }
             info!(
-                "{PREFIX} delete: ok session_id={id} plugin={} ip={}",
+                "{PREFIX} delete: ok session_id={id} plugin={} ip={} version={target_version}",
                 record.plugin, record.container_ip
             );
             (
@@ -320,6 +405,80 @@ async fn list_sessions(State(state): State<AppState>) -> Response {
     (StatusCode::OK, Json(ListBody { sessions })).into_response()
 }
 
+/// Block on the xDS ACK for the given target version. Returns either
+/// `Ok(())` (envoy ACKed in time) or a fully-formed 503 `Response`
+/// the handler can return verbatim. The body of the 503 names the
+/// machine-readable reason (`no_xds_subscriber` vs `xds_ack_timeout`)
+/// so session-broker / log consumers can distinguish a control-plane
+/// not yet wired to envoy from one that is wired but slow.
+async fn wait_for_xds_ack(
+    state: &AppState,
+    target_version: u64,
+    op: &str,
+    session_id: &str,
+) -> Result<(), Response> {
+    if state.ack_disabled {
+        // Break-glass: gate is off, return success without waiting.
+        // Logged at info so an operator who set this flag has a
+        // greppable record of "we're running unsynced."
+        info!(
+            "{PREFIX} {op}: ack-gate disabled (BOTWORK_CONTROL_PLANE_DISABLE_ACK_WAIT=1) -- skipping wait for session_id={session_id}"
+        );
+        return Ok(());
+    }
+    match state
+        .sessions
+        .wait_for_ack(target_version, state.ack_wait)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(AckWaitError::NoSubscriber) => {
+            warn!(
+                "{PREFIX} {op}: no xDS subscriber for session_id={session_id} (target_version={target_version})"
+            );
+            Err(error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no_xds_subscriber",
+                format!(
+                    "no egress envoy is currently subscribed to control-plane xDS; refusing to ack session_id '{session_id}'"
+                ),
+            ))
+        }
+        Err(AckWaitError::Timeout(version)) => {
+            warn!(
+                "{PREFIX} {op}: xDS ack timeout for session_id={session_id} version={version} after {:?}",
+                state.ack_wait
+            );
+            Err(error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "xds_ack_timeout",
+                format!(
+                    "egress envoy did not ACK xDS version {version} within {:?}; refusing to ack session_id '{session_id}'",
+                    state.ack_wait
+                ),
+            ))
+        }
+    }
+}
+
+/// After a successful insert that subsequently failed its xDS ack,
+/// roll the store back so it reflects what envoy actually has. Logs
+/// (but does not surface) a removal failure — the original 503 has
+/// already been built; we just want to make best-effort sure the
+/// store doesn't carry a record envoy never agreed to.
+async fn rollback_after_ack_failure(state: &AppState, session_id: &str, op: &str) {
+    match state.sessions.remove(session_id).await {
+        Ok(_) => {
+            info!("{PREFIX} {op}: rolled back session_id={session_id} after xDS ack failure");
+        }
+        Err(err) => {
+            warn!(
+                "{PREFIX} {op}: rollback of session_id={session_id} after xDS ack failure ALSO failed: {err}; store now diverged from envoy"
+            );
+        }
+    }
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/sessions", post(post_session).get(list_sessions))
@@ -334,9 +493,30 @@ pub fn build_router(state: AppState) -> Router {
 mod tests {
     use super::*;
 
+    /// State for the existing handler tests. Disables the ack gate so
+    /// tests don't have to spin up an xDS stub: the focus of these
+    /// tests is the HTTP shape (validation, status codes, error
+    /// envelope), not the ack-blocking behaviour. The ack-blocking
+    /// behaviour has its own dedicated tests further down.
     fn empty_state() -> AppState {
         AppState {
             sessions: Arc::new(SessionStore::new()),
+            ack_wait: DEFAULT_ACK_WAIT,
+            ack_disabled: true,
+        }
+    }
+
+    /// State for the ack-gate tests. Short ack_wait so the timeout
+    /// path completes in <200ms.
+    fn ack_state_with(
+        sessions: Arc<SessionStore>,
+        ack_wait: Duration,
+        ack_disabled: bool,
+    ) -> AppState {
+        AppState {
+            sessions,
+            ack_wait,
+            ack_disabled,
         }
     }
 
@@ -551,5 +731,121 @@ mod tests {
             .map(|s| s["session_id"].as_str().expect("session_id"))
             .collect();
         assert_eq!(ids, vec!["mcp_session_a", "mcp_session_b", "mcp_session_c"]);
+    }
+
+    // ── ack-gate tests ────────────────────────────────────────────────
+    // All the above tests run with `ack_disabled: true` to isolate the
+    // HTTP wire shape from the ack-blocking behaviour. These tests
+    // explicitly turn the gate on (and arrange the SessionStore's xDS
+    // subscriber / ack channel by hand) to exercise the three paths:
+    //   1. no subscriber → 503 no_xds_subscriber + store rolled back
+    //   2. subscriber but no ack in time → 503 xds_ack_timeout + rollback
+    //   3. subscriber + ack → 201
+    //
+    // We don't spin up the full tonic AdsServer here -- those tests
+    // live in tests/xds_test.rs. Here we just push the SessionStore's
+    // ack channel directly to simulate "envoy ACKed."
+
+    #[tokio::test]
+    async fn post_with_ack_gate_returns_503_when_no_xds_subscriber() {
+        let sessions = Arc::new(SessionStore::new());
+        let state = ack_state_with(sessions.clone(), Duration::from_millis(100), false);
+        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        let (status, body) = body_status(response).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "no_xds_subscriber");
+        // Rollback: the store does not retain the record envoy never
+        // saw, so a session-broker retry sees a clean slate.
+        assert!(sessions.get("mcp_session_abc").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn post_with_ack_gate_returns_503_on_timeout() {
+        let sessions = Arc::new(SessionStore::new());
+        // Hold a subscriber guard so wait_for_ack actually waits
+        // (rather than short-circuiting to NoSubscriber).
+        let _guard = sessions.xds_subscriber_guard();
+        let state = ack_state_with(sessions.clone(), Duration::from_millis(75), false);
+        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        let (status, body) = body_status(response).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "xds_ack_timeout");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("xDS version"),
+            "message names the version: {body}"
+        );
+        assert!(sessions.get("mcp_session_abc").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn post_with_ack_gate_returns_201_when_envoy_acks_in_time() {
+        let sessions = Arc::new(SessionStore::new());
+        let _guard = sessions.xds_subscriber_guard();
+        let state = ack_state_with(sessions.clone(), Duration::from_secs(5), false);
+
+        // Subscribe BEFORE spawning the acker, then move the rx into
+        // the task. The acker would otherwise race the post's insert:
+        // if the spawn hadn't run by the time insert bumps the
+        // generation, subscribe_generation() inside the task would
+        // start at the post-bump value and rx.changed() would wait
+        // forever for the next change (which would never come).
+        let mut rx = sessions.subscribe_generation();
+        let acker_sessions = sessions.clone();
+        let acker = tokio::spawn(async move {
+            rx.changed().await.expect("generation bumped");
+            let new_gen = *rx.borrow_and_update();
+            acker_sessions.record_acked_version(new_gen);
+        });
+
+        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        acker.await.expect("acker join");
+        let (status, body) = body_status(response).await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+        assert_eq!(body["session_id"], "mcp_session_abc");
+        assert!(sessions.get("mcp_session_abc").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn post_with_ack_gate_disabled_skips_wait_and_returns_201() {
+        let sessions = Arc::new(SessionStore::new());
+        // No subscriber, no acker. With ack_disabled=true the handler
+        // does NOT call wait_for_ack at all.
+        let state = ack_state_with(sessions.clone(), Duration::from_secs(5), true);
+        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        let (status, _body) = body_status(response).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(sessions.get("mcp_session_abc").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_with_ack_gate_returns_503_and_reinserts_on_timeout() {
+        let sessions = Arc::new(SessionStore::new());
+
+        // Pre-insert the record without going through the handler
+        // (so we don't have to satisfy the ack gate on the way in).
+        sessions
+            .insert(SessionRecord {
+                session_id: "mcp_session_abc".to_string(),
+                container_ip: "172.20.0.5".parse().unwrap(),
+                tenant: "phlax".to_string(),
+                namespace: "mcp".to_string(),
+                plugin: "fetch".to_string(),
+                egress_policy: serde_json::json!({}),
+            })
+            .await
+            .expect("pre-insert");
+
+        let _guard = sessions.xds_subscriber_guard();
+        let state = ack_state_with(sessions.clone(), Duration::from_millis(75), false);
+        let response = delete_session(State(state), Path("mcp_session_abc".to_string())).await;
+        let (status, body) = body_status(response).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "xds_ack_timeout");
+        // Rollback: record is back in the store because envoy never
+        // confirmed its removal.
+        assert!(sessions.get("mcp_session_abc").await.is_some());
     }
 }

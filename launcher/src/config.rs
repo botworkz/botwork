@@ -30,6 +30,24 @@ pub struct Config {
     /// in the deployment and silently picking one would defeat the network
     /// isolation boundary it exists to enforce.
     pub default_network: String,
+    /// Optional URL of the egress proxy plugin containers should route
+    /// outbound HTTP/HTTPS through. When set, the launcher injects
+    /// `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` env vars into every
+    /// spawned container (see `docker::PROXY_ENV_INJECTIONS`).
+    ///
+    /// When unset (the default in dev / pre-cycle-2B deployments), no
+    /// proxy env vars are injected and plugins reach the network
+    /// directly. The variable is intentionally opt-in so a launcher
+    /// rolled out before its corresponding egress envoy unit doesn't
+    /// silently break every plugin's outbound traffic — `vm 0.3.4+`
+    /// sets it on `botwork-launcher.service`'s `Environment=`.
+    ///
+    /// Validation: must parse as `http://<host>[:port]` or
+    /// `https://<host>[:port]`. Rejected at construction time so an
+    /// operator typo (e.g. forgetting the `http://`) fails launcher
+    /// startup loudly rather than producing confusing
+    /// curl-can't-find-proxy errors hours later inside a plugin.
+    pub egress_proxy: Option<String>,
 }
 
 impl Config {
@@ -106,6 +124,7 @@ impl Config {
                  expected ^[a-z0-9_-]+$ (must match docker network naming)"
             ));
         }
+        let egress_proxy = parse_egress_proxy_env()?;
 
         Ok(Self {
             socket_path,
@@ -121,8 +140,82 @@ impl Config {
             container_read_only_rootfs,
             broker_socket_path,
             default_network,
+            egress_proxy,
         })
     }
+}
+
+/// Parse and validate the optional `BOTWORK_LAUNCHER_EGRESS_PROXY` env
+/// var. Returns `Ok(None)` when unset (the default), `Ok(Some(url))`
+/// when set and valid, `Err(_)` on a malformed value.
+///
+/// Validation is intentionally conservative — we only need to confirm
+/// the value looks like an absolute `http://` / `https://` URL with a
+/// reasonable host part. We are not running a full URL parser here
+/// because:
+///
+/// * The launcher hands the value straight into the spawned
+///   container's env, never to a docker arg or a network call of its
+///   own. Anything that's plausibly an HTTP_PROXY-compatible URL is
+///   passed verbatim. The plugin's HTTP client validates it for real.
+/// * The deployment shape is fixed — `http://egress_envoy:3128` — so
+///   the wire shape we accept doesn't need to cover oddities like
+///   userinfo or paths.
+/// * Strict early rejection of the typo cases (missing scheme, bare
+///   hostname, embedded whitespace) is what catches the realistic
+///   operator mistake; deeper RFC 3986 conformance gains nothing.
+fn parse_egress_proxy_env() -> Result<Option<String>, String> {
+    let raw = match env::var("BOTWORK_LAUNCHER_EGRESS_PROXY") {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err("invalid BOTWORK_LAUNCHER_EGRESS_PROXY: not valid unicode".to_string());
+        }
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        // Unset and set-to-whitespace are the same intent. Treat as
+        // unset rather than fail-start; this matches operator
+        // expectations from systemd unit files where an
+        // `Environment=BOTWORK_LAUNCHER_EGRESS_PROXY=` line is the
+        // most natural way to "switch off" the injection.
+        return Ok(None);
+    }
+    validate_egress_proxy(trimmed)?;
+    Ok(Some(trimmed.to_string()))
+}
+
+fn validate_egress_proxy(value: &str) -> Result<(), String> {
+    let rest = if let Some(rest) = value.strip_prefix("http://") {
+        rest
+    } else if let Some(rest) = value.strip_prefix("https://") {
+        rest
+    } else {
+        return Err(format!(
+            "invalid BOTWORK_LAUNCHER_EGRESS_PROXY: must start with http:// or https:// (got {value:?})"
+        ));
+    };
+    if rest.is_empty() {
+        return Err("invalid BOTWORK_LAUNCHER_EGRESS_PROXY: empty host".to_string());
+    }
+    // No whitespace, no control chars; host[:port] must be a single
+    // token (the env var is forwarded verbatim to the container, so
+    // anything that breaks here would break inside the plugin too).
+    if rest.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "invalid BOTWORK_LAUNCHER_EGRESS_PROXY: contains whitespace or control characters (got {value:?})"
+        ));
+    }
+    // A path / query is allowed by the HTTP_PROXY convention but our
+    // egress envoy doesn't honour one; reject so a misconfig is loud.
+    if let Some(after_host) = rest.find('/') {
+        if after_host < rest.len() - 1 || &rest[after_host..] != "/" {
+            return Err(format!(
+                "invalid BOTWORK_LAUNCHER_EGRESS_PROXY: must not include a path (got {value:?})"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_u32_env(name: &str, value: &str) -> Result<u32, String> {
@@ -205,7 +298,10 @@ mod tests {
     use std::ffi::CStr;
     use std::sync::{Mutex, OnceLock};
 
-    use super::{parse_bool_env, resolve_group_spec, Config, DEFAULT_CONTAINER_CPU_LIMIT};
+    use super::{
+        parse_bool_env, resolve_group_spec, validate_egress_proxy, Config,
+        DEFAULT_CONTAINER_CPU_LIMIT,
+    };
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -308,6 +404,90 @@ mod tests {
             );
         }
         std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn from_env_egress_proxy_unset_is_none() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::remove_var("BOTWORK_LAUNCHER_EGRESS_PROXY");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        let config = Config::from_env().expect("config");
+        assert_eq!(config.egress_proxy, None);
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn from_env_egress_proxy_whitespace_treated_as_unset() {
+        // An empty / whitespace-only Environment= line in a systemd unit
+        // is the obvious "switch off the proxy without rewriting the unit
+        // file" gesture, so accept it as unset rather than fail-start.
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_EGRESS_PROXY", "   ");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        let config = Config::from_env().expect("config");
+        assert_eq!(config.egress_proxy, None);
+        std::env::remove_var("BOTWORK_LAUNCHER_EGRESS_PROXY");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn from_env_egress_proxy_valid_http_url() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_EGRESS_PROXY", "http://egress_envoy:3128");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        let config = Config::from_env().expect("config");
+        assert_eq!(
+            config.egress_proxy.as_deref(),
+            Some("http://egress_envoy:3128")
+        );
+        std::env::remove_var("BOTWORK_LAUNCHER_EGRESS_PROXY");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn validate_egress_proxy_accepts_http_and_https() {
+        validate_egress_proxy("http://egress_envoy:3128").expect("http url");
+        validate_egress_proxy("https://proxy.example:8443").expect("https url");
+        // Trailing root path is permitted (some HTTP_PROXY-honouring
+        // libs add it themselves and we don't want to false-alarm on
+        // an operator copying from one of those examples).
+        validate_egress_proxy("http://egress_envoy:3128/").expect("trailing root");
+    }
+
+    #[test]
+    fn validate_egress_proxy_rejects_missing_scheme() {
+        let err = validate_egress_proxy("egress_envoy:3128").expect_err("must reject");
+        assert!(err.contains("http://"), "{err}");
+    }
+
+    #[test]
+    fn validate_egress_proxy_rejects_wrong_scheme() {
+        for bad in ["ftp://egress_envoy:3128", "socks5://e:1080", "egress_envoy"] {
+            let err = validate_egress_proxy(bad).expect_err("must reject");
+            assert!(err.contains("http://"), "{err}");
+        }
+    }
+
+    #[test]
+    fn validate_egress_proxy_rejects_empty_host() {
+        let err = validate_egress_proxy("http://").expect_err("empty host");
+        assert!(err.contains("empty host"), "{err}");
+    }
+
+    #[test]
+    fn validate_egress_proxy_rejects_whitespace_in_value() {
+        // Verbatim forwarding into the container makes any whitespace a
+        // confusing failure surface, so reject early.
+        let err = validate_egress_proxy("http://egress envoy:3128").expect_err("ws");
+        assert!(err.contains("whitespace"), "{err}");
+    }
+
+    #[test]
+    fn validate_egress_proxy_rejects_path_component() {
+        // Egress envoy doesn't honour a base path — reject to surface
+        // misconfig instead of letting it through.
+        let err = validate_egress_proxy("http://egress_envoy:3128/proxy").expect_err("path");
+        assert!(err.contains("path"), "{err}");
     }
 
     fn current_group_name(gid: u32) -> String {

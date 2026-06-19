@@ -88,6 +88,32 @@ async fn handle_launch(
     let payload = parse_json_object(request).await?;
     let launch = parse_launch_payload(&payload, &state.validators, &state.config.default_network)?;
 
+    // When the launcher is configured with an egress proxy, splice the
+    // canonical proxy env vars into the per-spawn env LIST and on into
+    // the container. Done here at the spawn site (rather than in the
+    // payload parser) so:
+    //
+    //   1. Payload validation rules for caller-supplied env vars stay
+    //      untouched (the launcher-injected entries are not subject to
+    //      `valid_env_name` / `is_sensitive_env` checks because they
+    //      are operator-trusted and never touch argv via the secret
+    //      path).
+    //   2. The decision "should this container get the proxy at all?"
+    //      lives next to the call into docker, so a future "skip proxy
+    //      for this specific image" knob has one place to add the
+    //      condition.
+    //   3. The session-broker payload doesn't have to know about it —
+    //      session-broker just keeps forwarding per-plugin env from
+    //      config-broker, and the proxy injection is purely a
+    //      deploy-time wiring concern owned by whoever runs the
+    //      launcher unit.
+    //
+    // Caller-supplied env wins if it sets the same name (we never
+    // shadow a deliberate override). Realistically nothing should be
+    // setting these in the registry today; the precedence rule is
+    // defensive and makes the behaviour obvious to a future debugger.
+    let env = inject_proxy_env(launch.env, state.config.egress_proxy.as_deref());
+
     let outcome = docker::ensure_container(
         &ContainerLaunch {
             name: launch.name,
@@ -107,7 +133,7 @@ async fn handle_launch(
                 .memory_limit
                 .unwrap_or(&state.config.container_memory_limit),
             read_only_rootfs: state.config.container_read_only_rootfs,
-            env: &launch.env,
+            env: &env,
         },
         &state.validators,
     )?;
@@ -118,7 +144,7 @@ async fn handle_launch(
         launch.image,
         launch.network,
         launch.staging_path,
-        launch.env.len(),
+        env.len(),
         outcome.container_ip,
     ));
 
@@ -416,6 +442,60 @@ fn parse_launch_payload<'a>(
     })
 }
 
+/// Splice the configured egress proxy env vars into the caller-supplied
+/// env list. Returns the original list unchanged when `proxy_url` is
+/// `None` (the default-off case).
+///
+/// Wire shape we inject:
+///
+/// * `HTTPS_PROXY=<proxy_url>` — every HTTP/HTTPS-honouring library
+///   we have inside any of the MCP images respects this (curl,
+///   requests, urllib3, node fetch).
+/// * `HTTP_PROXY=<proxy_url>` — same coverage; some libs split which
+///   they honour, so set both. Caps `_PROXY` form is the canonical
+///   one for HTTPS_PROXY (some libs deliberately *ignore* `https_proxy`
+///   lowercase when running as root); we set caps only.
+/// * `NO_PROXY=localhost,127.0.0.1` — the only thing a plugin
+///   legitimately reaches via loopback is itself (its own MCP server
+///   port). Brokers (config-broker, session-broker, control-plane,
+///   auth-broker) are NOT in NO_PROXY because plugins don't talk to
+///   them in the supported topology — session-broker talks to the
+///   plugin (via the ingress envoy's ext_proc), not the other way
+///   round. Adding broker aliases here would invite a future plugin
+///   from quietly bypassing the egress proxy to reach a broker if
+///   someone wired up a callback path.
+///
+/// Caller-supplied env wins if it sets one of these names; we never
+/// silently shadow an intentional override. The dedupe pass is the
+/// `seen` HashSet that mirrors the same shape `parse_launch_payload`
+/// uses for duplicate detection. We don't validate `valid_env_name`
+/// on the injected names because they are operator-controlled
+/// constants in this file, not caller-controlled input.
+fn inject_proxy_env(
+    mut env: Vec<(String, String)>,
+    proxy_url: Option<&str>,
+) -> Vec<(String, String)> {
+    let Some(proxy_url) = proxy_url else {
+        return env;
+    };
+    let existing: HashSet<&str> = env.iter().map(|(name, _)| name.as_str()).collect();
+    let injections: [(&str, String); 3] = [
+        ("HTTPS_PROXY", proxy_url.to_string()),
+        ("HTTP_PROXY", proxy_url.to_string()),
+        ("NO_PROXY", "localhost,127.0.0.1".to_string()),
+    ];
+    // Build the list of names we still need to insert before we touch
+    // `env` so the existing-set borrow goes out of scope cleanly.
+    let to_insert: Vec<(&'static str, String)> = injections
+        .into_iter()
+        .filter(|(name, _)| !existing.contains(*name))
+        .collect();
+    for (name, value) in to_insert {
+        env.push((name.to_string(), value));
+    }
+    env
+}
+
 fn parse_bind_agent_payload<'a>(
     payload: &'a Map<String, Value>,
     validators: &Validators,
@@ -511,7 +591,10 @@ mod tests {
     use hyper::Request;
     use serde_json::{Map, Value};
 
-    use super::{parse_json_bytes, parse_json_object, parse_launch_payload, render_json_object};
+    use super::{
+        inject_proxy_env, parse_json_bytes, parse_json_object, parse_launch_payload,
+        render_json_object,
+    };
     use crate::error::LauncherError;
     use crate::validate::{Validators, RESERVED_ENV_NAMES};
 
@@ -987,6 +1070,64 @@ mod tests {
             parse_launch_payload(&payload, &validators, "botwork-plugin"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid docker network"
         ));
+    }
+
+    #[test]
+    fn inject_proxy_env_is_noop_when_no_proxy_configured() {
+        let env = vec![("FOO".to_string(), "bar".to_string())];
+        let out = inject_proxy_env(env.clone(), None);
+        assert_eq!(out, env);
+    }
+
+    #[test]
+    fn inject_proxy_env_adds_three_canonical_vars() {
+        let out = inject_proxy_env(Vec::new(), Some("http://egress_envoy:3128"));
+        // Order isn't part of the wire contract, sort for deterministic assertion.
+        let mut names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"]);
+        let map: std::collections::HashMap<&str, &str> =
+            out.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        assert_eq!(map["HTTPS_PROXY"], "http://egress_envoy:3128");
+        assert_eq!(map["HTTP_PROXY"], "http://egress_envoy:3128");
+        assert_eq!(map["NO_PROXY"], "localhost,127.0.0.1");
+    }
+
+    #[test]
+    fn inject_proxy_env_does_not_clobber_caller_supplied_overrides() {
+        // If the caller (today: never; tomorrow: maybe) sets one of the
+        // proxy names themselves, their value wins. Documents that the
+        // injection is additive, not authoritative.
+        let env = vec![
+            (
+                "HTTPS_PROXY".to_string(),
+                "http://caller-supplied:9999".to_string(),
+            ),
+            ("FOO".to_string(), "bar".to_string()),
+        ];
+        let out = inject_proxy_env(env, Some("http://egress_envoy:3128"));
+        let map: std::collections::HashMap<&str, &str> =
+            out.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        assert_eq!(map["HTTPS_PROXY"], "http://caller-supplied:9999");
+        // The other two still get injected, since they weren't set.
+        assert_eq!(map["HTTP_PROXY"], "http://egress_envoy:3128");
+        assert_eq!(map["NO_PROXY"], "localhost,127.0.0.1");
+        assert_eq!(map["FOO"], "bar");
+        // And we don't double-up HTTPS_PROXY.
+        let https_count = out.iter().filter(|(n, _)| n == "HTTPS_PROXY").count();
+        assert_eq!(https_count, 1);
+    }
+
+    #[test]
+    fn inject_proxy_env_preserves_caller_supplied_env_order() {
+        let env = vec![
+            ("FOO".to_string(), "1".to_string()),
+            ("BAR".to_string(), "2".to_string()),
+        ];
+        let out = inject_proxy_env(env, Some("http://egress_envoy:3128"));
+        // First two entries unchanged.
+        assert_eq!(out[0], ("FOO".to_string(), "1".to_string()));
+        assert_eq!(out[1], ("BAR".to_string(), "2".to_string()));
     }
 
     #[tokio::test]

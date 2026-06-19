@@ -55,6 +55,18 @@ The socket-activated path does **not** chmod/chown the inherited fd; set `Socket
 - `BOTWORK_LAUNCHER_READ_ONLY_ROOTFS=<true|false>`: opt-in `--read-only` root fs for plugin containers; left off by default because some plugins still need writable runtime paths
 - `BOTWORK_PLUGIN_UID=<uid>` / `BOTWORK_PLUGIN_GID=<gid>`: uid/gid passed to `docker run --user`
 - `BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX=<regex>`: image allowlist
+- `BOTWORK_LAUNCHER_EGRESS_PROXY=<url>` (optional): when set, the
+  launcher injects `HTTPS_PROXY`, `HTTP_PROXY` (both equal to
+  `<url>`) and `NO_PROXY=localhost,127.0.0.1` into every spawned
+  plugin container. The URL must start with `http://` or `https://`,
+  must not contain whitespace, and must not include a path (e.g.
+  `http://egress_envoy:3128`). When unset (default) no proxy env vars
+  are injected and plugins reach the network directly. Intended to be
+  set on `botwork-launcher.service` by `vm 0.3.4+` once the egress
+  envoy unit lands; see [botworkz/botwork#92] for the cycle 2B
+  rollout. Caller-supplied env in the `/launch` payload wins if it
+  sets one of these names — the injection is additive, not
+  authoritative.
 
 The socket group/mode and the `SO_PEERCRED` allowlist are deliberate belt-and-braces checks: the kernel should block the wrong peers before connect, and the launcher should still reject them if filesystem permissions drift.
 
