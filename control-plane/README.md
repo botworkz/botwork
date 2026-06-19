@@ -145,6 +145,30 @@ Success response (201):
 is for the record it sent; machines should branch on the HTTP status,
 not the echoed id.
 
+**Synchronous xDS ack gate** (new in 0.2.2 / #92): the 201 is NOT
+returned until the egress envoy has ACKed the LDS push that carries
+the new session's policy. If envoy is not connected (no xDS
+subscriber) or doesn't ACK within `BOTWORK_CONTROL_PLANE_ACK_WAIT_MS`
+(default 5000ms), the store mutation is rolled back and the handler
+returns:
+
+* `503 { "error": "no_xds_subscriber", "message": "..." }` — no
+  egress envoy is currently subscribed.
+* `503 { "error": "xds_ack_timeout", "message": "..." }` — subscribed
+  but ACK did not arrive in time.
+
+session-broker treats either 503 the same as before (hard-fail the
+spawn, tear down the container, surface 503 to the client). The gate
+closes the cold-start race where a freshly spawned plugin's first
+tool call would 403 because xDS hadn't caught up; "201 from
+control-plane" is now a contract that "the policy is live in envoy."
+
+Operator break-glass: `BOTWORK_CONTROL_PLANE_DISABLE_ACK_WAIT=1`
+flips the gate off and restores the pre-#92 behaviour where the
+handler returns 201 as soon as the store mutation lands. Not a
+supported posture — setting this is an explicit decision to accept
+the cold-start race.
+
 ### `DELETE /sessions/<session_id>`
 
 Idempotent in spirit but NOT in v0: a `DELETE` for an unknown id
@@ -157,6 +181,14 @@ Success response (200):
 ```json
 { "status": "removed", "session_id": "mcp_session_<token>" }
 ```
+
+The same synchronous xDS ack gate applies to DELETE as to POST: 200
+is not returned until envoy ACKs the LDS push that drops the
+session's policy. On 503 the deletion is rolled back (the record is
+re-inserted into the store) so the store keeps reflecting what envoy
+actually has. This is load-bearing for `egress: none` sessions where
+an in-flight SSRF-style request would otherwise leak through during
+the window between delete and ACK.
 
 ### `GET /sessions/<session_id>`
 
@@ -230,6 +262,22 @@ request.
   store. Break-glass only; see [Cold-start
   recovery](#cold-start-recovery) above for why this is not a
   supported posture.
+- `BOTWORK_CONTROL_PLANE_ACK_WAIT_MS` (default: `5000`) — per-request
+  budget (milliseconds) for the synchronous xDS ack gate on
+  `POST /sessions` and `DELETE /sessions/<id>`. envoy ACKs typically
+  complete in <100ms; 5s gives plenty of headroom for the "envoy
+  briefly paused / mid-config-load" case without blocking spawns
+  indefinitely. Lower this in CI for faster failure surfaces, raise
+  it if a future deployment puts more between envoy and
+  control-plane. `0` is rejected — set
+  `BOTWORK_CONTROL_PLANE_DISABLE_ACK_WAIT=1` to skip the gate
+  entirely.
+- `BOTWORK_CONTROL_PLANE_DISABLE_ACK_WAIT` — when set to `1`/`true`/
+  `yes`, flip the synchronous xDS ack gate off; mutation handlers
+  return 201/200 as soon as the in-memory store mutation lands. This
+  restores the pre-#92 behaviour. Break-glass only; setting it
+  accepts the cold-start race where a freshly spawned plugin's first
+  tool call may 403 because xDS hadn't caught up.
 - `RUST_LOG` — standard `tracing-subscriber` filter; defaults to
   `info`.
 

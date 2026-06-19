@@ -46,6 +46,7 @@ async fn wire_contract_validation_paths() {
         container_read_only_rootfs: false,
         broker_socket_path: "/run/botwork/broker.sock".to_string(),
         default_network: "botwork-plugin".to_string(),
+        egress_proxy: None,
     };
     let validators = Validators::new(&config.image_allowlist_regex).expect("validators");
     let state = Arc::new(AppState { config, validators });
@@ -159,6 +160,7 @@ async fn wire_contract_rejects_large_request_bodies() {
         container_read_only_rootfs: false,
         broker_socket_path: "/run/botwork/broker.sock".to_string(),
         default_network: "botwork-plugin".to_string(),
+        egress_proxy: None,
     };
     let validators = Validators::new(&config.image_allowlist_regex).expect("validators");
     let state = Arc::new(AppState { config, validators });

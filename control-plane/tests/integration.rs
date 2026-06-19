@@ -8,7 +8,9 @@
 //! Each test gets its own server / store: state isolation is more
 //! valuable than the small startup cost (<1 ms in practice).
 
-use botwork_control_plane::{build_app_state, build_router};
+use std::sync::Arc;
+
+use botwork_control_plane::{build_router, AppState, SessionStore, DEFAULT_ACK_WAIT};
 use reqwest::StatusCode;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -19,7 +21,18 @@ struct Server {
 }
 
 async fn spawn_server() -> Server {
-    let state = build_app_state();
+    // These tests exercise the HTTP wire shape only; they don't bring
+    // up an xDS server. With the synchronous-ack gate enabled the
+    // post/delete handlers would block waiting for an envoy that
+    // never connects, returning 503 instead of 201/200 and failing
+    // the round-trip tests below. The dedicated ack-gate behaviour
+    // is covered by `handler::tests` in src/handler.rs (which fakes
+    // the ack channel directly).
+    let state = AppState {
+        sessions: Arc::new(SessionStore::new()),
+        ack_wait: DEFAULT_ACK_WAIT,
+        ack_disabled: true,
+    };
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");

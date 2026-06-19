@@ -41,18 +41,20 @@ pub mod xds;
 
 use std::sync::Arc;
 
-pub use handler::{build_router, AppState};
+pub use handler::{build_router, AppState, ACK_DISABLED_ENV, DEFAULT_ACK_WAIT};
 pub use recovery::run_with_retries as run_recovery_with_retries;
 pub use session_broker::{fetch_sessions, SessionBrokerError};
-pub use sessions::{SessionRecord, SessionStore, StoreError};
+pub use sessions::{AckWaitError, SessionRecord, SessionStore, StoreError, XdsSubscriberGuard};
 pub use xds::AdsServer;
 
-/// Build an `AppState` with an empty in-memory session store.
+/// Build an `AppState` with an empty in-memory session store and the
+/// default ack-wait gate (5s, gate enabled).
 ///
-/// Production callers populate it via `recovery::run_with_retries`
-/// before binding the HTTP server; tests typically use it as-is.
+/// Production callers populate the store via
+/// `recovery::run_with_retries` before binding the HTTP server, and
+/// usually override `ack_wait` / `ack_disabled` from env in
+/// `main.rs`. Tests typically use this as-is or via
+/// `AppState::new` directly.
 pub fn build_app_state() -> AppState {
-    AppState {
-        sessions: Arc::new(SessionStore::new()),
-    }
+    AppState::new(Arc::new(SessionStore::new()))
 }

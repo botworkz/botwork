@@ -1,8 +1,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use botwork_control_plane::{
-    build_router, run_recovery_with_retries, AdsServer, AppState, SessionStore,
+    build_router, run_recovery_with_retries, AdsServer, AppState, SessionStore, ACK_DISABLED_ENV,
+    DEFAULT_ACK_WAIT,
 };
 use tokio::net::TcpListener;
 use tonic::transport::Server as TonicServer;
@@ -44,6 +46,49 @@ fn session_broker_endpoint_from_env() -> String {
         .unwrap_or_else(|_| "http://session_broker:9002".to_string())
 }
 
+fn ack_disabled_from_env() -> bool {
+    // Twin of recovery_disabled_from_env: when set truthy, the HTTP
+    // mutation handlers (`POST /sessions`, `DELETE /sessions/<id>`)
+    // skip the wait-for-xDS-ACK step and return success as soon as
+    // the in-memory store mutation completes. This restores the
+    // pre-#92 behaviour where a 201 from control-plane meant "the
+    // store knows about the record" rather than "envoy has the
+    // policy live."
+    //
+    // Setting this is an explicit decision to accept the cold-start
+    // race where a freshly spawned plugin's first tool call may 403
+    // because xDS hasn't caught up.
+    matches!(
+        std::env::var(ACK_DISABLED_ENV).as_deref().map(str::trim),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn ack_wait_from_env() -> Duration {
+    // BOTWORK_CONTROL_PLANE_ACK_WAIT_MS: override the default 5s ack
+    // wait. Lower values surface a slow / disconnected envoy faster
+    // (useful in CI smoke); higher values forgive more boot latency.
+    // 0 is rejected -- a zero timeout is functionally the same as
+    // ack_disabled but harder to spot, so refuse it loudly.
+    match std::env::var("BOTWORK_CONTROL_PLANE_ACK_WAIT_MS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => {
+                error!(
+                    "{PREFIX} BOTWORK_CONTROL_PLANE_ACK_WAIT_MS=0 is not allowed; \
+                     set BOTWORK_CONTROL_PLANE_DISABLE_ACK_WAIT=1 to skip the gate"
+                );
+                std::process::exit(1);
+            }
+            Ok(ms) => Duration::from_millis(ms),
+            Err(err) => {
+                error!("{PREFIX} invalid BOTWORK_CONTROL_PLANE_ACK_WAIT_MS={raw}: {err}");
+                std::process::exit(1);
+            }
+        },
+        Err(_) => DEFAULT_ACK_WAIT,
+    }
+}
+
 fn recovery_disabled_from_env() -> bool {
     // Operator escape hatch. The default is "fail to start if recovery
     // cannot reach session-broker after MAX_ATTEMPTS"; this flag
@@ -74,8 +119,20 @@ async fn main() {
     // same `Arc<SessionStore>` so handlers and the xDS feeder see the
     // seeded state.
     let store = Arc::new(SessionStore::new());
+    let ack_disabled = ack_disabled_from_env();
+    let ack_wait = ack_wait_from_env();
+    if ack_disabled {
+        warn!(
+            "{PREFIX} {ACK_DISABLED_ENV}=1 -- mutation handlers will NOT wait for xDS ACK; \
+             accepting the cold-start race in exchange for non-blocking spawns"
+        );
+    } else {
+        info!("{PREFIX} synchronous xDS ack gate enabled (wait={ack_wait:?})");
+    }
     let state = AppState {
         sessions: store.clone(),
+        ack_wait,
+        ack_disabled,
     };
     info!("{PREFIX} session store initialised (empty)");
 
