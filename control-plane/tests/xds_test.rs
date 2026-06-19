@@ -157,6 +157,49 @@ async fn lds_subscription_returns_listener_with_zero_policies_on_empty_store() {
 }
 
 #[tokio::test]
+async fn ack_with_matching_version_does_not_trigger_a_push() {
+    // Regression test for the ACK-loop bug that surfaced in
+    // botworkz/vm#95 CI: a real envoy (1.38) re-sends a
+    // DiscoveryRequest after every server push to ACK it. The
+    // first iteration of this server pushed unconditionally on
+    // any inbound LDS request, so each push → ACK → push → ACK
+    // ad infinitum, producing "version=60+ resources=1
+    // sessions=0" log spam and starving the ingress envoy's
+    // initialize call.
+    //
+    // The contract this test pins: an inbound LDS request whose
+    // version_info matches the current store generation MUST NOT
+    // produce another push. Without that, envoy and the server
+    // amplify forever and the first POST /sessions never gets a
+    // dedicated push opportunity to ACK.
+    let server = spawn_xds().await;
+    let (tx, mut stream) = open_stream(&server.base).await;
+
+    // 1) Initial subscribe → first push (version=0).
+    tx.send(lds_request("", ""))
+        .await
+        .expect("send lds subscribe");
+    let first = next_response_with_timeout(&mut stream).await;
+    assert_eq!(first.version_info, "0");
+
+    // 2) ACK that push with the same version_info envoy would echo
+    //    back. Critically, the response_nonce field is the nonce
+    //    we sent (envoy echoes it verbatim on ACK).
+    tx.send(lds_request(&first.version_info, &first.nonce))
+        .await
+        .expect("send ack");
+
+    // 3) Expect ZERO further pushes within a reasonable window.
+    //    If the bug were present, we'd see an infinite stream of
+    //    pushes; the timeout below picks up the absence.
+    let outcome = tokio::time::timeout(Duration::from_millis(250), stream.next()).await;
+    assert!(
+        outcome.is_err(),
+        "expected no push after ACK with matching version; got: {outcome:?}"
+    );
+}
+
+#[tokio::test]
 async fn cds_subscription_returns_dfp_cluster_once() {
     let server = spawn_xds().await;
     let (tx, mut stream) = open_stream(&server.base).await;

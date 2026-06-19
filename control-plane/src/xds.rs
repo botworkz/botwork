@@ -15,6 +15,13 @@
 //!    `version_info`. For LDS, we record the ACKed version via
 //!    `SessionStore::record_acked_version` — that's what
 //!    [`crate::sessions::SessionStore::wait_for_ack`] unblocks on.
+//!    Critically we DO NOT push another response in this case: the
+//!    version_info envoy sent back matches what's currently in the
+//!    store, so envoy is already up to date. Pushing again here
+//!    would just trigger another ACK with a fresh nonce, which we'd
+//!    then re-push, which would re-ACK, ad infinitum -- the bug
+//!    that caused the "version=60+ resources=1 sessions=0" log
+//!    storm in the first iteration of this server.
 //! 4. Mutations to `SessionStore` wake us via the generation watch
 //!    channel. We re-snapshot, re-compile the Listener
 //!    (`policy::build_listener`), and push a fresh `DiscoveryResponse`
@@ -179,27 +186,10 @@ impl AggregatedDiscoveryService for AdsServer {
 
                                 match req.type_url.as_str() {
                                     LISTENER_TYPE_URL => {
-                                        // Is this an initial subscription
-                                        // (no version_info) or an ACK of
-                                        // a prior push (version_info
-                                        // matches what we sent)?
-                                        //
-                                        // The protocol doesn't strictly
-                                        // distinguish them -- both shapes
-                                        // look the same on the wire -- so
-                                        // we treat any non-empty version
-                                        // as an ACK and record it, then
-                                        // either way push a fresh snapshot.
-                                        //
-                                        // Pushing on every inbound is
-                                        // intentional: SOTW envoy will
-                                        // just re-ACK an identical config
-                                        // with the same version, so we
-                                        // don't risk loops; and it covers
-                                        // the legitimate case of envoy
-                                        // re-subscribing after a config
-                                        // restart while the store has
-                                        // since changed.
+                                        // Always record the ACK (if this
+                                        // is one): it costs nothing and
+                                        // is what the HTTP gate
+                                        // (wait_for_ack) is watching for.
                                         if !req.version_info.is_empty() {
                                             if let Ok(acked) = req.version_info.parse::<u64>() {
                                                 sessions.record_acked_version(acked);
@@ -219,21 +209,62 @@ impl AggregatedDiscoveryService for AdsServer {
                                                 );
                                             }
                                         }
-                                        let snapshot = sessions.list().await;
-                                        let listener = build_listener(&snapshot);
-                                        let new_version = sessions.current_generation();
-                                        let response = listener_response(
-                                            new_version,
-                                            next_nonce(),
-                                            &listener,
-                                        );
-                                        info!(
-                                            "{PREFIX} push LDS to {peer} version={} resources={} (sessions={})",
-                                            new_version,
-                                            response.resources.len(),
-                                            snapshot.len(),
-                                        );
-                                        yield response;
+
+                                        // Decide whether to push.
+                                        //
+                                        // SOTW xDS protocol: an inbound
+                                        // DiscoveryRequest can be:
+                                        //   - initial subscription
+                                        //     (empty version_info) →
+                                        //     PUSH current state
+                                        //   - ACK of our last response
+                                        //     (version_info == current
+                                        //     generation) → DO NOT push;
+                                        //     envoy is happy and another
+                                        //     push would re-trigger an
+                                        //     ACK in an infinite loop
+                                        //     (each push uses a fresh
+                                        //     nonce, so envoy thinks
+                                        //     it's a new response)
+                                        //   - stale ACK / re-subscribe
+                                        //     after restart
+                                        //     (version_info != current
+                                        //     generation) → PUSH current
+                                        //
+                                        // The bug this protects against
+                                        // is real and visible: PR1
+                                        // pushed unconditionally and CI
+                                        // produced version=60+ with zero
+                                        // sessions in the store --
+                                        // entirely ACK-loop noise.
+                                        let current_gen = sessions.current_generation();
+                                        let envoy_has = if req.version_info.is_empty() {
+                                            None
+                                        } else {
+                                            req.version_info.parse::<u64>().ok()
+                                        };
+
+                                        if envoy_has != Some(current_gen) {
+                                            let snapshot = sessions.list().await;
+                                            let listener = build_listener(&snapshot);
+                                            let response = listener_response(
+                                                current_gen,
+                                                next_nonce(),
+                                                &listener,
+                                            );
+                                            info!(
+                                                "{PREFIX} push LDS to {peer} version={} resources={} (sessions={}) envoy_had={:?}",
+                                                current_gen,
+                                                response.resources.len(),
+                                                snapshot.len(),
+                                                envoy_has,
+                                            );
+                                            yield response;
+                                        } else {
+                                            debug!(
+                                                "{PREFIX} LDS ACK from {peer} matches current generation {current_gen}; no push"
+                                            );
+                                        }
                                     }
                                     CLUSTER_TYPE_URL => {
                                         // DFP cluster is static. Push
