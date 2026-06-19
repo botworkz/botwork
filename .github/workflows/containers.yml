@@ -97,7 +97,8 @@ jobs:
         # RECOVERY=1 is set here. The recovery path itself is exercised
         # end-to-end by the vm/ integration suite where session-broker
         # actually exists; this step only proves the binary boots and
-        # binds 0.0.0.0:9300.
+        # binds both 0.0.0.0:9300 (HTTP) and 0.0.0.0:9301 (xDS gRPC,
+        # added in #91).
         #
         # Like session-broker, control-plane has no graceful-shutdown
         # handler so we mirror the detach + read-logs + force-rm shape
@@ -111,4 +112,5 @@ jobs:
         sleep 3
         output="$(docker logs "${name}" 2>&1)"
         echo "${output}"
-        echo "${output}" | grep -q "starting on 0.0.0.0:9300"
+        echo "${output}" | grep -q "starting HTTP on 0.0.0.0:9300"
+        echo "${output}" | grep -q "starting xDS gRPC on 0.0.0.0:9301"

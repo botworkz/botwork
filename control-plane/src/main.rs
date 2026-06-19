@@ -1,25 +1,36 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use botwork_control_plane::{build_router, run_recovery_with_retries, AppState, SessionStore};
+use botwork_control_plane::{
+    build_router, run_recovery_with_retries, AdsServer, AppState, SessionStore,
+};
 use tokio::net::TcpListener;
+use tonic::transport::Server as TonicServer;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const PREFIX: &str = "[control-plane]";
 
-fn bind_from_env() -> String {
+fn http_bind_from_env() -> String {
     // SECURITY: control-plane v0 has no caller authentication. The trust
     // boundary is the docker network: in the supported deployment it
-    // joins `botwork-internal` and only session-broker / future xDS
-    // subscribers (also on `botwork-internal`) can reach it via the
-    // `control_plane` alias. The bind port MUST NEVER be published to
-    // the host (no `-p`/`--publish`). Mirrors the auth-broker and
+    // joins `botwork-internal` and only session-broker / the egress
+    // envoy xDS subscriber (also on `botwork-internal`) can reach it
+    // via the `control_plane` alias. The bind ports MUST NEVER be
+    // published to the host. Mirrors the auth-broker and
     // config-broker posture.
     //
     // If you instead run control-plane as a bare host process, set
-    // BOTWORK_CONTROL_PLANE_BIND=127.0.0.1:9300 so it is not exposed
-    // beyond loopback.
+    // BOTWORK_CONTROL_PLANE_BIND=127.0.0.1:9300 and
+    // BOTWORK_CONTROL_PLANE_XDS_BIND=127.0.0.1:9301.
     std::env::var("BOTWORK_CONTROL_PLANE_BIND").unwrap_or_else(|_| "0.0.0.0:9300".to_string())
+}
+
+fn xds_bind_from_env() -> String {
+    // Separate gRPC server for the ADS endpoint. Different protocol
+    // stack (tonic h2 vs axum h1), different bind. Same trust
+    // boundary (botwork-internal only).
+    std::env::var("BOTWORK_CONTROL_PLANE_XDS_BIND").unwrap_or_else(|_| "0.0.0.0:9301".to_string())
 }
 
 fn session_broker_endpoint_from_env() -> String {
@@ -59,8 +70,9 @@ async fn main() {
         .init();
 
     // Build the store first; recovery seeds INTO it before the HTTP
-    // server starts accepting requests. AppState holds the same
-    // `Arc<SessionStore>` so the handlers see the seeded state.
+    // and xDS servers start accepting requests. AppState holds the
+    // same `Arc<SessionStore>` so handlers and the xDS feeder see the
+    // seeded state.
     let store = Arc::new(SessionStore::new());
     let state = AppState {
         sessions: store.clone(),
@@ -92,24 +104,58 @@ async fn main() {
         }
     }
 
-    let bind = bind_from_env();
+    let http_bind = http_bind_from_env();
     let app = build_router(state);
 
-    let listener = match TcpListener::bind(&bind).await {
+    let http_listener = match TcpListener::bind(&http_bind).await {
         Ok(listener) => listener,
         Err(err) => {
-            error!("{PREFIX} failed to bind {bind}: {err}");
+            error!("{PREFIX} failed to bind HTTP {http_bind}: {err}");
             std::process::exit(1);
         }
     };
 
     info!(
-        "{PREFIX} starting on {}",
-        listener.local_addr().expect("local addr")
+        "{PREFIX} starting HTTP on {}",
+        http_listener.local_addr().expect("local addr")
     );
 
-    if let Err(err) = axum::serve(listener, app).await {
-        error!("{PREFIX} server error: {err}");
-        std::process::exit(1);
+    let xds_bind = xds_bind_from_env();
+    let xds_addr: SocketAddr = match xds_bind.parse() {
+        Ok(a) => a,
+        Err(err) => {
+            error!("{PREFIX} failed to parse xDS bind {xds_bind}: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    info!("{PREFIX} starting xDS gRPC on {xds_addr}");
+
+    let ads_server = AdsServer::new(store.clone());
+    let xds_future = TonicServer::builder()
+        .add_service(ads_server.into_grpc_service())
+        .serve(xds_addr);
+
+    // Run both servers concurrently. If either exits we tear the
+    // whole binary down so systemd restarts cleanly — partial
+    // availability (HTTP up, xDS down, or vice versa) is worse than
+    // a clean restart because the egress envoy would silently
+    // operate on stale config.
+    tokio::select! {
+        result = axum::serve(http_listener, app) => {
+            if let Err(err) = result {
+                error!("{PREFIX} HTTP server error: {err}");
+            } else {
+                error!("{PREFIX} HTTP server exited unexpectedly");
+            }
+        }
+        result = xds_future => {
+            if let Err(err) = result {
+                error!("{PREFIX} xDS server error: {err}");
+            } else {
+                error!("{PREFIX} xDS server exited unexpectedly");
+            }
+        }
     }
+    std::process::exit(1);
 }

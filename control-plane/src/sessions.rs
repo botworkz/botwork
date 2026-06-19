@@ -21,13 +21,29 @@
 //! * Snapshot reads (`list`, `get`) clone the data out. Internal locks
 //!   are never held across an `await` to a subscriber — those wake on
 //!   a `tokio::sync::watch` channel and re-read.
+//!
+//! ## Generation channel
+//!
+//! Mutating ops (`insert`, `remove`, `bulk_seed`) bump a monotonic `u64`
+//! generation counter published on a `tokio::sync::watch::Sender<u64>`.
+//! Subscribers (today: the xDS server) use it as a "something changed,
+//! re-snapshot now" signal — the actual data is fetched via `list()`
+//! against the same store, so subscribers never see partial state and
+//! never deadlock against the write lock.
+//!
+//! The counter is opaque (it is not a version number we hand to envoy
+//! verbatim — the xDS layer derives `version_info` from it). We use a
+//! `watch` channel rather than a `broadcast` because xDS subscribers
+//! only ever care about "the latest" state; missing intermediate
+//! bumps when there's a burst of session churn is fine and in fact
+//! desirable (one push per quiescent state, not one per mutation).
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 
 /// One running plugin session as seen by control-plane.
 ///
@@ -71,14 +87,47 @@ pub enum StoreError {
     NotFound(String),
 }
 
-#[derive(Default)]
 pub struct SessionStore {
     inner: RwLock<HashMap<String, SessionRecord>>,
+    /// Monotonic mutation counter. Bumped after every successful
+    /// `insert` / `remove` / `bulk_seed`. Subscribers (xDS) `subscribe`
+    /// to it; the value itself is opaque to them.
+    generation_tx: watch::Sender<u64>,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        let (generation_tx, _) = watch::channel(0u64);
+        Self {
+            inner: RwLock::new(HashMap::new()),
+            generation_tx,
+        }
+    }
 }
 
 impl SessionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Get a fresh `watch::Receiver` for the generation channel. Each
+    /// subscriber gets its own; receivers never miss the *latest* value,
+    /// only intermediate ones (which is exactly what xDS wants — see
+    /// module docs).
+    pub fn subscribe_generation(&self) -> watch::Receiver<u64> {
+        self.generation_tx.subscribe()
+    }
+
+    /// Read the current generation without subscribing. Used by tests
+    /// asserting that mutations bumped the counter.
+    pub fn current_generation(&self) -> u64 {
+        *self.generation_tx.borrow()
+    }
+
+    fn bump(&self) {
+        // `send_modify` always wakes subscribers regardless of whether
+        // the value differs — perfect for a counter we always increment.
+        self.generation_tx.send_modify(|g| *g = g.wrapping_add(1));
     }
 
     /// Strict insert: rejects a second insert for the same `session_id`.
@@ -89,6 +138,8 @@ impl SessionStore {
             return Err(StoreError::AlreadyExists(record.session_id));
         }
         guard.insert(record.session_id.clone(), record);
+        drop(guard);
+        self.bump();
         Ok(())
     }
 
@@ -97,9 +148,37 @@ impl SessionStore {
     /// disagree loudly rather than quietly drift.
     pub async fn remove(&self, session_id: &str) -> Result<SessionRecord, StoreError> {
         let mut guard = self.inner.write().await;
-        guard
+        let removed = guard
             .remove(session_id)
-            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))
+            .ok_or_else(|| StoreError::NotFound(session_id.to_string()))?;
+        drop(guard);
+        self.bump();
+        Ok(removed)
+    }
+
+    /// Bulk-load N records under a single write lock. Used by cold-start
+    /// recovery to seed the empty store from session-broker's snapshot
+    /// without serialising N individual `insert()` awaits. Bumps the
+    /// generation exactly once at the end so xDS subscribers see one
+    /// "store seeded" push, not N back-to-back churns.
+    ///
+    /// Treats duplicates inside `records` as `AlreadyExists`; bails on
+    /// the first dup and the store is left in a partial state. Recovery
+    /// is the only caller and is itself a fail-then-restart loop, so
+    /// surfacing rather than silently dropping is right.
+    pub async fn bulk_seed(&self, records: Vec<SessionRecord>) -> Result<usize, StoreError> {
+        let mut guard = self.inner.write().await;
+        let mut count = 0;
+        for record in records {
+            if guard.contains_key(&record.session_id) {
+                return Err(StoreError::AlreadyExists(record.session_id));
+            }
+            guard.insert(record.session_id.clone(), record);
+            count += 1;
+        }
+        drop(guard);
+        self.bump();
+        Ok(count)
     }
 
     /// Snapshot read of a single record. `None` for unknown ids; the
@@ -220,5 +299,100 @@ mod tests {
         let listed = store.list().await;
         let ids: Vec<&str> = listed.iter().map(|r| r.session_id.as_str()).collect();
         assert_eq!(ids, vec!["mcp_session_a", "mcp_session_b", "mcp_session_c"]);
+    }
+
+    #[tokio::test]
+    async fn insert_bumps_generation() {
+        let store = SessionStore::new();
+        let initial = store.current_generation();
+        store
+            .insert(record("mcp_session_abc", "172.20.0.5", "fetch"))
+            .await
+            .unwrap();
+        assert_eq!(store.current_generation(), initial.wrapping_add(1));
+    }
+
+    #[tokio::test]
+    async fn remove_bumps_generation() {
+        let store = SessionStore::new();
+        store
+            .insert(record("mcp_session_abc", "172.20.0.5", "fetch"))
+            .await
+            .unwrap();
+        let before = store.current_generation();
+        store.remove("mcp_session_abc").await.unwrap();
+        assert_eq!(store.current_generation(), before.wrapping_add(1));
+    }
+
+    #[tokio::test]
+    async fn failed_insert_does_not_bump_generation() {
+        let store = SessionStore::new();
+        store
+            .insert(record("mcp_session_abc", "172.20.0.5", "fetch"))
+            .await
+            .unwrap();
+        let before = store.current_generation();
+        // Duplicate insert: bails before mutation.
+        store
+            .insert(record("mcp_session_abc", "172.20.0.6", "fetch"))
+            .await
+            .unwrap_err();
+        assert_eq!(store.current_generation(), before);
+    }
+
+    #[tokio::test]
+    async fn failed_remove_does_not_bump_generation() {
+        let store = SessionStore::new();
+        let before = store.current_generation();
+        store.remove("mcp_session_nope").await.unwrap_err();
+        assert_eq!(store.current_generation(), before);
+    }
+
+    #[tokio::test]
+    async fn bulk_seed_bumps_generation_once() {
+        let store = SessionStore::new();
+        let before = store.current_generation();
+        let count = store
+            .bulk_seed(vec![
+                record("mcp_session_a", "172.20.0.5", "git"),
+                record("mcp_session_b", "172.20.0.6", "fetch"),
+                record("mcp_session_c", "172.20.0.7", "exec-jq"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(count, 3);
+        // Single bump regardless of N.
+        assert_eq!(store.current_generation(), before.wrapping_add(1));
+        assert_eq!(store.len().await, 3);
+    }
+
+    #[tokio::test]
+    async fn bulk_seed_rejects_internal_duplicates() {
+        let store = SessionStore::new();
+        let err = store
+            .bulk_seed(vec![
+                record("mcp_session_a", "172.20.0.5", "git"),
+                record("mcp_session_a", "172.20.0.6", "fetch"),
+            ])
+            .await
+            .unwrap_err();
+        assert_eq!(err, StoreError::AlreadyExists("mcp_session_a".into()));
+    }
+
+    #[tokio::test]
+    async fn subscribers_observe_generation_bumps() {
+        let store = SessionStore::new();
+        let mut rx = store.subscribe_generation();
+        let initial = *rx.borrow();
+
+        store
+            .insert(record("mcp_session_abc", "172.20.0.5", "fetch"))
+            .await
+            .unwrap();
+
+        // Watch channel: changed() returns Ok once the value moves
+        // after the receiver's last-observed mark.
+        rx.changed().await.expect("watch sender stayed open");
+        assert_eq!(*rx.borrow_and_update(), initial.wrapping_add(1));
     }
 }
