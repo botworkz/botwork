@@ -338,6 +338,11 @@ spawn fails with a 5xx so operators can fix vault state explicitly.
 - `BOTWORK_BROKER_SOCKET_PATH` (default `/run/botwork/broker.sock`).
 - `BOTWORK_SESSION_REGISTRY_PATH` (default `/var/lib/botwork/sessions.json`).
 - `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` (default `30`).
+- `BOTWORK_BROKER_SWEEPER_INTERVAL_SECS` (default `60`). Interval at which the
+  background TTL sweepers wake to prune expired entries from the `tombstones`
+  and `liveness_cache` maps. Both maps use a 5 min TTL; the default 60 s sweep
+  gives a worst-case 1 min residency overshoot. Zero, garbage, and unset all
+  fall back to the default.
 
 `BOTWORK_PLUGIN_REGISTRY_PATH` is no longer read by session-broker — it is now
 config-broker's environment variable.
