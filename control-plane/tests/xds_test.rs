@@ -200,6 +200,64 @@ async fn ack_with_matching_version_does_not_trigger_a_push() {
 }
 
 #[tokio::test]
+async fn open_stream_bumps_subscriber_count_for_full_lifetime() {
+    // Regression test for the subscriber-guard lifetime bug that
+    // surfaced in botworkz/vm#96 CI: the xDS server acquired the
+    // guard in `stream_aggregated_resources` and bound it to a
+    // local `let _subscriber = ...` outside the try_stream! block.
+    // Rust dropped the guard at the end of that outer function
+    // (right after returning Ok(Response::new(...))), so by the
+    // time envoy's first DiscoveryRequest landed, the subscriber
+    // counter was already 0 and every POST /sessions's wait_for_ack
+    // short-circuited to 503 no_xds_subscriber.
+    //
+    // The fix moves the guard INTO the try_stream! body so it lives
+    // as long as the stream future. This test pins the contract:
+    // after the client has opened the stream, the count must be >= 1.
+    let server = spawn_xds().await;
+    assert_eq!(
+        server.store.xds_subscriber_count(),
+        0,
+        "no subscribers before open"
+    );
+
+    let (tx, mut stream) = open_stream(&server.base).await;
+
+    // Drive at least one round-trip so the server task has definitely
+    // entered the try_stream! body (and therefore taken ownership of
+    // the guard). Without this, we'd be racing the spawn.
+    tx.send(lds_request("", ""))
+        .await
+        .expect("send lds subscribe");
+    let _first = next_response_with_timeout(&mut stream).await;
+
+    assert_eq!(
+        server.store.xds_subscriber_count(),
+        1,
+        "subscriber count must be >= 1 while stream is open"
+    );
+
+    // Drop client side; server task should observe end-of-stream and
+    // drop the guard. The count returning to 0 is what
+    // `wait_for_ack`'s mid-wait subscriber-disappearance check
+    // depends on, so it's worth pinning too.
+    drop(tx);
+    drop(stream);
+
+    // Wait briefly for the server task to notice the stream end.
+    for _ in 0..50 {
+        if server.store.xds_subscriber_count() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "subscriber count never returned to 0 after stream close (currently {})",
+        server.store.xds_subscriber_count()
+    );
+}
+
+#[tokio::test]
 async fn cds_subscription_returns_dfp_cluster_once() {
     let server = spawn_xds().await;
     let (tx, mut stream) = open_stream(&server.base).await;
