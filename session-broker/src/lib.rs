@@ -6,6 +6,7 @@ pub mod ext_proc;
 pub mod launcher;
 pub mod secrets;
 pub mod session_registry;
+pub mod sweeper;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -201,10 +202,18 @@ pub struct AppState {
     /// Tombstoned `Mcp-Session-Id` values: maps session-id → expiry `Instant`.
     /// Requests referencing a tombstoned id receive an immediate 404 without a
     /// transport-session lookup, preventing re-spawn races on stale clients.
+    ///
+    /// Bounded by a background sweep task (see [`sweeper`]): the routing-time
+    /// `is_tombstoned` purge is lazy and only fires on lookup of an expired
+    /// id, which almost never happens for real traffic.
     pub tombstones: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     /// Per-container liveness cache: maps container name → expiry `Instant`.
     /// An entry present and not yet expired means the container was confirmed
     /// running within the last `LIVENESS_TTL` and no docker inspect is needed.
+    ///
+    /// Bounded by a background sweep task (see [`sweeper`]): there is no
+    /// lazy-on-access purge here, because container names are random per spawn
+    /// and a torn-down container's entry is never looked up again.
     pub liveness_cache: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     /// Per-session open-stream counter and grace-timer handle.
     /// Keyed by `Mcp-Session-Id`.  When the counter drops to zero after the
@@ -278,6 +287,27 @@ pub async fn run() -> Result<(), String> {
     ));
 
     ext_proc::seed_startup_liveness(&state).await;
+
+    // Background sweepers for the two expiry-keyed maps in AppState. Both
+    // maps had only opportunistic per-request purging; without these tasks
+    // they grow with historical session/container count for the lifetime of
+    // the broker process. JoinHandles are intentionally dropped — the tokio
+    // runtime aborts them on shutdown and they hold no external resources.
+    let sweeper_interval = sweeper::sweeper_interval_from_env();
+    log_info(&format!(
+        "starting TTL sweepers (interval={}s)",
+        sweeper_interval.as_secs()
+    ));
+    let _tombstone_sweeper = sweeper::spawn_ttl_sweeper(
+        "tombstones",
+        Arc::clone(&state.tombstones),
+        sweeper_interval,
+    );
+    let _liveness_sweeper = sweeper::spawn_ttl_sweeper(
+        "liveness_cache",
+        Arc::clone(&state.liveness_cache),
+        sweeper_interval,
+    );
 
     log_info(&format!("starting admin HTTP server on {admin_addr}"));
     log_info(&format!("starting gRPC ext_proc service on {grpc_addr}"));
