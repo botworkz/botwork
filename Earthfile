@@ -24,7 +24,16 @@ control-plane-image:
         .
     SAVE IMAGE botwork/control-plane:local
 
+db-migrate-image:
+    ARG GIT_SHA=""
+    FROM DOCKERFILE --platform=linux/amd64 \
+        -f containers/db-migrate/Dockerfile \
+        --build-arg GIT_SHA=${GIT_SHA} \
+        .
+    SAVE IMAGE botwork/db-migrate:local
+
 images:
     BUILD +session-broker-image
     BUILD +config-broker-image
     BUILD +control-plane-image
+    BUILD +db-migrate-image

@@ -10,12 +10,17 @@ containers/config-broker/*
 !containers/control-plane/
 containers/control-plane/*
 !containers/control-plane/Dockerfile
+!containers/db-migrate/
+containers/db-migrate/*
+!containers/db-migrate/Dockerfile
 !session-broker/
 !session-broker/**
 !config-broker/
 !config-broker/**
 !control-plane/
 !control-plane/**
+!db/
+!db/**
 !launcher/
 !launcher/**
 !tools/

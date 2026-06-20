@@ -1,0 +1,53 @@
+[package]
+name = "botwork-migration"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "botwork_migration"
+path = "src/lib.rs"
+
+# v0 ships one binary: the production `botwork-migration` oneshot, invoked
+# as the `botwork/db-migrate:local` container's CMD. It runs `Migrator::up`
+# unconditionally and exits.
+#
+# The full sea-orm-migration operator CLI surface (`status` / `down` /
+# `fresh` / `refresh` / `reset`) is intentionally NOT exposed here in v0
+# because:
+#
+#   * v0 has zero migrations to roll back or diff against, so the CLI has
+#     no useful diagnostics to produce yet.
+#   * Enabling the `cli` feature on sea-orm-migration pulls clap, dotenvy,
+#     and the full sea-orm-cli — a dependency surface we should not adopt
+#     speculatively.
+#
+# When the first real entity lands and operators actually want `status`,
+# add it back as a second [[bin]] gated behind a `cli` feature on
+# sea-orm-migration. See RFE 97 (out-of-scope section).
+[[bin]]
+name = "botwork-migration"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+botwork-entity = { path = "../entity" }
+sea-orm-migration = { version = "1.1.20", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Production-leakage rail (see RFE 97): testcontainers MUST only appear under
+# [dev-dependencies], and `connect_from_env` MUST NOT be called from test
+# code. The grep tests in `tests/no_env_leakage.rs` and
+# `tests/testcontainers_isolation.rs` enforce both invariants in CI.
+testcontainers = "0.27.3"
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+sea-orm = { version = "1.1.20", default-features = false, features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+] }
