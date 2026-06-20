@@ -8,6 +8,7 @@ name = "botwork_entity"
 path = "src/lib.rs"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 # SeaORM, no defaults: we don't need bigdecimal / rust_decimal / time, only the
 # narrow set of value types we expect to use in entities. Re-pick later if a
 # specific entity needs a wider value-type surface.
@@ -20,7 +21,9 @@ sea-orm = { version = "1.1.20", default-features = false, features = [
     "with-json",
 ] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 # `connection.rs` carries a small unit test that drives `connect(...)` with a

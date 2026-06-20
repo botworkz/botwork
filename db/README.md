@@ -1,17 +1,17 @@
 # `db/` — botwork persistence layer
 
 This directory holds the SeaORM-based persistence layer for the botwork
-workspace. It lands the infrastructure that future entities and consumer
-cutovers will sit on; v0 itself does not change any consumer's behaviour.
+workspace. RFE #97 landed the rails (postgres in the stack, db-migrate
+oneshot, empty migrator); this iteration (RFE #101) lays down the v0
+schema — `tenant`, `workspace`, `plugin`, `workspace_plugin` — that
+config-broker will read from after the wire cutover.
 
-See [RFE #97](https://github.com/botworkz/botwork/issues/97) for design
-context. Companion deploy-side PRs in `botworkz/vm` and `botworkz/space`
-ship the postgres image, init oneshot, db-init/db-migrate units, and the
-separate `<vm>-db.qcow2` disk.
+See [RFE #97](https://github.com/botworkz/botwork/issues/97) and
+[RFE #101](https://github.com/botworkz/botwork/issues/101) for design
+context. Companion oneshot — `bootstrap/` — translates the
+`/etc/botwork/bootstrap.yaml` file into row upserts on every boot.
 
 ## Crates
-
-Two crates, following SeaORM's canonical entity + migration split:
 
 | Crate              | Path             | Role                                                 |
 |--------------------|------------------|------------------------------------------------------|
@@ -27,12 +27,17 @@ discoverable as a unit. Crate **names** (`botwork-entity`,
 
 ### `botwork-entity`
 
-Library crate. v0 ships **no entity modules** — the crate exists so that
-`botwork-migration` and (eventually) every persistence-aware consumer
-depends on a single source of truth for the schema. The first entity
-arrives with the first consumer cut over to the DB.
+Library crate. v0 ships the following entity modules:
 
-Public surface:
+| Module                              | Role                                                                                   |
+|-------------------------------------|----------------------------------------------------------------------------------------|
+| `botwork_entity::tenant`            | Top-level account row. Globally-unique `name`.                                          |
+| `botwork_entity::workspace`         | Tenant-scoped binding unit. `(tenant_id, name)` unique. Default name `mcp`.            |
+| `botwork_entity::plugin`            | Globally-named package. `name` unique. Carries image + opaque egress JSON.             |
+| `botwork_entity::workspace_plugin`  | Composite-PK binding row. Per-binding `config` blob (nullable).                        |
+| `botwork_entity::connection`        | `connect(url)` / `connect_from_env()` helpers; the `BOTWORK_DATABASE_URL` contract.    |
+
+Public connection surface (unchanged from RFE #97):
 
 ```rust
 use botwork_entity::connection::{connect, connect_from_env, ConnectError, DATABASE_URL_ENV};
@@ -50,7 +55,9 @@ use botwork_entity::connection::{connect, connect_from_env, ConnectError, DATABA
 Library + binary.
 
 * `lib.rs` exposes `pub struct Migrator` implementing
-  `MigratorTrait`. `migrations()` returns an empty vec in v0.
+  `MigratorTrait`. v0 has exactly one migration:
+  `m20260620_000001_create_core_tables` which lands the four tables,
+  their FK relationships, and the supporting indexes.
 * `bin/botwork-migration` (`src/main.rs`) is the **production oneshot**.
   It connects via `connect_from_env`, runs `Migrator::up`, and exits.
   This is the binary the `botwork/db-migrate:local` container runs as
@@ -58,9 +65,110 @@ Library + binary.
 
 The full `sea-orm-migration` operator CLI surface
 (`status` / `down` / `fresh` / `refresh` / `reset`) is intentionally NOT
-exposed here in v0 — see `src/main.rs` and RFE 97 (out-of-scope) for
+exposed here in v0 — see `src/main.rs` and RFE #97 (out-of-scope) for
 the reasoning. It comes back as a feature-gated second binary once
-there are real migrations whose state is worth inspecting.
+production needs an operator surface that exists outside admin-api.
+
+## Schema (v0)
+
+```
+   tenant ─1:N─┐
+               │
+             workspace ─M:N─ workspace_plugin ─N:1─ plugin
+```
+
+### Tables
+
+#### `tenant`
+
+| Column      | Type          | Notes                                          |
+|-------------|---------------|------------------------------------------------|
+| `id`        | `uuid` PK     | `DEFAULT gen_random_uuid()`                    |
+| `name`      | `text`        | UNIQUE — operator-typed slug (`phlax`)          |
+| `created_at`| `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                    |
+| `updated_at`| `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                    |
+
+#### `workspace`
+
+| Column      | Type          | Notes                                          |
+|-------------|---------------|------------------------------------------------|
+| `id`        | `uuid` PK     | `DEFAULT gen_random_uuid()`                    |
+| `tenant_id` | `uuid`        | FK → `tenant.id` ON DELETE **RESTRICT**         |
+| `name`      | `text`        | UNIQUE per tenant (`(tenant_id, name)`)        |
+| `created_at`| `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                    |
+| `updated_at`| `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                    |
+
+The unique-index on `(tenant_id, name)` is intentional: every new
+tenant gets a default workspace called `mcp`, so `name` alone is not
+unique — many tenants can own a workspace called `mcp` without
+collision.
+
+#### `plugin`
+
+| Column      | Type          | Notes                                          |
+|-------------|---------------|------------------------------------------------|
+| `id`        | `uuid` PK     | `DEFAULT gen_random_uuid()`                    |
+| `name`      | `text`        | UNIQUE — globally-named package (`mcp-bash`)    |
+| `image`     | `text`        | Docker image reference                         |
+| `egress`    | `jsonb`       | Opaque to the storage layer; config-broker /  |
+|             |               | control-plane own the schema                   |
+| `created_at`| `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                    |
+| `updated_at`| `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                    |
+
+#### `workspace_plugin`
+
+| Column         | Type        | Notes                                                      |
+|----------------|-------------|------------------------------------------------------------|
+| `workspace_id` | `uuid` PK#1 | FK → `workspace.id` ON DELETE **CASCADE**                  |
+| `plugin_id`    | `uuid` PK#2 | FK → `plugin.id` ON DELETE **RESTRICT**                    |
+| `config`       | `jsonb`     | Per-binding override. NULL = no override.                  |
+| `created_at`   | `timestamptz`| `DEFAULT CURRENT_TIMESTAMP`                                |
+| `updated_at`   | `timestamptz`| `DEFAULT CURRENT_TIMESTAMP`                                |
+
+`PRIMARY KEY (workspace_id, plugin_id)` is the natural binding key.
+A reverse-direction index `ix_workspace_plugin_plugin (plugin_id)`
+exists for the future admin-api "where is plugin X used?" query.
+
+### FK semantics, named
+
+* **`workspace.tenant_id` → `tenant.id` ON DELETE RESTRICT.**
+  Deleting a tenant with workspaces must be deliberate (drop the
+  workspaces first). Prevents a stray DELETE in some future migration
+  from cascade-wiping every binding.
+* **`workspace_plugin.workspace_id` → `workspace.id` ON DELETE CASCADE.**
+  A binding without a workspace is meaningless; deleting the workspace
+  tears down its bindings in the same statement.
+* **`workspace_plugin.plugin_id` → `plugin.id` ON DELETE RESTRICT.**
+  A plugin in use anywhere must be disabled everywhere before it can
+  be removed. The future admin-api's "delete plugin" surface walks the
+  reverse-index and refuses the operation if any bindings still point
+  at it.
+
+### Resolve hot-path
+
+The query that config-broker will run on every `POST /resolve` (post-
+cutover):
+
+```sql
+SELECT p.image, p.egress, wp.config
+FROM   plugin p
+JOIN   workspace_plugin wp ON wp.plugin_id    = p.id
+JOIN   workspace        w  ON w.id            = wp.workspace_id
+JOIN   tenant           t  ON t.id            = w.tenant_id
+WHERE  t.name = $1 AND w.name = $2 AND p.name = $3;
+```
+
+Every WHERE-clause column has an index supporting it (UNIQUE indexes
+on `tenant.name` and `plugin.name`, the composite UNIQUE on
+`workspace`).
+
+### JSONB columns
+
+`plugin.egress` and `workspace_plugin.config` are `jsonb` (not `json`).
+The decision to keep these opaque at the storage layer was deliberately
+deferred until a real query forces structure — see RFE #101 §
+"JSONB vs typed columns". `jsonb` keeps `@>`/`?` predicates and GIN
+indexes available without rewriting the column type later.
 
 ## Wire / env contract
 
@@ -93,7 +201,7 @@ ships to every deployment.
 
 Concretely, do not:
 
-- insert seed/fixture data (use a `botwork-tools` subcommand instead),
+- insert seed/fixture data (use the `bootstrap/` crate instead),
 - paper over dev-vs-prod differences,
 - conditionally branch on environment.
 
@@ -101,9 +209,10 @@ Seed/fixture data has separate homes:
 
 - Test fixtures live in test code, inserted per test via
   `botwork-entity`.
-- Dev/operator seed data lives in a `botwork-tools` subcommand
-  (the eventual `botwork-tools plugins reconcile`), invoked by space-side
-  bootstrap, idempotent, not part of `Migrator::up()`.
+- Operator seed data lives in `bootstrap/` (the `botwork-bootstrap`
+  binary), invoked by the `botwork-bootstrap.service` systemd oneshot
+  ordered between db-migrate and config-broker. Idempotent across
+  reboots.
 
 This is convention, not enforced. PR review is the gate.
 
@@ -144,9 +253,15 @@ the env var happens to be set in the runner's environment.
 * `db/migration/`: integration test `tests/migrate_smoke.rs` spins a real
   postgres via testcontainers and asserts:
   1. `Migrator::up` succeeds against an empty DB,
-  2. the `seaql_migrations` tracking table exists,
-  3. a second `Migrator::up` is also successful (idempotency — the
-     production oneshot can restart safely).
+  2. the four v0 tables exist + the `seaql_migrations` row records the
+     single v0 migration,
+  3. a second `Migrator::up` is also successful and doesn't re-insert
+     the tracking row (idempotency — the production oneshot can restart
+     safely),
+  4. the three named FK constraints have the expected `ON DELETE`
+     actions (RESTRICT / CASCADE / RESTRICT),
+  5. two tenants can each own a workspace called `mcp` without
+     collision (the composite-uniqueness rail).
 
   The test gates on docker availability and prints a structured
   `IGNORED` line when docker isn't reachable, so `cargo test` stays

@@ -1,15 +1,25 @@
 //! End-to-end migration smoke against a real postgres.
 //!
 //! Spins a throwaway postgres container via `testcontainers-modules`, points
-//! `botwork-migration` at it, and asserts the post-conditions that prove the
-//! migrate oneshot would do the right thing in production:
+//! `botwork-migration` at it, and asserts that the v0 schema (RFE #101)
+//! lands in a shape the bootstrap binary and config-broker will be able
+//! to query:
 //!
 //! 1. `Migrator::up` returns `Ok(())`.
-//! 2. The `seaql_migrations` tracking table exists in `public`.
-//! 3. A second `up` invocation against the same DB is also `Ok(())`
+//! 2. The `seaql_migrations` tracking table exists in `public` (and lists
+//!    our migration).
+//! 3. The four core tables (`tenant`, `workspace`, `plugin`,
+//!    `workspace_plugin`) all exist.
+//! 4. A second `up` invocation against the same DB is also `Ok(())`
 //!    (idempotency — the oneshot can restart safely).
+//! 5. FK semantics are wired the right way:
+//!    * `workspace.tenant_id → tenant.id`  ON DELETE **RESTRICT**
+//!    * `workspace_plugin.workspace_id → workspace.id`  ON DELETE **CASCADE**
+//!    * `workspace_plugin.plugin_id → plugin.id`  ON DELETE **RESTRICT**
+//! 6. The composite uniqueness `UNIQUE(tenant_id, name)` on workspace lets
+//!    multiple tenants own a workspace called `mcp` without collision.
 //!
-//! The test is gated on whether docker is reachable. In CI, the runner has
+//! The test gates on whether docker is reachable. In CI, the runner has
 //! docker and the test runs in full. On dev machines without docker, the
 //! gate prints a structured `IGNORED` line and the test passes — same shape
 //! as the workspace's other docker-dependent tests so `cargo test` stays
@@ -26,7 +36,7 @@ use std::time::Duration;
 
 use botwork_entity::connection::connect;
 use botwork_migration::Migrator;
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, FromQueryResult, Statement};
 use sea_orm_migration::MigratorTrait;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -106,10 +116,10 @@ async fn docker_available() -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn migrator_up_creates_tracking_table_and_is_idempotent() {
+async fn migrator_up_lands_v0_schema_and_is_idempotent() {
     if !docker_available().await {
         eprintln!(
-            "IGNORED migrator_up_creates_tracking_table_and_is_idempotent: \
+            "IGNORED migrator_up_lands_v0_schema_and_is_idempotent: \
              docker not reachable; full proof runs in containers.yml smoke"
         );
         return;
@@ -124,15 +134,26 @@ async fn migrator_up_creates_tracking_table_and_is_idempotent() {
         .await
         .expect("connect to ephemeral postgres");
 
-    // First run: must succeed (no migrations to apply) and create the
-    // sea-orm tracking table as a side effect.
+    // First run: must succeed and create the v0 schema as a side effect.
     Migrator::up(&db, None)
         .await
         .expect("Migrator::up first run");
 
     assert!(
-        seaql_migrations_table_exists(&db).await,
+        table_exists(&db, "seaql_migrations").await,
         "seaql_migrations table should exist after first Migrator::up"
+    );
+    for table in ["tenant", "workspace", "plugin", "workspace_plugin"] {
+        assert!(
+            table_exists(&db, table).await,
+            "{table} table should exist after first Migrator::up"
+        );
+    }
+
+    assert_eq!(
+        applied_migration_names(&db).await,
+        vec!["m20260620_000001_create_core_tables".to_owned()],
+        "seaql_migrations should record exactly the one v0 migration"
     );
 
     // Second run: must also succeed. This is the "the oneshot can restart
@@ -141,27 +162,142 @@ async fn migrator_up_creates_tracking_table_and_is_idempotent() {
         .await
         .expect("Migrator::up second run (idempotency)");
 
-    assert!(
-        seaql_migrations_table_exists(&db).await,
-        "seaql_migrations table should still exist after second Migrator::up"
+    assert_eq!(
+        applied_migration_names(&db).await,
+        vec!["m20260620_000001_create_core_tables".to_owned()],
+        "idempotent re-run should not duplicate the migration row"
     );
+
+    assert_fk_actions(&db).await;
+    assert_workspace_name_unique_per_tenant(&db).await;
 }
 
-async fn seaql_migrations_table_exists(db: &DatabaseConnection) -> bool {
+async fn table_exists(db: &DatabaseConnection, name: &str) -> bool {
     let backend = db.get_database_backend();
-    // information_schema is the portable place to ask "does this table
-    // exist?". We scope to `public` because that's where SeaORM places its
-    // own tracking table and where every entity in this workspace will live
-    // in v0.
-    let stmt = Statement::from_string(
+    let stmt = Statement::from_sql_and_values(
         backend,
         "SELECT 1 FROM information_schema.tables \
-         WHERE table_schema = 'public' AND table_name = 'seaql_migrations' \
-         LIMIT 1",
+         WHERE table_schema = 'public' AND table_name = $1 LIMIT 1",
+        [name.into()],
     );
-    let row = db
-        .query_one(stmt)
+    db.query_one(stmt)
         .await
-        .expect("information_schema query must succeed");
-    row.is_some()
+        .expect("information_schema query must succeed")
+        .is_some()
+}
+
+#[derive(FromQueryResult)]
+struct MigrationVersionRow {
+    version: String,
+}
+
+async fn applied_migration_names(db: &DatabaseConnection) -> Vec<String> {
+    let backend = db.get_database_backend();
+    let stmt = Statement::from_string(
+        backend,
+        "SELECT version FROM seaql_migrations ORDER BY version".to_owned(),
+    );
+    MigrationVersionRow::find_by_statement(stmt)
+        .all(db)
+        .await
+        .expect("seaql_migrations SELECT must succeed")
+        .into_iter()
+        .map(|r| r.version)
+        .collect()
+}
+
+#[derive(Debug, FromQueryResult)]
+struct FkActionRow {
+    delete_rule: String,
+}
+
+/// Look up the ON DELETE action for a given FK by its constraint name and
+/// assert it. RFE #101 nails these down explicitly so a future migration
+/// touching the FK has to be deliberate about changing semantics.
+async fn assert_fk_actions(db: &DatabaseConnection) {
+    for (name, expected) in [
+        ("fk_workspace_tenant", "RESTRICT"),
+        ("fk_workspace_plugin_workspace", "CASCADE"),
+        ("fk_workspace_plugin_plugin", "RESTRICT"),
+    ] {
+        let backend = db.get_database_backend();
+        let stmt = Statement::from_sql_and_values(
+            backend,
+            "SELECT delete_rule \
+             FROM information_schema.referential_constraints \
+             WHERE constraint_name = $1",
+            [name.into()],
+        );
+        let row = FkActionRow::find_by_statement(stmt)
+            .one(db)
+            .await
+            .expect("referential_constraints query must succeed")
+            .unwrap_or_else(|| panic!("FK {name} should exist"));
+        assert_eq!(
+            row.delete_rule, expected,
+            "FK {name} ON DELETE must be {expected}"
+        );
+    }
+}
+
+/// Plant a tenant + a `mcp` workspace under each of two tenants and assert
+/// no unique-key collision. The point is that `workspace.name` alone is NOT
+/// unique — the business key is `(tenant_id, name)` — and the design
+/// explicitly counts on every new tenant getting a default `mcp` workspace.
+async fn assert_workspace_name_unique_per_tenant(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name) VALUES \
+           (gen_random_uuid(), 'tenant-a'), \
+           (gen_random_uuid(), 'tenant-b')"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed tenants");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO workspace (id, tenant_id, name) \
+         SELECT gen_random_uuid(), id, 'mcp' FROM tenant WHERE name IN ('tenant-a', 'tenant-b')"
+            .to_owned(),
+    ))
+    .await
+    .expect("two workspaces named 'mcp' under distinct tenants must both insert");
+
+    // Same name twice under the SAME tenant must fail the unique index.
+    let dup_stmt = Statement::from_string(
+        backend,
+        "INSERT INTO workspace (id, tenant_id, name) \
+         SELECT gen_random_uuid(), id, 'mcp' FROM tenant WHERE name = 'tenant-a'"
+            .to_owned(),
+    );
+    let dup = db.execute(dup_stmt).await;
+    assert!(
+        dup.is_err(),
+        "second 'mcp' under same tenant must violate ux_workspace_tenant_name"
+    );
+
+    // Clean up so the test is repeatable against the same container.
+    //
+    // Workspace rows must go first because the inbound FK from
+    // workspace.tenant_id has ON DELETE RESTRICT — which is the
+    // property the rest of this test exists to assert. Dropping in
+    // the wrong order panics this cleanup with a 23503
+    // foreign_key_violation, which is exactly what we want production
+    // operators to see; the test just has to walk the rows in the
+    // correct order to demonstrate it.
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM workspace WHERE tenant_id IN \
+         (SELECT id FROM tenant WHERE name IN ('tenant-a', 'tenant-b'))"
+            .to_owned(),
+    ))
+    .await
+    .expect("workspace cleanup");
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM tenant WHERE name IN ('tenant-a', 'tenant-b')".to_owned(),
+    ))
+    .await
+    .expect("tenant cleanup");
 }

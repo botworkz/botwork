@@ -331,6 +331,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "botwork-bootstrap"
+version = "0.0.0"
+dependencies = [
+ "botwork-entity",
+ "botwork-migration",
+ "chrono",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "botwork-config-broker"
 version = "0.0.0"
 dependencies = [
@@ -383,10 +405,13 @@ dependencies = [
 name = "botwork-entity"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "sea-orm",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3790,6 +3815,7 @@ version = "1.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7"
 dependencies = [
+ "getrandom 0.4.2",
  "js-sys",
  "serde_core",
  "wasm-bindgen",
