@@ -70,11 +70,17 @@
 
 use std::net::Ipv4Addr;
 
+use envoy_proto::envoy::config::accesslog::v3::access_log::ConfigType as AccessLogConfigType;
+use envoy_proto::envoy::config::accesslog::v3::AccessLog;
 use envoy_proto::envoy::config::cluster::v3::cluster;
 use envoy_proto::envoy::config::cluster::v3::Cluster;
 use envoy_proto::envoy::config::core::v3::address::Address as AddressKind;
+use envoy_proto::envoy::config::core::v3::data_source::Specifier as DataSourceSpecifier;
 use envoy_proto::envoy::config::core::v3::socket_address::{PortSpecifier, Protocol};
-use envoy_proto::envoy::config::core::v3::{Address, CidrRange, SocketAddress};
+use envoy_proto::envoy::config::core::v3::substitution_format_string::Format as SubstitutionFormat;
+use envoy_proto::envoy::config::core::v3::{
+    Address, CidrRange, DataSource, SocketAddress, SubstitutionFormatString,
+};
 use envoy_proto::envoy::config::listener::v3::filter::ConfigType as FilterConfigType;
 use envoy_proto::envoy::config::listener::v3::{Filter, FilterChain, Listener};
 use envoy_proto::envoy::config::rbac::v3::{
@@ -86,6 +92,8 @@ use envoy_proto::envoy::config::route::v3::route_match::{ConnectMatcher, PathSpe
 use envoy_proto::envoy::config::route::v3::{
     HeaderMatcher, Route, RouteAction, RouteConfiguration, RouteMatch, VirtualHost,
 };
+use envoy_proto::envoy::extensions::access_loggers::stream::v3::stdout_access_log::AccessLogFormat as StdoutAccessLogFormat;
+use envoy_proto::envoy::extensions::access_loggers::stream::v3::StdoutAccessLog;
 use envoy_proto::envoy::extensions::clusters::dynamic_forward_proxy::v3::cluster_config::ClusterImplementationSpecifier;
 use envoy_proto::envoy::extensions::clusters::dynamic_forward_proxy::v3::ClusterConfig as DfpClusterConfig;
 use envoy_proto::envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig;
@@ -128,6 +136,42 @@ pub const EGRESS_LISTENER_PORT: u32 = 3128;
 /// IPv4 to match the rest of the broker stack's assumptions; if
 /// dual-stack ever lands this becomes a deployment-time flag.
 const DNS_LOOKUP_FAMILY_V4_ONLY: i32 = 1;
+
+/// Inline `text_format_source` for the egress envoy's stdout access
+/// log. Same shape as the ingress envoy's HCM `access_log` block (see
+/// vm `images/botwork/payload/envoy/lds/listener.yaml`), trimmed down
+/// to the fields that actually matter for an HTTP CONNECT forward
+/// proxy:
+///
+///   * `%REQ(:METHOD)% %REQ(:AUTHORITY)%` — `CONNECT api.github.com:443`
+///   * `%RESPONSE_CODE%` — 200 on accept, 403 on RBAC deny, 503 on
+///     upstream connect failure, etc.
+///   * `%RESPONSE_FLAGS%` + `%RESPONSE_CODE_DETAILS%` — the only
+///     fields that name *why* envoy returned a given status
+///     (`UAEX` for RBAC unauthorised, `dns_resolution_failure`,
+///     `no_healthy_upstream`, etc). Without these every 403 looks
+///     identical in the journal.
+///   * `%UPSTREAM_HOST%` — the resolved upstream the DFP cluster
+///     dialed; empty on RBAC reject (because RBAC short-circuits
+///     before DFP runs), populated on success.
+///   * `%DOWNSTREAM_REMOTE_ADDRESS%` — the plugin container's
+///     `direct_remote_ip`. This is the principal RBAC matched on, so
+///     pairing it with the response code makes a denied request
+///     trace back to a session id via control-plane's own logs.
+///   * `%DURATION%` — wall-clock total for the CONNECT lifecycle in
+///     ms. Useful for spotting DNS-resolution stalls separately
+///     from upstream send/recv stalls.
+///
+/// Trailing `\n` is part of the format string because envoy doesn't
+/// add one for `text_format_source` (it does for `json_format`).
+///
+/// Wire-shape stability matters: vm's goss-payload check is allowed
+/// to grep for fixed substrings in the egress envoy's `docker logs`
+/// output, so the prefix `[%START_TIME%]` is a load-bearing literal.
+const EGRESS_ACCESS_LOG_FORMAT: &str = "[%START_TIME%] \"%REQ(:METHOD)% %REQ(:AUTHORITY)%\" \
+    code=%RESPONSE_CODE% flags=%RESPONSE_FLAGS% details=%RESPONSE_CODE_DETAILS% \
+    downstream=%DOWNSTREAM_REMOTE_ADDRESS% upstream=%UPSTREAM_HOST% \
+    duration=%DURATION%\n";
 
 /// Build the LDS resource for the egress listener.
 ///
@@ -212,6 +256,51 @@ fn build_http_connection_manager(sessions: &[SessionRecord]) -> HttpConnectionMa
             build_dfp_filter(),
             build_router_filter(),
         ],
+        // One stdout access-log entry per CONNECT, formatted by
+        // `EGRESS_ACCESS_LOG_FORMAT`. Lives on the HCM (not the
+        // listener) because the listener-level `access_log` field
+        // only fires for L4 events (connection accepted /
+        // listener-filter rejection) and would miss every L7 RBAC
+        // deny and every DFP DNS failure — which are exactly the
+        // outcomes operators need to see when debugging a `403` /
+        // `503` from a plugin's curl.
+        access_log: vec![build_stdout_access_log()],
+        ..Default::default()
+    }
+}
+
+/// Build the single stdout access-log entry the HCM ships with.
+///
+/// Pulled out as a free function so the wire shape (envoy filter
+/// name + typed_config type URL) is named in exactly one place; the
+/// `build_listener` tests below decode the same shape back out and
+/// would catch any drift.
+fn build_stdout_access_log() -> AccessLog {
+    let inline = DataSource {
+        specifier: Some(DataSourceSpecifier::InlineString(
+            EGRESS_ACCESS_LOG_FORMAT.to_string(),
+        )),
+        ..Default::default()
+    };
+    let format = SubstitutionFormatString {
+        format: Some(SubstitutionFormat::TextFormatSource(inline)),
+        ..Default::default()
+    };
+    let stdout = StdoutAccessLog {
+        access_log_format: Some(StdoutAccessLogFormat::LogFormat(format)),
+    };
+    AccessLog {
+        // Filter-name is fixed by envoy's extension registry; pick
+        // the one that matches the `StdoutAccessLog` typed_config so
+        // envoy resolves the extension without us also setting the
+        // `extension_config` factory hint.
+        name: "envoy.access_loggers.stdout".to_string(),
+        config_type: Some(AccessLogConfigType::TypedConfig(Any {
+            type_url:
+                "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog"
+                    .to_string(),
+            value: stdout.encode_to_vec(),
+        })),
         ..Default::default()
     }
 }
@@ -883,5 +972,98 @@ mod tests {
             .map(|u| u.upgrade_type.as_str())
             .collect();
         assert_eq!(types, vec!["CONNECT"]);
+    }
+
+    // ── Access-log shape ────────────────────────────────────────────────────
+    //
+    // The HCM ships exactly one access-log entry: a `StdoutAccessLog`
+    // configured with `EGRESS_ACCESS_LOG_FORMAT`. These tests decode all
+    // the way down to the inline format string so any future drift
+    // (filter name, type URL, missing format) trips here before it
+    // becomes "envoy is silent in production."
+
+    fn decode_hcm(listener: &Listener) -> HttpConnectionManager {
+        let chain = listener.filter_chains.first().expect("chain");
+        let FilterConfigType::TypedConfig(any) =
+            chain.filters[0].config_type.clone().expect("config_type")
+        else {
+            panic!("expected TypedConfig on network filter");
+        };
+        HttpConnectionManager::decode(any.value.as_slice()).expect("decode hcm")
+    }
+
+    fn decode_stdout_access_log(hcm: &HttpConnectionManager) -> StdoutAccessLog {
+        assert_eq!(
+            hcm.access_log.len(),
+            1,
+            "exactly one access-log entry expected; got: {:?}",
+            hcm.access_log
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+        );
+        let entry = &hcm.access_log[0];
+        assert_eq!(entry.name, "envoy.access_loggers.stdout");
+        let AccessLogConfigType::TypedConfig(any) = entry.config_type.clone().expect("config_type");
+        assert_eq!(
+            any.type_url,
+            "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog"
+        );
+        StdoutAccessLog::decode(any.value.as_slice()).expect("decode StdoutAccessLog")
+    }
+
+    #[test]
+    fn hcm_carries_exactly_one_stdout_access_log() {
+        let listener = build_listener(&[]);
+        let hcm = decode_hcm(&listener);
+        // decode_stdout_access_log asserts everything we care about
+        // about the entry's wire shape.
+        let _stdout = decode_stdout_access_log(&hcm);
+    }
+
+    #[test]
+    fn access_log_inline_text_format_matches_constant() {
+        // The format string is the contract operators grep for in
+        // `docker logs botwork-egress-envoy`. Pin the literal here so
+        // a refactor to the constant must also update this assertion
+        // — and so the field selectors that matter for debugging an
+        // egress 403 (`RESPONSE_FLAGS`, `RESPONSE_CODE_DETAILS`,
+        // `DOWNSTREAM_REMOTE_ADDRESS`) cannot be silently dropped.
+        let listener = build_listener(&[]);
+        let hcm = decode_hcm(&listener);
+        let stdout = decode_stdout_access_log(&hcm);
+        let StdoutAccessLogFormat::LogFormat(fmt) =
+            stdout.access_log_format.expect("access_log_format");
+        let SubstitutionFormat::TextFormatSource(source) = fmt.format.expect("format") else {
+            panic!("expected text_format_source");
+        };
+        let DataSourceSpecifier::InlineString(actual) =
+            source.specifier.expect("DataSource specifier")
+        else {
+            panic!("expected inline_string DataSource");
+        };
+        assert_eq!(actual, EGRESS_ACCESS_LOG_FORMAT);
+        // Spot-check the load-bearing operator-debugging fields so a
+        // future "shorten the format string" refactor can't drop the
+        // `flags=` / `details=` / `downstream=` / `upstream=` columns
+        // without flipping this assertion red. These are the columns
+        // that name *why* envoy returned a given status — without
+        // them every 403 / 503 looks identical in the journal.
+        for must_have in [
+            "[%START_TIME%]",
+            "%REQ(:METHOD)% %REQ(:AUTHORITY)%",
+            "code=%RESPONSE_CODE%",
+            "flags=%RESPONSE_FLAGS%",
+            "details=%RESPONSE_CODE_DETAILS%",
+            "downstream=%DOWNSTREAM_REMOTE_ADDRESS%",
+            "upstream=%UPSTREAM_HOST%",
+            "duration=%DURATION%",
+        ] {
+            assert!(
+                actual.contains(must_have),
+                "access-log format missing {must_have:?}; got: {actual:?}"
+            );
+        }
+        assert!(actual.ends_with('\n'), "format must end with newline");
     }
 }
