@@ -1,10 +1,15 @@
 # Containers
 
-`botwork` builds two container images:
+`botwork` builds four container images:
 
 - `session-broker`: Rust session broker service image.
 - `config-broker`: Rust config broker service image (resolves plugin
   descriptors for session-broker; owns `plugins.yaml`).
+- `control-plane`: Rust control-plane service image (xDS for envoy + per-
+  session policy fan-out).
+- `db-migrate`: Rust **oneshot** (not a server) that runs SeaORM migrations
+  against postgres at boot and exits. See `db/migration/` for the binary
+  and RFE 97 for the design.
 
 ## Build locally
 
@@ -22,11 +27,14 @@ earthly bootstrap
 rm -rf "${tmp}"
 earthly +session-broker-image
 earthly +config-broker-image
+earthly +control-plane-image
+earthly +db-migrate-image
 # Or build everything:
 earthly +images
 ```
 
-This produces `botwork/session-broker:local` and `botwork/config-broker:local`.
+This produces `botwork/session-broker:local`, `botwork/config-broker:local`,
+`botwork/control-plane:local`, and `botwork/db-migrate:local`.
 
 > **Release builds** stamp each image with `org.opencontainers.image.revision`
 > set to `$GITHUB_SHA` and verify the label matches before pushing to GHCR —
@@ -61,7 +69,9 @@ by the root `VERSION` file (repo root, not this directory).
 1. Set `VERSION` to a clean semver (no suffix), e.g. `1.2.0`, and merge to `main`.
 2. The release workflow detects the clean version and automatically:
    - Builds and pushes `ghcr.io/botworkz/botwork/session-broker:<VERSION>`,
-     `ghcr.io/botworkz/botwork/config-broker:<VERSION>`, and the corresponding
+     `ghcr.io/botworkz/botwork/config-broker:<VERSION>`,
+     `ghcr.io/botworkz/botwork/control-plane:<VERSION>`,
+     `ghcr.io/botworkz/botwork/db-migrate:<VERSION>`, and the corresponding
      `:latest` tags to GHCR.
    - Builds release binaries for `botwork-launcher` and `botwork-tools`.
    - Creates a GitHub Release `v<VERSION>` with those binaries as assets.

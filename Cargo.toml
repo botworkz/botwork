@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "config-broker",
     "control-plane",
+    "db/entity",
+    "db/migration",
     "launcher",
     "session-broker",
     "tools",

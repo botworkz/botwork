@@ -1,0 +1,30 @@
+[package]
+name = "botwork-entity"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "botwork_entity"
+path = "src/lib.rs"
+
+[dependencies]
+# SeaORM, no defaults: we don't need bigdecimal / rust_decimal / time, only the
+# narrow set of value types we expect to use in entities. Re-pick later if a
+# specific entity needs a wider value-type surface.
+sea-orm = { version = "1.1.20", default-features = false, features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+# `connection.rs` carries a small unit test that drives `connect(...)` with a
+# malformed URL and asserts the error categorisation. The test exercises
+# tokio-flavoured async without needing testcontainers, so tokio stays a
+# dev-dep here (not a hard runtime dep on the entity crate).
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

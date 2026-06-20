@@ -12,10 +12,10 @@ WORKDIR /build
 
 COPY config-broker/ ./config-broker/
 COPY control-plane/ ./control-plane/
+COPY db/ ./db/
 COPY session-broker/ ./session-broker/
 COPY launcher/ ./launcher/
 COPY tools/ ./tools/
-COPY Cargo.toml ./
 COPY Cargo.toml Cargo.lock ./
 
 RUN apt-get update \

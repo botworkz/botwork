@@ -4,9 +4,10 @@
 #   1. A developer sets the root VERSION file to a clean semver (e.g. "1.2.0"),
 #      removes the "-dev" suffix, and merges to main.
 #   2. Job A (publish) detects the clean version, builds and pushes the
-#      session-broker and config-broker containers to GHCR, builds release
-#      binaries for botwork-launcher and botwork-tools, and creates a GitHub
-#      Release v<VERSION> with those binaries attached.
+#      session-broker, config-broker, control-plane, and db-migrate
+#      containers to GHCR, builds release binaries for botwork-launcher and
+#      botwork-tools, and creates a GitHub Release v<VERSION> with those
+#      binaries attached.
 #   3. Job B (bump) triggers on the published Release event, increments the
 #      minor version, appends "-dev", and commits the new VERSION back to main
 #      (e.g. "1.2.0" → "1.3.0-dev").
@@ -168,6 +169,35 @@ jobs:
         echo "verified: image revision label matches GITHUB_SHA (${expected})"
         docker tag botwork/control-plane:local "${REPO}:${VERSION}"
         docker tag botwork/control-plane:local "${REPO}:latest"
+        docker push "${REPO}:${VERSION}"
+        docker push "${REPO}:latest"
+
+    # ── Container: build and push db-migrate ────────────────────────────────
+    # Symmetric to the other broker images. db-migrate is a oneshot, not a
+    # server, but the publish contract is identical: build with revision
+    # label, refuse to push on mismatch, tag :VERSION + :latest. vm-side
+    # shasset-pins against this image just like the others.
+    - name: Build and push db-migrate container
+      if: steps.version.outputs.is_release == 'true'
+      run: |
+        set -euo pipefail
+        VERSION="${{ steps.version.outputs.version }}"
+        REPO="ghcr.io/botworkz/botwork/db-migrate"
+        # Platform is pinned in Earthfile via FROM DOCKERFILE --platform=linux/amd64.
+        earthly --no-cache --build-arg GIT_SHA="${GITHUB_SHA}" +db-migrate-image
+        expected="${GITHUB_SHA}"
+        actual="$(docker image inspect botwork/db-migrate:local \
+          --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+        if [[ "${actual}" != "${expected}" ]]; then
+          echo "ERROR: built image has revision label '${actual}' but workflow was triggered by commit '${expected}'." >&2
+          echo "Refusing to push a release container whose provenance does not match the triggering commit." >&2
+          echo "Also dumping all labels on the built image for diagnosis:" >&2
+          docker image inspect botwork/db-migrate:local --format '{{ json .Config.Labels }}' >&2
+          exit 1
+        fi
+        echo "verified: image revision label matches GITHUB_SHA (${expected})"
+        docker tag botwork/db-migrate:local "${REPO}:${VERSION}"
+        docker tag botwork/db-migrate:local "${REPO}:latest"
         docker push "${REPO}:${VERSION}"
         docker push "${REPO}:latest"
 
