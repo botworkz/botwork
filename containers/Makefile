@@ -4,7 +4,7 @@ SHELL := /bin/bash
 
 VERSION := $(shell [ -f ../VERSION ] && tr -d '[:space:]' < ../VERSION || echo 0.0.0-dev)
 GHCR_PREFIX := ghcr.io/botworkz/botwork
-SERVICES := session-broker config-broker control-plane db-migrate
+SERVICES := session-broker config-broker control-plane db-migrate bootstrap
 EARTHLY ?= earthly
 
 .PHONY: containers tarballs clean $(SERVICES)
@@ -31,6 +31,10 @@ control-plane:
 	$(call tag_image,$@)
 
 db-migrate:
+	cd .. && $(EARTHLY) +$@-image
+	$(call tag_image,$@)
+
+bootstrap:
 	cd .. && $(EARTHLY) +$@-image
 	$(call tag_image,$@)
 

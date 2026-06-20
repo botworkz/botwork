@@ -13,6 +13,11 @@ containers/control-plane/*
 !containers/db-migrate/
 containers/db-migrate/*
 !containers/db-migrate/Dockerfile
+!containers/bootstrap/
+containers/bootstrap/*
+!containers/bootstrap/Dockerfile
+!bootstrap/
+!bootstrap/**
 !session-broker/
 !session-broker/**
 !config-broker/

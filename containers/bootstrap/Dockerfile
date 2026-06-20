@@ -1,13 +1,13 @@
 # Build from the repository root:
-#   docker build -t botwork/db-migrate:local \
-#     -f containers/db-migrate/Dockerfile .
+#   docker build -t botwork/bootstrap:local \
+#     -f containers/bootstrap/Dockerfile .
 
 # Pin builder to bookworm so the binary links against glibc 2.36, matching
 # the distroless base-nossl-debian12 runtime. The default rust:1.90-slim
 # tag is trixie-based (glibc 2.41) and produces binaries that fail on
 # the runtime with `GLIBC_2.39 not found`.
 #
-# Symmetric with containers/config-broker/Dockerfile and the other broker
+# Symmetric with containers/db-migrate/Dockerfile and the other broker
 # images so the build behaviour is uniform across the workspace.
 FROM rust:1.90-slim-bookworm AS builder
 
@@ -29,11 +29,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Only the production binary is shipped. The operator CLI (sea-orm-migration
-# `up`/`down`/`status`/etc.) is not built into this image — see
-# db/migration/src/main.rs for the rationale. RFE 97 lists CLI exposure as
-# a follow-up once there are real migrations whose state is worth inspecting.
-RUN cargo build --release --package botwork-migration --bin botwork-migration
+# Production-only binary. Bootstrap has no operator CLI — the binary
+# does exactly one thing: read bootstrap.yaml, upsert into postgres,
+# exit. See bootstrap/src/main.rs for the exit-code contract.
+RUN cargo build --release --package botwork-bootstrap --bin botwork-bootstrap
 
 # Runtime
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
@@ -49,12 +48,13 @@ LABEL org.opencontainers.image.source="https://github.com/botworkz/botwork"
 COPY --from=builder /lib/x86_64-linux-gnu/libgcc_s.so.1 \
     /lib/x86_64-linux-gnu/libgcc_s.so.1
 
-COPY --from=builder /build/target/release/botwork-migration \
-    /usr/local/bin/botwork-migration
+COPY --from=builder /build/target/release/botwork-bootstrap \
+    /usr/local/bin/botwork-bootstrap
 
 # No EXPOSE line: this image is a oneshot, not a server. Production
 # invocation pattern is `docker run --rm --network botwork-internal \
-# --env-file /var/lib/botwork-db/secret.env botwork/db-migrate:local`.
-# It connects, runs Migrator::up, exits.
+# --env-file /var/lib/botwork-db/secret.env \
+# -v /etc/botwork/bootstrap.yaml:/etc/botwork/bootstrap.yaml:ro \
+# botwork/bootstrap:local`. It connects, upserts, exits.
 
-ENTRYPOINT ["/usr/local/bin/botwork-migration"]
+ENTRYPOINT ["/usr/local/bin/botwork-bootstrap"]

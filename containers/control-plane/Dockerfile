@@ -10,6 +10,7 @@ FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /build
 
+COPY bootstrap/ ./bootstrap/
 COPY config-broker/ ./config-broker/
 COPY control-plane/ ./control-plane/
 COPY db/ ./db/

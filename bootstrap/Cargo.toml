@@ -1,0 +1,57 @@
+[package]
+name = "botwork-bootstrap"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "botwork_bootstrap"
+path = "src/lib.rs"
+
+# Production oneshot. Container CMD is this binary; the systemd unit
+# botwork-bootstrap.service runs after botwork-db-migrate and before
+# botwork-config-broker. Idempotent: re-runs at every boot, no-op when
+# bootstrap.yaml hasn't changed.
+[[bin]]
+name = "botwork-bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+botwork-entity = { path = "../db/entity" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+sea-orm = { version = "1.1.20", default-features = false, features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+# RFE 97 rail: testcontainers stays out of [dependencies]. Enforced in CI
+# by db/migration/tests/testcontainers_isolation.rs (which walks every
+# workspace member, including this one).
+testcontainers = "0.27.3"
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+botwork-migration = { path = "../db/migration" }
+tempfile = "3"
+sea-orm = { version = "1.1.20", default-features = false, features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
+sea-orm-migration = { version = "1.1.20", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+] }

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "bootstrap",
     "config-broker",
     "control-plane",
     "db/entity",
