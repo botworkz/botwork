@@ -29,9 +29,6 @@ pub enum BootstrapError {
     #[error("duplicate plugin name in plugins[]: {0}")]
     DuplicatePlugin(String),
 
-    #[error("plugin '{0}' is missing required 'image'")]
-    PluginMissingImage(String),
-
     #[error("duplicate tenant name in tenants[]: {0}")]
     DuplicateTenant(String),
 
@@ -56,6 +53,21 @@ pub enum BootstrapError {
         workspace: String,
         plugin: String,
     },
+
+    /// Plugin spec failed shape validation (image, port, path,
+    /// upstream_auth, env, resources, egress, etc.). The `detail` is
+    /// the human-readable rule that fired — comes from
+    /// `plugin_spec::validate_*`. Carrying the plugin name + detail
+    /// rather than a free-form string keeps logs greppable.
+    #[error("plugin '{plugin}': {detail}")]
+    PluginInvalid { plugin: String, detail: String },
+
+    /// Per-binding `config:` blob failed validation (non-mapping,
+    /// oversized, etc.). `context` is e.g.
+    /// `tenant 'phlax' workspace 'mcp' plugin 'mcp-fetch'` so the
+    /// operator can find it.
+    #[error("{context}: {detail}")]
+    BindingInvalid { context: String, detail: String },
 
     // -- Runtime-side errors ----------------------------------------------
     #[error("connection failed: {0}")]

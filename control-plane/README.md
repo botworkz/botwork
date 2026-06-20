@@ -27,7 +27,7 @@ session-broker and (future) the egress envoy's xDS subscription.
   surface as 4xx so a control-plane / session-broker desync never
   passes silently.
 - Validates wire input against the same shape regexes the rest of the
-  botwork stack uses (session ids, tenant, namespace, plugin names,
+  botwork stack uses (session ids, tenant, workspace, plugin names,
   IPv4 container IP).
 - Echoes any egress policy verbatim. v0 does not parse it; the schema
   is owned by config-broker (and grows in PR B alongside).
@@ -104,7 +104,7 @@ Request body (JSON):
   "session_id":    "mcp_session_<token>",
   "container_ip":  "172.20.0.5",
   "tenant":        "phlax",
-  "namespace":     "mcp",
+  "workspace":     "mcp",
   "plugin":        "fetch",
   "egress_policy": { "allow": [{"host": "github.com", "ports": [443]}] }
 }
@@ -135,7 +135,7 @@ hard-gate posture upstream (session-broker treats a bad ack as 503).
 - `container_ip` must be an IPv4 dotted-quad. IPv6 is not modelled in
   v0 because the broker stack assumes IPv4 throughout; bumping that is
   a schema change.
-- `tenant`, `namespace`, `plugin` must each match
+- `tenant`, `workspace`, `plugin` must each match
   `^[a-z][a-z0-9-]{0,30}$` — same rule as config-broker.
 - `egress_policy` is optional on the wire; missing or `null` is
   stored verbatim and treated by the xDS compiler as fail-closed
@@ -334,7 +334,7 @@ POST /sessions HTTP/1.1
 Host: control_plane:9300
 Content-Type: application/json
 
-{"session_id":"mcp_session_abc","container_ip":"172.20.0.5","tenant":"phlax","namespace":"mcp","plugin":"fetch","egress_policy":{"allow":[{"host":"github.com","ports":[443]}]}}
+{"session_id":"mcp_session_abc","container_ip":"172.20.0.5","tenant":"phlax","workspace":"mcp","plugin":"fetch","egress_policy":{"allow":[{"host":"github.com","ports":[443]}]}}
 ```
 
 Success response:

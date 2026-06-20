@@ -79,10 +79,13 @@ jobs:
     - name: Smoke test config-broker
       run: |
         set -euo pipefail
-        # config-broker refuses to start when plugins.yaml is missing.
+        # Post-RFE #101 PR2: config-broker reads from postgres at startup.
+        # The fail-fast on no DB URL is the operator-visible signal that
+        # the env-file plumbing didn't land — production CMD must surface
+        # that as a non-zero exit, not a hung connect.
         output="$(docker run --rm botwork/config-broker:local 2>&1 || true)"
         echo "${output}"
-        echo "${output}" | grep -q "plugin registry file not found"
+        echo "${output}" | grep -q "BOTWORK_DATABASE_URL is not set"
     - name: Build control-plane
       run: |
         set -euo pipefail
@@ -272,8 +275,7 @@ jobs:
         plugins:
         - name: mcp-bash
           image: ghcr.io/example/mcp-bash:1.0
-          egress:
-            mode: none
+          egress: none
         - name: mcp-fetch
           image: ghcr.io/example/mcp-fetch:1.0
           egress:

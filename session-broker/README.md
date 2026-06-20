@@ -52,7 +52,7 @@ Spawn-time descriptor resolution:
 
 ```
 POST {BOTWORK_CONFIG_BROKER_ENDPOINT}/resolve
-  { "tenant": "<tenant>", "namespace": "<ns>", "plugin": "<name>" }
+  { "tenant": "<tenant>", "workspace": "<ns>", "plugin": "<name>" }
 ```
 
 Successful response is the plugin's full descriptor (image, port,
@@ -63,7 +63,7 @@ path, upstream_auth, resources, env, config_blob). See
 
 | Result                                  | Client-facing status                              |
 |-----------------------------------------|---------------------------------------------------|
-| Operator-fault 4xx (`unknown_plugin`, `invalid_namespace`, `invalid_request`) | Pass-through 4xx with same message |
+| Operator-fault 4xx (`unknown_plugin`, `invalid_workspace`, `invalid_request`) | Pass-through 4xx with same message |
 | Server fault 5xx, transport error, timeout, garbage response | 502 with detail; spawn fails closed |
 
 There is **no** retry on the spawn-path config-broker call in v0. Fail-closed
@@ -90,7 +90,7 @@ POST {BOTWORK_CONTROL_PLANE_ENDPOINT}/sessions
     "session_id":    "<container_name>",
     "container_ip":  "<ipv4>",
     "tenant":        "<tenant>",
-    "namespace":     "<ns>",
+    "workspace":     "<ns>",
     "plugin":        "<name>",
     "egress_policy": <opaque JSON | null>
   }
@@ -129,7 +129,7 @@ session-broker exposes two read-only HTTP endpoints on
 - `GET /control-plane/sessions` — recovery-sync surface for
   control-plane. Returns one entry per live transport session in
   `control-plane`-`SessionRecord`-wire-shape:
-  `{ session_id, container_ip, tenant, namespace, plugin, egress_policy }`.
+  `{ session_id, container_ip, tenant, workspace, plugin, egress_policy }`.
   Sorted by `session_id`. Only sessions that have reached
   `response_headers` (and therefore have a populated `Mcp-Session-Id`)
   appear; pre-`response_headers` records are deliberately excluded

@@ -13,7 +13,7 @@
 //!       "session_id":    "mcp_session_<token>",
 //!       "container_ip":  "<ipv4>",
 //!       "tenant":        "<name>",
-//!       "namespace":     "<name>",
+//!       "workspace":     "<name>",
 //!       "plugin":        "<name>",
 //!       "egress_policy": <opaque JSON | null>
 //!     }
@@ -69,7 +69,7 @@ pub struct PostSessionRequest<'a> {
     pub session_id: &'a str,
     pub container_ip: &'a str,
     pub tenant: &'a str,
-    pub namespace: &'a str,
+    pub workspace: &'a str,
     pub plugin: &'a str,
     /// Always serialised, even when `None` -- emitted as JSON `null`.
     /// See module docs for the rationale.
@@ -349,7 +349,7 @@ mod tests {
             session_id: "mcp_session_abc",
             container_ip: "172.20.0.5",
             tenant: "phlax",
-            namespace: "mcp",
+            workspace: "mcp",
             plugin: "fetch",
             egress_policy: &None,
         };
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(json["session_id"], "mcp_session_abc");
         assert_eq!(json["container_ip"], "172.20.0.5");
         assert_eq!(json["tenant"], "phlax");
-        assert_eq!(json["namespace"], "mcp");
+        assert_eq!(json["workspace"], "mcp");
         assert_eq!(json["plugin"], "fetch");
         assert!(
             json.get("egress_policy").is_some(),
@@ -375,7 +375,7 @@ mod tests {
             session_id: "mcp_session_abc",
             container_ip: "172.20.0.5",
             tenant: "phlax",
-            namespace: "mcp",
+            workspace: "mcp",
             plugin: "github",
             egress_policy: &Some(policy.clone()),
         };

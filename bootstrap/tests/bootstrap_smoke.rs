@@ -1,23 +1,20 @@
 //! End-to-end bootstrap apply against a real postgres.
 //!
 //! Spins a throwaway postgres + runs `botwork-migration` to land the
-//! schema, then exercises the bootstrap binary's library entry point
-//! ([`botwork_bootstrap::apply`]) and asserts:
+//! schema, then exercises `botwork_bootstrap::apply` against a
+//! validated config and asserts:
 //!
-//! 1. A fresh apply against an empty DB inserts the expected counts.
-//! 2. A second apply with the same config is a complete no-op
-//!    (idempotency — boot can restart safely).
-//! 3. A mutated config produces the expected per-table mutation counts.
-//! 4. The resolve-shape query (RFE #101 hot path) returns the row we
-//!    just bootstrapped — proving the schema + apply are wired together.
+//! 1. Fresh apply against an empty DB inserts the expected counts.
+//! 2. Second apply with the same config is a no-op (idempotency).
+//! 3. Mutated config produces the expected per-table update counts.
+//! 4. The resolve-shape JOIN returns the row we just bootstrapped.
 //!
 //! Gated on docker the same way `migrate_smoke.rs` is.
 
 use std::time::Duration;
 
-use botwork_bootstrap::{
-    apply, BootstrapConfig, PluginEntry, TenantEntry, WorkspaceEntry, WorkspacePluginEntry,
-};
+use botwork_bootstrap::plugin_spec::RawPluginEntry;
+use botwork_bootstrap::{apply, BootstrapConfig, BootstrapConfigRaw};
 use botwork_entity::connection::connect;
 use botwork_migration::Migrator;
 use sea_orm::{ConnectionTrait, DatabaseConnection, FromQueryResult, Statement};
@@ -82,38 +79,60 @@ async fn docker_available() -> bool {
 
 /// Build a `BootstrapConfig` shaped like a minimal real `bootstrap.yaml`:
 /// tenant `phlax`, workspace `mcp`, two plugins (one with a per-binding
-/// config blob, one without).
+/// config blob, one without). Routed through the raw->validated pipeline
+/// so the smoke exercises the validator too.
 fn sample_config() -> BootstrapConfig {
-    BootstrapConfig {
-        tenants: vec![TenantEntry {
-            name: "phlax".to_owned(),
-            workspaces: vec![WorkspaceEntry {
-                name: "mcp".to_owned(),
-                plugins: vec![
-                    WorkspacePluginEntry {
-                        name: "mcp-bash".to_owned(),
-                        config: None,
-                    },
-                    WorkspacePluginEntry {
-                        name: "mcp-fetch".to_owned(),
-                        config: Some(serde_json::json!({"url": "https://example.com"})),
-                    },
-                ],
-            }],
-        }],
-        plugins: vec![
-            PluginEntry {
-                name: "mcp-bash".to_owned(),
-                image: "ghcr.io/example/mcp-bash:1.0".to_owned(),
-                egress: serde_json::json!({"mode": "none"}),
-            },
-            PluginEntry {
-                name: "mcp-fetch".to_owned(),
-                image: "ghcr.io/example/mcp-fetch:1.0".to_owned(),
-                egress: serde_json::json!({"allow": [{"host": "example.com", "ports": [443]}]}),
-            },
-        ],
-    }
+    let yaml = r#"
+tenants:
+- name: phlax
+  workspaces:
+  - name: mcp
+    plugins:
+    - name: mcp-bash
+    - name: mcp-fetch
+      config:
+        url: https://example.com
+
+plugins:
+- name: mcp-bash
+  image: ghcr.io/example/mcp-bash:1.0
+  egress: none
+- name: mcp-fetch
+  image: ghcr.io/example/mcp-fetch:1.0
+  egress:
+    allow:
+    - host: example.com
+      ports: [443]
+"#;
+    let raw: BootstrapConfigRaw = serde_yaml::from_str(yaml).expect("parse bootstrap yaml");
+    BootstrapConfig::from_raw(raw).expect("validate")
+}
+
+/// Same as `sample_config` but with `image` mutated on `mcp-bash` and
+/// the per-binding `config` removed on `mcp-fetch`.
+fn mutated_config() -> BootstrapConfig {
+    let yaml = r#"
+tenants:
+- name: phlax
+  workspaces:
+  - name: mcp
+    plugins:
+    - name: mcp-bash
+    - name: mcp-fetch
+
+plugins:
+- name: mcp-bash
+  image: ghcr.io/example/mcp-bash:2.0
+  egress: none
+- name: mcp-fetch
+  image: ghcr.io/example/mcp-fetch:1.0
+  egress:
+    allow:
+    - host: example.com
+      ports: [443]
+"#;
+    let raw: BootstrapConfigRaw = serde_yaml::from_str(yaml).expect("parse bootstrap yaml");
+    BootstrapConfig::from_raw(raw).expect("validate")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -143,15 +162,10 @@ async fn bootstrap_inserts_idempotently_then_resolves() {
     assert_eq!(stats.workspaces_inserted, 1);
     assert_eq!(stats.plugins_inserted, 2);
     assert_eq!(stats.bindings_inserted, 2);
-    assert_eq!(stats.tenants_updated, 0);
-    assert_eq!(stats.workspaces_updated, 0);
     assert_eq!(stats.plugins_updated, 0);
     assert_eq!(stats.bindings_updated, 0);
 
-    // Second apply with the same config: every row already exists with
-    // matching content, so no UPDATE should fire (counted columns stay 0).
-    // tenant/workspace report `updated=1` because they have no mutable
-    // shape and we count the "row matches" branch as updated.
+    // Second apply with the same config: zero mutations.
     let stats = apply(&db, &cfg).await.expect("second apply");
     assert_eq!(stats.tenants_inserted, 0);
     assert_eq!(stats.workspaces_inserted, 0);
@@ -166,10 +180,8 @@ async fn bootstrap_inserts_idempotently_then_resolves() {
         "unchanged bindings must not UPDATE"
     );
 
-    // Resolve hot-path: prove the join chain returns what config-broker
-    // will read post-cutover. We assert on the binding for (phlax, mcp,
-    // mcp-fetch) because it carries a config blob — the resolve path
-    // we'll be exercising once config-broker switches.
+    // Resolve hot-path: prove the join chain returns what
+    // config-broker will read post-cutover.
     let resolved = resolve(&db, "phlax", "mcp", "mcp-fetch").await;
     assert_eq!(resolved.image, "ghcr.io/example/mcp-fetch:1.0");
     assert_eq!(
@@ -177,16 +189,15 @@ async fn bootstrap_inserts_idempotently_then_resolves() {
         Some(&serde_json::Value::String("https://example.com".to_owned())),
     );
 
-    // Mutate the config: change one plugin's image + drop the per-binding
-    // config on mcp-fetch. Assert the updates land.
-    let mut mutated = sample_config();
-    mutated.plugins[0].image = "ghcr.io/example/mcp-bash:2.0".to_owned();
-    mutated.tenants[0].workspaces[0].plugins[1].config = None;
-    let stats = apply(&db, &mutated).await.expect("third apply (mutated)");
+    // Mutate: change one plugin's image + drop the per-binding config
+    // on mcp-fetch.
+    let stats = apply(&db, &mutated_config())
+        .await
+        .expect("third apply (mutated)");
     assert_eq!(stats.plugins_updated, 1, "image change must UPDATE plugin");
     assert_eq!(
         stats.bindings_updated, 1,
-        "config-blob change must UPDATE binding"
+        "config-blob removal must UPDATE binding"
     );
     assert_eq!(stats.plugins_inserted, 0);
     assert_eq!(stats.bindings_inserted, 0);
@@ -206,9 +217,8 @@ struct ResolveRow {
     config: Option<serde_json::Value>,
 }
 
-/// The hot-path resolve query, verbatim from the RFE. config-broker will
-/// be calling this exact shape post-cutover (modulo prepared-statement
-/// parameter mechanics).
+/// The hot-path resolve query, verbatim from the RFE. config-broker
+/// will be calling this exact shape post-cutover.
 async fn resolve(
     db: &DatabaseConnection,
     tenant: &str,
@@ -232,3 +242,69 @@ async fn resolve(
         .expect("resolve query must succeed")
         .expect("resolve query must return a row for the seeded binding")
 }
+
+/// Tests the raw→validated lowering rejects what bootstrap rejects.
+#[test]
+fn raw_to_validated_rejects_unknown_plugin_ref() {
+    let raw: BootstrapConfigRaw = serde_yaml::from_str(
+        r#"
+tenants:
+- name: phlax
+  workspaces:
+  - name: mcp
+    plugins:
+    - name: does-not-exist
+
+plugins:
+- name: mcp-bash
+  image: ghcr.io/example/mcp-bash:1.0
+  egress: none
+"#,
+    )
+    .unwrap();
+    assert!(BootstrapConfig::from_raw(raw).is_err());
+}
+
+#[test]
+fn raw_to_validated_accepts_full_plugin_shape() {
+    let raw: BootstrapConfigRaw = serde_yaml::from_str(
+        r#"
+tenants: []
+plugins:
+- name: mcp-fetch
+  image: ghcr.io/example/mcp-fetch:1.0
+  port: 8000
+  path: /
+  upstream_auth: bearer/example.com
+  env:
+    LOG_LEVEL: info
+  resources:
+    memory: 4g
+    pids: 1024
+  egress:
+    allow:
+    - host: example.com
+      ports: [443]
+"#,
+    )
+    .unwrap();
+    let cfg = BootstrapConfig::from_raw(raw).expect("validate full-shape");
+    let plug = &cfg.plugins[0];
+    assert_eq!(plug.upstream_auth, "bearer/example.com");
+    assert_eq!(plug.port, 8000);
+    let res = plug.resources.as_ref().unwrap();
+    assert_eq!(res["memory"], "4g");
+    assert_eq!(res["pids"], 1024);
+    // env is in wire shape: array of {name, value}.
+    let env = plug.env.as_array().unwrap();
+    assert_eq!(env.len(), 1);
+    assert_eq!(env[0]["name"], "LOG_LEVEL");
+    assert_eq!(env[0]["value"], "info");
+}
+
+// Stop the unused-imports check from flagging `RawPluginEntry` (it's
+// re-exported via the `plugin_spec` module path so downstream tests
+// can build raw entries directly without going through yaml; we don't
+// use it directly here but we want to keep it discoverable).
+#[allow(dead_code)]
+fn _ref(_e: RawPluginEntry) {}

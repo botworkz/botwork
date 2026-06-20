@@ -567,7 +567,7 @@ mod tests {
             session_id: id.to_string(),
             container_ip: ip.parse().expect("test ip"),
             tenant: "phlax".to_string(),
-            namespace: "mcp".to_string(),
+            workspace: "mcp".to_string(),
             plugin: plugin.to_string(),
             egress_policy: egress,
         }

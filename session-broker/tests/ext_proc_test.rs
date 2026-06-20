@@ -235,12 +235,12 @@ fn sample_transport_with_path(
     container: &str,
     plugin_path: &str,
 ) -> TransportState {
-    sample_transport_with_namespace_and_path(tenant, "mcp", plugin, container, plugin_path)
+    sample_transport_with_workspace_and_path(tenant, "mcp", plugin, container, plugin_path)
 }
 
-fn sample_transport_with_namespace_and_path(
+fn sample_transport_with_workspace_and_path(
     tenant: &str,
-    namespace: &str,
+    workspace: &str,
     plugin: &str,
     container: &str,
     plugin_path: &str,
@@ -250,7 +250,7 @@ fn sample_transport_with_namespace_and_path(
         container_ip: "172.20.0.5".to_string(),
         staging_token: "abcdef".to_string(),
         tenant_name: tenant.to_string(),
-        namespace: namespace.to_string(),
+        workspace: workspace.to_string(),
         plugin_name: plugin.to_string(),
         port: 8000,
         path: plugin_path.to_string(),
@@ -291,7 +291,7 @@ fn sample_pending(tenant: &str, plugin: &str, container: &str) -> PendingInit {
         container_ip: "172.20.0.5".to_string(),
         staging_token: "abcdef".to_string(),
         tenant_name: tenant.to_string(),
-        namespace: "mcp".to_string(),
+        workspace: "mcp".to_string(),
         plugin_name: plugin.to_string(),
         descriptor: sample_plugin_config(),
         upstream_authorization: None,
@@ -2242,8 +2242,8 @@ async fn response_headers_delete_teardown_called_on_5xx_upstream() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn request_headers_post_missing_namespace_returns_400() {
-    // Old-shape URL /<tenant>/<plugin> without a namespace → 400
+async fn request_headers_post_missing_workspace_returns_400() {
+    // Old-shape URL /<tenant>/<plugin> without a workspace → 400
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -2261,20 +2261,20 @@ async fn request_headers_post_missing_namespace_returns_400() {
     assert!(
         immediate_body(&response)
             .unwrap_or_default()
-            .contains("namespace required: use /<tenant>/<namespace>/<plugin>"),
-        "expected namespace hint in error body: {:?}",
+            .contains("workspace required: use /<tenant>/<workspace>/<plugin>"),
+        "expected workspace hint in error body: {:?}",
         immediate_body(&response)
     );
 }
 
 #[tokio::test]
-async fn request_headers_get_namespace_mismatch_returns_403() {
+async fn request_headers_get_workspace_mismatch_returns_403() {
     // Transport bound to (tenant1, ns1, plugin-a); request uses ns2 → 403
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     insert_transport(
         &state,
         "sess-1",
-        sample_transport_with_namespace_and_path(
+        sample_transport_with_workspace_and_path(
             "tenant1",
             "ns1",
             "plugin-a",
@@ -2299,17 +2299,17 @@ async fn request_headers_get_namespace_mismatch_returns_403() {
     assert_eq!(immediate_status(&response), Some(403));
     assert_eq!(
         immediate_body(&response).as_deref(),
-        Some("session namespace mismatch")
+        Some("session workspace mismatch")
     );
 }
 
 #[tokio::test]
-async fn request_headers_delete_namespace_mismatch_returns_403() {
+async fn request_headers_delete_workspace_mismatch_returns_403() {
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     insert_transport(
         &state,
         "sess-1",
-        sample_transport_with_namespace_and_path(
+        sample_transport_with_workspace_and_path(
             "tenant1",
             "ns1",
             "plugin-a",
@@ -2334,17 +2334,17 @@ async fn request_headers_delete_namespace_mismatch_returns_403() {
     assert_eq!(immediate_status(&response), Some(403));
     assert_eq!(
         immediate_body(&response).as_deref(),
-        Some("session namespace mismatch")
+        Some("session workspace mismatch")
     );
 }
 
 #[tokio::test]
-async fn request_headers_post_known_session_namespace_mismatch_returns_403() {
+async fn request_headers_post_known_session_workspace_mismatch_returns_403() {
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     insert_transport(
         &state,
         "sess-1",
-        sample_transport_with_namespace_and_path(
+        sample_transport_with_workspace_and_path(
             "tenant1",
             "ns1",
             "plugin-a",
@@ -2369,19 +2369,19 @@ async fn request_headers_post_known_session_namespace_mismatch_returns_403() {
     assert_eq!(immediate_status(&response), Some(403));
     assert_eq!(
         immediate_body(&response).as_deref(),
-        Some("session namespace mismatch")
+        Some("session workspace mismatch")
     );
 }
 
 #[tokio::test]
-async fn different_namespaces_same_tenant_and_agent_get_distinct_agent_dirs() {
-    // Two transports: same tenant/agent_id/plugin, different namespace.
+async fn different_workspaces_same_tenant_and_agent_get_distinct_agent_dirs() {
+    // Two transports: same tenant/agent_id/plugin, different workspace.
     // Their agent_dirs must differ.
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     insert_transport(
         &state,
         "sess-ns1",
-        sample_transport_with_namespace_and_path(
+        sample_transport_with_workspace_and_path(
             "tenant1",
             "ns1",
             "plugin-a",
@@ -2393,7 +2393,7 @@ async fn different_namespaces_same_tenant_and_agent_get_distinct_agent_dirs() {
     insert_transport(
         &state,
         "sess-ns2",
-        sample_transport_with_namespace_and_path(
+        sample_transport_with_workspace_and_path(
             "tenant1",
             "ns2",
             "plugin-a",
@@ -2406,24 +2406,24 @@ async fn different_namespaces_same_tenant_and_agent_get_distinct_agent_dirs() {
     let sessions = state.transport_sessions.lock().await;
     let t1 = sessions.get("sess-ns1").unwrap();
     let t2 = sessions.get("sess-ns2").unwrap();
-    assert_ne!(t1.namespace, t2.namespace, "namespaces must differ");
-    // The agent_dir paths would differ because namespace is part of the key.
+    assert_ne!(t1.workspace, t2.workspace, "workspaces must differ");
+    // The agent_dir paths would differ because workspace is part of the key.
     let dir1 = format!(
-        "/var/lib/botwork/tenants/{}/namespaces/{}/agents/agent-1",
-        t1.tenant_name, t1.namespace
+        "/var/lib/botwork/tenants/{}/workspaces/{}/agents/agent-1",
+        t1.tenant_name, t1.workspace
     );
     let dir2 = format!(
-        "/var/lib/botwork/tenants/{}/namespaces/{}/agents/agent-1",
-        t2.tenant_name, t2.namespace
+        "/var/lib/botwork/tenants/{}/workspaces/{}/agents/agent-1",
+        t2.tenant_name, t2.workspace
     );
     assert_ne!(
         dir1, dir2,
-        "agent_dirs with different namespaces must differ"
+        "agent_dirs with different workspaces must differ"
     );
 }
 
 #[tokio::test]
-async fn session_entry_serialization_includes_tenant_and_namespace() {
+async fn session_entry_serialization_includes_tenant_and_workspace() {
     use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sessions.json");
@@ -2444,7 +2444,7 @@ async fn session_entry_serialization_includes_tenant_and_namespace() {
     let json: serde_json::Value = serde_json::from_str(&content).unwrap();
     let entry = &json["sessions"]["mcp_session_aabbccddeeff"];
     assert_eq!(entry["tenant"], "acme");
-    assert_eq!(entry["namespace"], "dev");
+    assert_eq!(entry["workspace"], "dev");
 }
 
 #[allow(dead_code)]

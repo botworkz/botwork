@@ -119,7 +119,7 @@ async fn post_session_201_succeeds() {
         session_id: "mcp_session_abc",
         container_ip: "172.20.0.5",
         tenant: "phlax",
-        namespace: "mcp",
+        workspace: "mcp",
         plugin: "fetch",
         egress_policy: &None,
     };
@@ -134,7 +134,7 @@ async fn post_session_201_succeeds() {
     assert_eq!(parsed["session_id"], "mcp_session_abc");
     assert_eq!(parsed["container_ip"], "172.20.0.5");
     assert_eq!(parsed["tenant"], "phlax");
-    assert_eq!(parsed["namespace"], "mcp");
+    assert_eq!(parsed["workspace"], "mcp");
     assert_eq!(parsed["plugin"], "fetch");
     assert!(
         parsed.get("egress_policy").is_some(),
@@ -165,7 +165,7 @@ async fn post_session_200_also_succeeds() {
         session_id: "mcp_session_abc",
         container_ip: "172.20.0.5",
         tenant: "phlax",
-        namespace: "mcp",
+        workspace: "mcp",
         plugin: "fetch",
         egress_policy: &None,
     };
@@ -185,7 +185,7 @@ async fn post_session_409_returns_already_exists() {
         session_id: "mcp_session_abc",
         container_ip: "172.20.0.5",
         tenant: "phlax",
-        namespace: "mcp",
+        workspace: "mcp",
         plugin: "fetch",
         egress_policy: &None,
     };
@@ -210,7 +210,7 @@ async fn post_session_500_returns_internal() {
         session_id: "mcp_session_abc",
         container_ip: "172.20.0.5",
         tenant: "phlax",
-        namespace: "mcp",
+        workspace: "mcp",
         plugin: "fetch",
         egress_policy: &None,
     };
@@ -231,7 +231,7 @@ async fn post_session_unreachable_returns_transport() {
             session_id: "mcp_session_abc",
             container_ip: "172.20.0.5",
             tenant: "phlax",
-            namespace: "mcp",
+            workspace: "mcp",
             plugin: "fetch",
             egress_policy: &None,
         },
@@ -259,7 +259,7 @@ async fn post_session_with_egress_policy_serialises_object() {
         session_id: "mcp_session_abc",
         container_ip: "172.20.0.5",
         tenant: "phlax",
-        namespace: "mcp",
+        workspace: "mcp",
         plugin: "github",
         egress_policy: &Some(policy.clone()),
     };

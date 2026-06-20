@@ -241,8 +241,8 @@ mod tests {
         let (endpoint, _h) = spawn_sequenced(vec![(
             StatusCode::OK,
             r#"{"sessions":[
-                {"session_id":"mcp_session_a","container_ip":"172.20.0.5","tenant":"phlax","namespace":"mcp","plugin":"fetch","egress_policy":null},
-                {"session_id":"mcp_session_b","container_ip":"172.20.0.6","tenant":"phlax","namespace":"mcp","plugin":"git","egress_policy":{"mode":"allow_all"}}
+                {"session_id":"mcp_session_a","container_ip":"172.20.0.5","tenant":"phlax","workspace":"mcp","plugin":"fetch","egress_policy":null},
+                {"session_id":"mcp_session_b","container_ip":"172.20.0.6","tenant":"phlax","workspace":"mcp","plugin":"git","egress_policy":{"mode":"allow_all"}}
             ]}"#,
         )])
         .await;
@@ -338,7 +338,7 @@ mod tests {
             session_id: "mcp_session_a".to_string(),
             container_ip: "172.20.0.5".parse().unwrap(),
             tenant: "phlax".to_string(),
-            namespace: "mcp".to_string(),
+            workspace: "mcp".to_string(),
             plugin: "fetch".to_string(),
             egress_policy: serde_json::Value::Null,
         };
@@ -349,7 +349,7 @@ mod tests {
                 session_id: "mcp_session_a".to_string(),
                 container_ip: "172.20.0.5".parse().unwrap(),
                 tenant: "phlax".to_string(),
-                namespace: "mcp".to_string(),
+                workspace: "mcp".to_string(),
                 plugin: "fetch".to_string(),
                 egress_policy: serde_json::Value::Null,
             },
@@ -357,7 +357,7 @@ mod tests {
                 session_id: "mcp_session_b".to_string(),
                 container_ip: "172.20.0.6".parse().unwrap(),
                 tenant: "phlax".to_string(),
-                namespace: "mcp".to_string(),
+                workspace: "mcp".to_string(),
                 plugin: "git".to_string(),
                 egress_policy: serde_json::Value::Null,
             },

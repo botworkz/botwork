@@ -50,7 +50,7 @@ fn record_body(session_id: &str, ip: &str, plugin: &str) -> serde_json::Value {
         "session_id": session_id,
         "container_ip": ip,
         "tenant": "phlax",
-        "namespace": "mcp",
+        "workspace": "mcp",
         "plugin": plugin,
         "egress_policy": {"allow_hosts": ["github.com"]},
     })
@@ -195,7 +195,7 @@ async fn post_with_missing_field_returns_400_invalid_request() {
         "session_id": "mcp_session_abc",
         "container_ip": "172.20.0.5",
         "tenant": "phlax",
-        "namespace": "mcp",
+        "workspace": "mcp",
     });
     let response = client
         .post(format!("{base}/sessions"))
@@ -319,7 +319,7 @@ async fn post_omitted_egress_policy_is_stored_as_null() {
         "session_id": "mcp_session_abc",
         "container_ip": "172.20.0.5",
         "tenant": "phlax",
-        "namespace": "mcp",
+        "workspace": "mcp",
         "plugin": "fetch",
     });
     let post = client

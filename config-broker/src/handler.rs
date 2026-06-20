@@ -1,18 +1,25 @@
 //! HTTP handler for `POST /resolve`.
 //!
-//! Wire contract documented in `README.md`. In short:
+//! Wire contract (post-PR2):
 //!
 //! Request:
-//!     `{ "tenant": "<tenant>", "namespace": "<ns>", "plugin": "<name>" }`
+//!     `{ "tenant": "<tenant>", "workspace": "<ws>", "plugin": "<name>" }`
 //!
 //! Response 200:
 //!     `{ "image", "port", "path", "upstream_auth",
 //!        "resources": { "cpus"?, "memory"?, "pids"? },
 //!        "env": [ { "name", "value" }, … ],
-//!        "config_blob"?: "<compact JSON string>" }`
+//!        "config_blob"?: "<compact JSON string>",
+//!        "egress": { … } }`
 //!
 //! Errors share a single envelope:
 //!     `{ "error": "<machine code>", "message": "<human detail>" }`
+//!
+//! The handler does NO content validation on the row — bootstrap is
+//! the gate. We only validate the *request* fields (the three names)
+//! so a malformed call produces a clean 400 rather than a SQL injection
+//! attempt's-worth of fallout. session-broker is the only producer in
+//! v0; the regex matches the rule it generates by.
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -23,47 +30,35 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use regex::Regex;
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::registry::{PluginEntry, PluginRegistry};
+use botwork_entity::{plugin, tenant, workspace, workspace_plugin};
 
 const PREFIX: &str = "[config-broker]";
 
-/// Tenant name regex — matches session-broker's TENANT_RE.
-/// Validated for shape only; v0 does not key resolution on tenant.
-const TENANT_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
+/// Tenant / workspace / plugin name shape — `[a-z][a-z0-9-]{0,30}`.
+/// Matches what bootstrap enforces on the write side and what
+/// session-broker generates by.
+const NAME_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
 
-/// Namespace regex — matches session-broker's NAMESPACE_RE.
-const NAMESPACE_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
-
-/// Plugin name regex — matches the rule used at `plugins.yaml` parse time.
-const PLUGIN_NAME_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
-
-fn tenant_re() -> &'static Regex {
+fn name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(TENANT_RE).expect("valid tenant regex"))
-}
-
-fn namespace_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(NAMESPACE_RE).expect("valid namespace regex"))
-}
-
-fn plugin_name_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(PLUGIN_NAME_RE).expect("valid plugin name regex"))
+    RE.get_or_init(|| Regex::new(NAME_RE).expect("valid name regex"))
 }
 
 #[derive(Clone)]
 pub struct AppState {
-    pub registry: Arc<PluginRegistry>,
+    pub db: Arc<DatabaseConnection>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ResolveRequest {
     tenant: Option<String>,
-    namespace: Option<String>,
+    workspace: Option<String>,
     plugin: Option<String>,
 }
 
@@ -89,21 +84,14 @@ struct ResolveResponse {
     port: u16,
     path: String,
     upstream_auth: String,
+    #[serde(default)]
     resources: ResourcesView,
     env: Vec<EnvEntry>,
-    /// Already-serialised compact JSON. Omitted (rather than `""` or `{}`)
-    /// when the operator did not set `config:` on this plugin.
+    /// Compact JSON. Omitted (not `""`/`{}`) when there's no per-
+    /// binding `config:`.
     #[serde(skip_serializing_if = "Option::is_none")]
     config_blob: Option<String>,
-    /// `egress:` block from `plugins.yaml`, validated by config-broker
-    /// (one of: `{ "mode": "all" }`, `{ "mode": "none" }`, or
-    /// `{ "allow": [ { "host", "ports": [...] }, ... ] }`) and shipped
-    /// verbatim. session-broker forwards it straight through to
-    /// control-plane (botwork #81) as the `egress_policy` of a
-    /// `SessionRecord`. The xDS materialiser owns the schema; config-
-    /// broker just refuses to ship anything that does not match one of
-    /// the three forms. Always present (the field is required at the
-    /// `plugins.yaml` level as of 0.1.9).
+    /// Normalised egress wire shape as written to the DB by bootstrap.
     egress: serde_json::Value,
 }
 
@@ -119,33 +107,6 @@ fn error_response(status: StatusCode, code: &'static str, message: impl Into<Str
         message: message.into(),
     };
     (status, Json(body)).into_response()
-}
-
-fn render_descriptor(entry: &PluginEntry) -> ResolveResponse {
-    ResolveResponse {
-        image: entry.image.clone(),
-        port: entry.port,
-        path: entry.path.clone(),
-        upstream_auth: entry.upstream_auth.to_wire(),
-        resources: ResourcesView {
-            cpus: entry.resources.cpus.clone(),
-            memory: entry.resources.memory.clone(),
-            pids: entry.resources.pids,
-        },
-        env: entry
-            .env
-            .iter()
-            .map(|(name, value)| EnvEntry {
-                name: name.clone(),
-                value: value.clone(),
-            })
-            .collect(),
-        config_blob: entry.config.as_ref().map(|v| {
-            serde_json::to_string(v)
-                .expect("config Value re-serialises; validated at registry load")
-        }),
-        egress: entry.egress.clone(),
-    }
 }
 
 pub(crate) async fn resolve(
@@ -169,15 +130,15 @@ pub(crate) async fn resolve(
             "missing required field 'tenant'",
         );
     };
-    let Some(namespace) = payload.namespace.as_deref() else {
-        warn!("{PREFIX} resolve: invalid_request — missing 'namespace'");
+    let Some(workspace_name) = payload.workspace.as_deref() else {
+        warn!("{PREFIX} resolve: invalid_request — missing 'workspace'");
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "missing required field 'namespace'",
+            "missing required field 'workspace'",
         );
     };
-    let Some(plugin) = payload.plugin.as_deref() else {
+    let Some(plugin_name) = payload.plugin.as_deref() else {
         warn!("{PREFIX} resolve: invalid_request — missing 'plugin'");
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -186,276 +147,169 @@ pub(crate) async fn resolve(
         );
     };
 
-    if !tenant_re().is_match(tenant) {
+    if !name_re().is_match(tenant) {
         warn!("{PREFIX} resolve: invalid_request — bad tenant '{tenant}'");
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            format!("invalid tenant '{tenant}': must match ^[a-z][a-z0-9-]{{0,30}}$"),
+            format!("invalid tenant '{tenant}': must match {NAME_RE}"),
         );
     }
-    if !namespace_re().is_match(namespace) {
-        warn!("{PREFIX} resolve: invalid_namespace — bad namespace '{namespace}'");
+    if !name_re().is_match(workspace_name) {
+        warn!("{PREFIX} resolve: invalid_workspace — bad workspace '{workspace_name}'");
         return error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_namespace",
-            format!("invalid namespace '{namespace}': must match ^[a-z][a-z0-9-]{{0,30}}$"),
+            "invalid_workspace",
+            format!("invalid workspace '{workspace_name}': must match {NAME_RE}"),
         );
     }
-    if !plugin_name_re().is_match(plugin) {
-        warn!("{PREFIX} resolve: invalid_request — bad plugin name '{plugin}'");
+    if !name_re().is_match(plugin_name) {
+        warn!("{PREFIX} resolve: invalid_request — bad plugin name '{plugin_name}'");
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            format!("invalid plugin '{plugin}': must match ^[a-z][a-z0-9-]{{0,30}}$"),
+            format!("invalid plugin '{plugin_name}': must match {NAME_RE}"),
         );
     }
 
-    match state.registry.get(plugin) {
-        Some(entry) => {
-            info!("{PREFIX} resolve: ok tenant={tenant} namespace={namespace} plugin={plugin}");
-            (StatusCode::OK, Json(render_descriptor(entry))).into_response()
+    match lookup(&state.db, tenant, workspace_name, plugin_name).await {
+        Ok(Some(row)) => {
+            info!(
+                "{PREFIX} resolve: ok tenant={tenant} workspace={workspace_name} plugin={plugin_name}"
+            );
+            (StatusCode::OK, Json(row)).into_response()
         }
-        None => {
+        Ok(None) => {
             warn!(
-                "{PREFIX} resolve: unknown_plugin tenant={tenant} namespace={namespace} plugin={plugin}"
+                "{PREFIX} resolve: unknown_plugin tenant={tenant} workspace={workspace_name} plugin={plugin_name}"
             );
             error_response(
                 StatusCode::NOT_FOUND,
                 "unknown_plugin",
-                format!("unknown plugin: {plugin}"),
+                format!(
+                    "no binding for tenant '{tenant}' workspace '{workspace_name}' plugin '{plugin_name}'"
+                ),
+            )
+        }
+        Err(err) => {
+            warn!("{PREFIX} resolve: internal — {err}");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                format!("resolve failed: {err}"),
             )
         }
     }
+}
+
+/// Resolve a `(tenant, workspace, plugin)` triple to the wire-shape
+/// descriptor. Returns `Ok(None)` for "no such binding"; everything
+/// else is a real DB error.
+///
+/// Implementation note: we run two queries (plugin + binding) rather
+/// than a single JOIN-with-SELECT-cols because SeaORM's join shape
+/// here would need a custom `FromQueryResult` to capture columns
+/// from both sides. Two queries are simpler, hit the same indexes,
+/// and the latency-sensitive hot path doesn't measurably care in
+/// v0. Revisit if the request rate ever justifies the optimisation.
+async fn lookup(
+    db: &DatabaseConnection,
+    tenant_name: &str,
+    workspace_name: &str,
+    plugin_name: &str,
+) -> Result<Option<ResolveResponse>, sea_orm::DbErr> {
+    // Find the binding row by walking tenant -> workspace -> plugin.
+    let binding: Option<(workspace_plugin::Model, Option<plugin::Model>)> =
+        workspace_plugin::Entity::find()
+            .find_also_related(plugin::Entity)
+            .join(
+                JoinType::InnerJoin,
+                workspace_plugin::Relation::Workspace.def(),
+            )
+            .join(JoinType::InnerJoin, workspace::Relation::Tenant.def())
+            .filter(plugin::Column::Name.eq(plugin_name))
+            .filter(workspace::Column::Name.eq(workspace_name))
+            .filter(tenant::Column::Name.eq(tenant_name))
+            .one(db)
+            .await?;
+
+    let Some((binding_row, plugin_row)) = binding else {
+        return Ok(None);
+    };
+    let Some(plugin_row) = plugin_row else {
+        // Join returned no plugin row — the FK guarantees this can't
+        // happen, but treat as "no binding" rather than panic so a
+        // future schema change can't crash the broker.
+        return Ok(None);
+    };
+
+    Ok(Some(render(&plugin_row, &binding_row)?))
+}
+
+fn render(
+    plugin_row: &plugin::Model,
+    binding_row: &workspace_plugin::Model,
+) -> Result<ResolveResponse, sea_orm::DbErr> {
+    let port = u16::try_from(plugin_row.port).map_err(|_| {
+        sea_orm::DbErr::Custom(format!(
+            "plugin '{}' has out-of-range port {} in DB; bootstrap should have constrained 1..=65535",
+            plugin_row.name, plugin_row.port,
+        ))
+    })?;
+
+    // env is `jsonb` array of {name, value}. Already in wire shape
+    // courtesy of bootstrap; we just decode into the typed view.
+    let env = match plugin_row.env.as_array() {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|entry| {
+                let name = entry.get("name")?.as_str()?.to_string();
+                let value = entry.get("value")?.as_str()?.to_string();
+                Some(EnvEntry { name, value })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    // resources is `jsonb` `{cpus?, memory?, pids?}` or NULL.
+    let resources = match &plugin_row.resources {
+        None => ResourcesView::default(),
+        Some(v) => ResourcesView {
+            cpus: v.get("cpus").and_then(|c| c.as_str()).map(String::from),
+            memory: v.get("memory").and_then(|c| c.as_str()).map(String::from),
+            pids: v
+                .get("pids")
+                .and_then(|c| c.as_u64())
+                .and_then(|n| u32::try_from(n).ok()),
+        },
+    };
+
+    // Per-binding `config` -> compact JSON string for the env var.
+    // Treat empty object the same as absent; bootstrap normalises this
+    // away on the write side but be belt-and-braces.
+    let config_blob = match &binding_row.config {
+        None => None,
+        Some(v) if matches!(v.as_object(), Some(m) if m.is_empty()) => None,
+        Some(v) => Some(
+            serde_json::to_string(v)
+                .map_err(|e| sea_orm::DbErr::Custom(format!("config re-serialise: {e}")))?,
+        ),
+    };
+
+    Ok(ResolveResponse {
+        image: plugin_row.image.clone(),
+        port,
+        path: plugin_row.path.clone(),
+        upstream_auth: plugin_row.upstream_auth.clone(),
+        resources,
+        env,
+        config_blob,
+        egress: plugin_row.egress.clone(),
+    })
 }
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/resolve", post(resolve))
         .with_state(state)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::registry::{PluginEntry, PluginResources, UpstreamAuth};
-    use std::collections::HashMap;
-
-    fn entry_for_test() -> PluginEntry {
-        // Tests pick `egress: { mode: "all" }` -- the wire shape of
-        // `egress: all` from plugins.yaml -- because it is the smallest
-        // value that satisfies the required-field schema without
-        // implying any policy structure.
-        PluginEntry {
-            image: "botwork/mcp-test:local".to_string(),
-            port: 8000,
-            path: "/".to_string(),
-            upstream_auth: UpstreamAuth::None,
-            env: vec![("FOO".to_string(), "bar".to_string())],
-            resources: PluginResources::default(),
-            config: None,
-            egress: serde_json::json!({ "mode": "all" }),
-        }
-    }
-
-    #[test]
-    fn render_descriptor_emits_wire_shape_with_no_config() {
-        let descriptor = render_descriptor(&entry_for_test());
-        assert_eq!(descriptor.image, "botwork/mcp-test:local");
-        assert_eq!(descriptor.port, 8000);
-        assert_eq!(descriptor.path, "/");
-        assert_eq!(descriptor.upstream_auth, "none");
-        assert!(descriptor.config_blob.is_none());
-        assert_eq!(descriptor.env.len(), 1);
-        assert_eq!(descriptor.env[0].name, "FOO");
-        assert_eq!(descriptor.env[0].value, "bar");
-    }
-
-    #[test]
-    fn render_descriptor_serialises_config_blob_compactly() {
-        let mut entry = entry_for_test();
-        entry.config = Some(serde_json::json!({"routes": [{"owner": "botworkz"}]}));
-        let descriptor = render_descriptor(&entry);
-        let blob = descriptor.config_blob.expect("blob set");
-        assert_eq!(blob, r#"{"routes":[{"owner":"botworkz"}]}"#);
-    }
-
-    #[test]
-    fn render_descriptor_emits_bearer_upstream_auth() {
-        let mut entry = entry_for_test();
-        entry.upstream_auth = UpstreamAuth::Bearer {
-            service: "github.com".to_string(),
-        };
-        let descriptor = render_descriptor(&entry);
-        assert_eq!(descriptor.upstream_auth, "bearer/github.com");
-    }
-
-    #[test]
-    fn render_descriptor_omits_resources_when_default() {
-        let descriptor = render_descriptor(&entry_for_test());
-        let json = serde_json::to_value(&descriptor).expect("ser");
-        // ResourcesView is always present, but its inner fields are omitted.
-        let resources = json.get("resources").expect("resources present");
-        assert!(
-            resources.as_object().expect("object").is_empty(),
-            "resources object should be empty when all fields are None: {resources}"
-        );
-    }
-
-    #[test]
-    fn render_descriptor_includes_partial_resources() {
-        let mut entry = entry_for_test();
-        entry.resources = PluginResources {
-            cpus: None,
-            memory: Some("4g".to_string()),
-            pids: Some(1024),
-        };
-        let descriptor = render_descriptor(&entry);
-        let json = serde_json::to_value(&descriptor).expect("ser");
-        let resources = json.get("resources").expect("resources present");
-        assert_eq!(resources["memory"], "4g");
-        assert_eq!(resources["pids"], 1024);
-        assert!(resources.get("cpus").is_none());
-    }
-
-    #[test]
-    fn render_descriptor_emits_all_keyword_as_mode_object() {
-        // `egress: all` in plugins.yaml is normalised by the registry to
-        // `{ mode: "all" }` and round-trips verbatim through the wire.
-        let descriptor = render_descriptor(&entry_for_test());
-        let json = serde_json::to_value(&descriptor).expect("ser");
-        assert_eq!(json["egress"], serde_json::json!({ "mode": "all" }));
-    }
-
-    #[test]
-    fn render_descriptor_emits_none_keyword_as_mode_object() {
-        // Same shape as `mode: all` but the wire value is `none`. The
-        // materialiser (xDS feeder) is responsible for translating
-        // `mode: none` into "no upstream clusters for this session".
-        let mut entry = entry_for_test();
-        entry.egress = serde_json::json!({ "mode": "none" });
-        let descriptor = render_descriptor(&entry);
-        let json = serde_json::to_value(&descriptor).expect("ser");
-        assert_eq!(json["egress"], serde_json::json!({ "mode": "none" }));
-    }
-
-    #[test]
-    fn render_descriptor_emits_full_allow_list_verbatim() {
-        // config-broker doesn't interpret the schema -- shape is the
-        // contract, content is the materialiser's problem. This test
-        // pins that any validated mapping payload round-trips byte-
-        // for-byte through the wire so downstream consumers always
-        // see exactly what the operator typed.
-        let mut entry = entry_for_test();
-        entry.egress = serde_json::json!({
-            "allow": [
-                { "host": "api.github.com", "ports": [443] },
-                { "host": "codeload.github.com", "ports": [443, 80] },
-            ],
-        });
-        let descriptor = render_descriptor(&entry);
-        let json = serde_json::to_value(&descriptor).expect("ser");
-        assert_eq!(json["egress"]["allow"][0]["host"], "api.github.com");
-        assert_eq!(json["egress"]["allow"][0]["ports"][0], 443);
-        assert_eq!(json["egress"]["allow"][1]["ports"][1], 80);
-    }
-
-    fn state_with(plugin: &str) -> AppState {
-        let mut registry = HashMap::new();
-        registry.insert(plugin.to_string(), entry_for_test());
-        AppState {
-            registry: Arc::new(registry),
-        }
-    }
-
-    async fn body_status(response: Response) -> (StatusCode, serde_json::Value) {
-        let (parts, body) = response.into_parts();
-        let bytes = axum::body::to_bytes(body, 64 * 1024)
-            .await
-            .expect("read body");
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-        (parts.status, value)
-    }
-
-    fn payload(tenant: &str, namespace: &str, plugin: &str) -> Json<ResolveRequest> {
-        Json(ResolveRequest {
-            tenant: Some(tenant.to_string()),
-            namespace: Some(namespace.to_string()),
-            plugin: Some(plugin.to_string()),
-        })
-    }
-
-    #[tokio::test]
-    async fn resolve_returns_200_for_known_plugin() {
-        let state = state_with("test");
-        let response = resolve(State(state), Some(payload("phlax", "mcp", "test"))).await;
-        let (status, body) = body_status(response).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["image"], "botwork/mcp-test:local");
-        assert_eq!(body["upstream_auth"], "none");
-    }
-
-    #[tokio::test]
-    async fn resolve_returns_404_for_unknown_plugin() {
-        let state = state_with("test");
-        let response = resolve(State(state), Some(payload("phlax", "mcp", "missing"))).await;
-        let (status, body) = body_status(response).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body["error"], "unknown_plugin");
-    }
-
-    #[tokio::test]
-    async fn resolve_returns_400_for_bad_namespace() {
-        let state = state_with("test");
-        let response = resolve(State(state), Some(payload("phlax", "BAD", "test"))).await;
-        let (status, body) = body_status(response).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_namespace");
-    }
-
-    #[tokio::test]
-    async fn resolve_returns_400_for_bad_tenant() {
-        let state = state_with("test");
-        let response = resolve(State(state), Some(payload("BAD", "mcp", "test"))).await;
-        let (status, body) = body_status(response).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_request");
-    }
-
-    #[tokio::test]
-    async fn resolve_returns_400_for_bad_plugin_name() {
-        let state = state_with("test");
-        let response = resolve(State(state), Some(payload("phlax", "mcp", "BAD"))).await;
-        let (status, body) = body_status(response).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_request");
-    }
-
-    #[tokio::test]
-    async fn resolve_returns_400_when_body_missing() {
-        let state = state_with("test");
-        let response = resolve(State(state), None).await;
-        let (status, body) = body_status(response).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_request");
-    }
-
-    #[tokio::test]
-    async fn resolve_returns_400_when_field_missing() {
-        let state = state_with("test");
-        let bad = Json(ResolveRequest {
-            tenant: Some("phlax".to_string()),
-            namespace: Some("mcp".to_string()),
-            plugin: None,
-        });
-        let response = resolve(State(state), Some(bad)).await;
-        let (status, body) = body_status(response).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_request");
-        assert!(
-            body["message"].as_str().unwrap_or("").contains("'plugin'"),
-            "message should mention the missing field: {body}"
-        );
-    }
 }

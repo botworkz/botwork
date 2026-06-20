@@ -21,7 +21,7 @@ pub enum RegistryLoadError {
     /// I/O or JSON-parse failure on the registry file itself.
     Io(String),
     /// One or more session entries were missing required fields (tenant,
-    /// namespace) — almost always the signature of a pre-namespace registry
+    /// workspace) — almost always the signature of a pre-workspace registry
     /// from before the URL-shape cutover.  Refusing to load is intentional:
     /// silently dropping such entries would orphan the underlying containers
     /// (no DELETE-routed teardown, no admin visibility), so we make the
@@ -40,7 +40,7 @@ impl std::fmt::Display for RegistryLoadError {
             Self::Io(msg) => write!(f, "{msg}"),
             Self::SchemaMismatch { offending } => write!(
                 f,
-                "session registry contains {} entries from a pre-namespace broker (missing tenant/namespace); \
+                "session registry contains {} entries from a pre-workspace broker (missing tenant/workspace); \
                  refusing to load to avoid silently orphaning containers. \
                  Affected containers: [{}]. \
                  To migrate: stop the broker, `docker rm -f` any orphaned containers, \
@@ -57,7 +57,7 @@ pub struct SessionEntry {
     pub container: String,
     pub staging_path: String,
     pub tenant: String,
-    pub namespace: String,
+    pub workspace: String,
     pub mcp_session_id: Option<String>,
     pub agent_id: Option<String>,
     pub image: String,
@@ -101,7 +101,7 @@ impl SessionRegistry {
 
     /// Loads the registry from disk and reconciles it against the live docker
     /// container set.  Returns `Err` if the on-disk file exists but cannot be
-    /// safely adopted (e.g. pre-namespace schema); callers should treat such
+    /// safely adopted (e.g. pre-workspace schema); callers should treat such
     /// errors as fatal and refuse to start.
     pub async fn load_and_reconcile(&self) -> Result<(), RegistryLoadError> {
         if !Path::new(&self.path).exists() {
@@ -127,7 +127,7 @@ impl SessionRegistry {
         container: &str,
         staging_path: &str,
         tenant: &str,
-        namespace: &str,
+        workspace: &str,
         image: &str,
         created_at: &str,
     ) {
@@ -138,7 +138,7 @@ impl SessionRegistry {
                 container: container.to_string(),
                 staging_path: staging_path.to_string(),
                 tenant: tenant.to_string(),
-                namespace: namespace.to_string(),
+                workspace: workspace.to_string(),
                 mcp_session_id: None,
                 agent_id: None,
                 image: image.to_string(),
@@ -240,8 +240,8 @@ fn load_from_disk(path: &str) -> Result<RegistryData, RegistryLoadError> {
                         map.insert(k.clone(), entry);
                     }
                     Err(e) => {
-                        // The most likely cause is a pre-namespace entry
-                        // missing `tenant`/`namespace`.  Surface the
+                        // The most likely cause is a pre-workspace entry
+                        // missing `tenant`/`workspace`.  Surface the
                         // container name so the operator can clean it up.
                         log_info(&format!("rejecting malformed session entry '{k}': {e}"));
                         offending.push(k.clone());

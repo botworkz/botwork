@@ -6,7 +6,7 @@
 //!
 //! v0 wire contract (see `config-broker/README.md` and issue #75):
 //!
-//! Request:  `POST /resolve { "tenant", "namespace", "plugin" }`
+//! Request:  `POST /resolve { "tenant", "workspace", "plugin" }`
 //! Success:  `200` + descriptor JSON
 //! Error:    4xx/5xx with `{ "error", "message" }` envelope
 //!
@@ -125,9 +125,9 @@ pub enum ConfigBrokerError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     /// Namespace did not match the regex (separate code so future per-tenant
-    /// namespace policy can be distinguished from "syntax").
-    #[error("invalid namespace: {0}")]
-    InvalidNamespace(String),
+    /// workspace policy can be distinguished from "syntax").
+    #[error("invalid workspace: {0}")]
+    InvalidWorkspace(String),
     /// Plugin name not in the registry.
     #[error("unknown plugin: {0}")]
     UnknownPlugin(String),
@@ -156,7 +156,7 @@ impl ConfigBrokerError {
         match self {
             // Pass-through 4xx: the client/operator caused these.
             Self::InvalidRequest(_) => 400,
-            Self::InvalidNamespace(_) => 400,
+            Self::InvalidWorkspace(_) => 400,
             Self::UnknownPlugin(_) => 404,
             // Everything else surfaces as 502: config-broker is upstream of
             // session-broker and we couldn't get a clean answer out of it.
@@ -171,7 +171,7 @@ impl ConfigBrokerError {
 #[derive(Debug, Serialize)]
 struct ResolveRequest<'a> {
     tenant: &'a str,
-    namespace: &'a str,
+    workspace: &'a str,
     plugin: &'a str,
 }
 
@@ -188,18 +188,18 @@ struct ErrorEnvelope {
 pub async fn resolve(
     endpoint: &str,
     tenant: &str,
-    namespace: &str,
+    workspace: &str,
     plugin: &str,
     request_timeout: Duration,
 ) -> Result<PluginDescriptor, ConfigBrokerError> {
     let url = format!("{}/resolve", endpoint.trim_end_matches('/'));
     log_info(&format!(
-        "config-broker resolve: tenant={tenant} namespace={namespace} plugin={plugin} url={url}"
+        "config-broker resolve: tenant={tenant} workspace={workspace} plugin={plugin} url={url}"
     ));
 
     let body = serde_json::to_vec(&ResolveRequest {
         tenant,
-        namespace,
+        workspace,
         plugin,
     })
     .map_err(|e| ConfigBrokerError::Transport(format!("encode request: {e}")))?;
@@ -308,8 +308,8 @@ fn error_from_envelope(status: u16, body: &[u8]) -> ConfigBrokerError {
         });
 
     match (status, detail) {
-        (400, Some((code, message))) if code == "invalid_namespace" => {
-            ConfigBrokerError::InvalidNamespace(message)
+        (400, Some((code, message))) if code == "invalid_workspace" => {
+            ConfigBrokerError::InvalidWorkspace(message)
         }
         (400, Some((_, message))) => ConfigBrokerError::InvalidRequest(message),
         (404, Some((_, message))) => ConfigBrokerError::UnknownPlugin(message),
@@ -435,10 +435,10 @@ mod tests {
     }
 
     #[test]
-    fn error_envelope_maps_400_invalid_namespace() {
-        let body = br#"{"error":"invalid_namespace","message":"bad"}"#;
+    fn error_envelope_maps_400_invalid_workspace() {
+        let body = br#"{"error":"invalid_workspace","message":"bad"}"#;
         let err = error_from_envelope(400, body);
-        assert!(matches!(err, ConfigBrokerError::InvalidNamespace(_)));
+        assert!(matches!(err, ConfigBrokerError::InvalidWorkspace(_)));
         assert_eq!(err.status_code(), 400);
     }
 

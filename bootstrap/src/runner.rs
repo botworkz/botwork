@@ -21,10 +21,10 @@ use botwork_entity::{plugin, tenant, workspace, workspace_plugin};
 
 use crate::config::BootstrapConfig;
 use crate::error::BootstrapError;
+use crate::plugin_spec::ValidatedPlugin;
 
-/// Apply `config` to `db`. Returns the per-table mutation counts so the
-/// production binary can emit a one-line journal summary; tests use it
-/// to assert "second run was a no-op".
+/// Per-table mutation counts so the production binary can emit a
+/// one-line journal summary; tests assert "second run was a no-op".
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ApplyStats {
     pub tenants_inserted: usize,
@@ -47,47 +47,8 @@ pub async fn apply(
     // -- Top-level plugins ------------------------------------------------
     let mut plugin_ids: HashMap<String, Uuid> = HashMap::new();
     for entry in &config.plugins {
-        let existing = plugin::Entity::find()
-            .filter(plugin::Column::Name.eq(&entry.name))
-            .one(&tx)
-            .await?;
-
-        match existing {
-            Some(row) => {
-                let mut active: plugin::ActiveModel = row.clone().into();
-                let mut changed = false;
-                if row.image != entry.image {
-                    active.image = Set(entry.image.clone());
-                    changed = true;
-                }
-                if row.egress != entry.egress {
-                    active.egress = Set(entry.egress.clone());
-                    changed = true;
-                }
-                if changed {
-                    active.updated_at = Set(chrono::Utc::now());
-                    active.update(&tx).await?;
-                    stats.plugins_updated += 1;
-                }
-                plugin_ids.insert(entry.name.clone(), row.id);
-            }
-            None => {
-                let id = Uuid::new_v4();
-                let now = chrono::Utc::now();
-                plugin::ActiveModel {
-                    id: Set(id),
-                    name: Set(entry.name.clone()),
-                    image: Set(entry.image.clone()),
-                    egress: Set(entry.egress.clone()),
-                    created_at: Set(now),
-                    updated_at: Set(now),
-                }
-                .insert(&tx)
-                .await?;
-                plugin_ids.insert(entry.name.clone(), id);
-                stats.plugins_inserted += 1;
-            }
-        }
+        let id = upsert_plugin(&tx, entry, &mut stats).await?;
+        plugin_ids.insert(entry.name.clone(), id);
     }
 
     // -- Tenants + nested workspaces + bindings ---------------------------
@@ -97,16 +58,15 @@ pub async fn apply(
             let workspace_id =
                 upsert_workspace(&tx, tenant_id, &workspace_entry.name, &mut stats).await?;
             for binding in &workspace_entry.plugins {
-                let plugin_id = *plugin_ids
-                    .get(binding.name.as_str())
-                    // Validation guarantees this can't happen, but the
-                    // expect is here as a "did we accidentally bypass
-                    // validation?" tripwire rather than a silent panic.
-                    .ok_or_else(|| BootstrapError::UnknownPluginRef {
+                let plugin_id = *plugin_ids.get(binding.name.as_str()).ok_or_else(|| {
+                    // Validation guarantees this can't happen; the
+                    // expect-shaped error is a tripwire.
+                    BootstrapError::UnknownPluginRef {
                         tenant: tenant_entry.name.clone(),
                         workspace: workspace_entry.name.clone(),
                         plugin: binding.name.clone(),
-                    })?;
+                    }
+                })?;
                 upsert_binding(
                     &tx,
                     workspace_id,
@@ -132,6 +92,78 @@ pub async fn apply(
     Ok(stats)
 }
 
+async fn upsert_plugin(
+    tx: &sea_orm::DatabaseTransaction,
+    entry: &ValidatedPlugin,
+    stats: &mut ApplyStats,
+) -> Result<Uuid, BootstrapError> {
+    let existing = plugin::Entity::find()
+        .filter(plugin::Column::Name.eq(&entry.name))
+        .one(tx)
+        .await?;
+    match existing {
+        Some(row) => {
+            let mut active: plugin::ActiveModel = row.clone().into();
+            let mut changed = false;
+            if row.image != entry.image {
+                active.image = Set(entry.image.clone());
+                changed = true;
+            }
+            if row.port != i32::from(entry.port) {
+                active.port = Set(i32::from(entry.port));
+                changed = true;
+            }
+            if row.path != entry.path {
+                active.path = Set(entry.path.clone());
+                changed = true;
+            }
+            if row.upstream_auth != entry.upstream_auth {
+                active.upstream_auth = Set(entry.upstream_auth.clone());
+                changed = true;
+            }
+            if row.env != entry.env {
+                active.env = Set(entry.env.clone());
+                changed = true;
+            }
+            if row.resources != entry.resources {
+                active.resources = Set(entry.resources.clone());
+                changed = true;
+            }
+            if row.egress != entry.egress {
+                active.egress = Set(entry.egress.clone());
+                changed = true;
+            }
+            if changed {
+                active.updated_at = Set(chrono::Utc::now());
+                active.update(tx).await?;
+                stats.plugins_updated += 1;
+            }
+            Ok(row.id)
+        }
+        None => {
+            let id = Uuid::new_v4();
+            let now = chrono::Utc::now();
+            plugin::ActiveModel {
+                id: Set(id),
+                name: Set(entry.name.clone()),
+                image: Set(entry.image.clone()),
+                port: Set(i32::from(entry.port)),
+                path: Set(entry.path.clone()),
+                upstream_auth: Set(entry.upstream_auth.clone()),
+                env: Set(entry.env.clone()),
+                resources: Set(entry.resources.clone()),
+                egress: Set(entry.egress.clone()),
+                created_at: Set(now),
+                updated_at: Set(now),
+            }
+            .insert(tx)
+            .await?;
+            stats.plugins_inserted += 1;
+            Ok(id)
+        }
+    }
+}
+
 async fn upsert_tenant(
     tx: &sea_orm::DatabaseTransaction,
     name: &str,
@@ -142,10 +174,6 @@ async fn upsert_tenant(
         .one(tx)
         .await?;
     if let Some(row) = existing {
-        // Tenant has no mutable shape beyond `name` itself (which is the
-        // lookup key), so update is always a no-op in v0. Counter
-        // tracked as `updated` for completeness; we'll touch updated_at
-        // the day audit info lands.
         stats.tenants_updated += 1;
         return Ok(row.id);
     }

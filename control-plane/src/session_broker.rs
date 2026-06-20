@@ -15,7 +15,7 @@
 //!       "session_id":    "mcp_session_<token>",
 //!       "container_ip":  "<ipv4>",
 //!       "tenant":        "<name>",
-//!       "namespace":     "<name>",
+//!       "workspace":     "<name>",
 //!       "plugin":        "<name>",
 //!       "egress_policy": <opaque JSON | null>
 //!     },
@@ -97,7 +97,7 @@ struct SessionBrokerRecord {
     session_id: String,
     container_ip: String,
     tenant: String,
-    namespace: String,
+    workspace: String,
     plugin: String,
     /// `null` on the wire when the plugin has no `egress:` block;
     /// pass through verbatim (control-plane stores it as opaque JSON,
@@ -117,7 +117,7 @@ impl SessionBrokerRecord {
             session_id: self.session_id,
             container_ip,
             tenant: self.tenant,
-            namespace: self.namespace,
+            workspace: self.workspace,
             plugin: self.plugin,
             egress_policy: self.egress_policy,
         })
@@ -287,8 +287,8 @@ mod tests {
         let (endpoint, captured, _h) = spawn_fake(
             StatusCode::OK,
             r#"{"sessions":[
-                {"session_id":"mcp_session_a","container_ip":"172.20.0.5","tenant":"phlax","namespace":"mcp","plugin":"fetch","egress_policy":null},
-                {"session_id":"mcp_session_b","container_ip":"172.20.0.6","tenant":"phlax","namespace":"mcp","plugin":"git","egress_policy":{"mode":"allow_all"}}
+                {"session_id":"mcp_session_a","container_ip":"172.20.0.5","tenant":"phlax","workspace":"mcp","plugin":"fetch","egress_policy":null},
+                {"session_id":"mcp_session_b","container_ip":"172.20.0.6","tenant":"phlax","workspace":"mcp","plugin":"git","egress_policy":{"mode":"allow_all"}}
             ]}"#,
         )
         .await;
@@ -360,7 +360,7 @@ mod tests {
         let (endpoint, _captured, _h) = spawn_fake(
             StatusCode::OK,
             r#"{"sessions":[
-                {"session_id":"mcp_session_a","container_ip":"not-an-ip","tenant":"phlax","namespace":"mcp","plugin":"fetch","egress_policy":null}
+                {"session_id":"mcp_session_a","container_ip":"not-an-ip","tenant":"phlax","workspace":"mcp","plugin":"fetch","egress_policy":null}
             ]}"#,
         )
         .await;

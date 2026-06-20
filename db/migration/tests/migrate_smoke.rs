@@ -150,10 +150,19 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         );
     }
 
+    // RFE #101 PR2 extends the schema; assert on the ordered list of
+    // migrations the schema is now built from. Adding a future
+    // migration extends the slice — but the *order* must stay stable,
+    // so a misplaced migration that runs out of order in production
+    // would trip this assertion.
+    let expected_migrations = vec![
+        "m20260620_000001_create_core_tables".to_owned(),
+        "m20260620_000002_extend_plugin_schema".to_owned(),
+    ];
     assert_eq!(
         applied_migration_names(&db).await,
-        vec!["m20260620_000001_create_core_tables".to_owned()],
-        "seaql_migrations should record exactly the one v0 migration"
+        expected_migrations,
+        "seaql_migrations should record the v0 migrations in order"
     );
 
     // Second run: must also succeed. This is the "the oneshot can restart
@@ -164,8 +173,8 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
 
     assert_eq!(
         applied_migration_names(&db).await,
-        vec!["m20260620_000001_create_core_tables".to_owned()],
-        "idempotent re-run should not duplicate the migration row"
+        expected_migrations,
+        "idempotent re-run should not duplicate any migration row"
     );
 
     assert_fk_actions(&db).await;

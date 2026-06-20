@@ -24,8 +24,8 @@ pub const SESSION_PORT: u16 = 8000;
 pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROBE_SLEEP: Duration = Duration::from_millis(100);
 pub const TENANT_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
-pub const NAMESPACE_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
-pub const TENANT_NAMESPACE_PLUGIN_PATH_RE: &str =
+pub const WORKSPACE_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
+pub const TENANT_WORKSPACE_PLUGIN_PATH_RE: &str =
     r"^/([a-z][a-z0-9-]{0,30})/([a-z][a-z0-9-]{0,30})/([a-z][a-z0-9-]{0,30})(/.*)?$";
 
 /// How long a tombstoned `Mcp-Session-Id` blocks new routing (5 minutes).
@@ -111,7 +111,7 @@ pub struct TransportState {
     pub container_ip: String,
     pub staging_token: String,
     pub tenant_name: String,
-    pub namespace: String,
+    pub workspace: String,
     pub plugin_name: String,
     pub port: u16,
     pub path: String,
@@ -133,7 +133,7 @@ impl fmt::Debug for TransportState {
             .field("container_ip", &self.container_ip)
             .field("staging_token", &self.staging_token)
             .field("tenant_name", &self.tenant_name)
-            .field("namespace", &self.namespace)
+            .field("workspace", &self.workspace)
             .field("plugin_name", &self.plugin_name)
             .field("port", &self.port)
             .field("path", &self.path)
@@ -158,7 +158,7 @@ pub struct PendingInit {
     pub container_ip: String,
     pub staging_token: String,
     pub tenant_name: String,
-    pub namespace: String,
+    pub workspace: String,
     pub plugin_name: String,
     pub descriptor: PluginDescriptor,
     pub upstream_authorization: Option<String>,
@@ -172,7 +172,7 @@ impl fmt::Debug for PendingInit {
             .field("container_ip", &self.container_ip)
             .field("staging_token", &self.staging_token)
             .field("tenant_name", &self.tenant_name)
-            .field("namespace", &self.namespace)
+            .field("workspace", &self.workspace)
             .field("plugin_name", &self.plugin_name)
             .field("descriptor", &self.descriptor)
             .field(
@@ -240,7 +240,7 @@ pub async fn run() -> Result<(), String> {
 
     let session_registry = Arc::new(SessionRegistry::new(&session_registry_path));
     // Refuse to start if the on-disk registry exists but cannot be safely
-    // loaded — most commonly because it predates the namespace cutover.
+    // loaded — most commonly because it predates the workspace cutover.
     // Silently dropping such entries would orphan their containers (no
     // DELETE-routed teardown, no admin visibility), so this is intentional.
     // The error message tells the operator exactly what to clean up.
