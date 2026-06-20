@@ -351,21 +351,43 @@ fn build_rbac_policies(sessions: &[SessionRecord]) -> std::collections::HashMap<
 /// `egress: all`. Returns one `:authority`-exact-match Permission per
 /// `{host, ports[i]}` entry for the allowlist form.
 ///
-/// **Unrecognised shapes fail closed.** config-broker is supposed to
-/// have rejected anything that isn't one of the three forms before
-/// it gets here (botwork #88), so we should never see an unknown
-/// shape in prod; if we somehow do, we'd rather emit nothing than
-/// emit a policy that lets the wrong thing through. The xds-test
-/// suite covers this corner.
+/// ## Accepted wire shapes
+///
+/// config-broker 0.1.9+ normalises the `all` / `none` sugar from
+/// `plugins.yaml` into a `{ "mode": "all" }` / `{ "mode": "none" }`
+/// object on the wire (see `config-broker::registry::parse_egress`),
+/// then session-broker forwards that verbatim into the
+/// `egress_policy` field on each `POST /sessions` (botwork #81). The
+/// pre-0.1.9 bare-string form is still accepted so older clients,
+/// recovery-sync replay, and the existing test fixtures all keep
+/// compiling to the same policy. The allowlist form passes through
+/// verbatim from `plugins.yaml` without normalisation today.
+///
+/// Accepted:
+///
+///   * `"all"`                                — bare string
+///   * `{ "mode": "all" }`                    — config-broker normalised
+///   * `"none"`                               — bare string
+///   * `{ "mode": "none" }`                   — config-broker normalised
+///   * `{ "allow": [{host, ports}, ...] }`    — verbatim allowlist
+///
+/// **Unrecognised shapes fail closed.** Anything that doesn't match
+/// one of the above produces no policy, which under our `ALLOW`
+/// action means denial. config-broker is supposed to have rejected
+/// anything malformed before it gets here (botwork #88) — this is
+/// defence-in-depth.
 fn permissions_for_egress(egress: &serde_json::Value) -> Option<Vec<Permission>> {
-    // `egress: "all"` → unrestricted for this session.
-    if egress.as_str() == Some("all") {
+    let mode = egress_mode(egress);
+
+    // `egress: "all"` / `{"mode":"all"}` → unrestricted for this session.
+    if mode == Some("all") {
         return Some(vec![Permission {
             rule: Some(permission::Rule::Any(true)),
         }]);
     }
-    // `egress: "none"` → no policy emitted, default-no-match denies.
-    if egress.as_str() == Some("none") {
+    // `egress: "none"` / `{"mode":"none"}` → no policy emitted,
+    // default-no-match denies.
+    if mode == Some("none") {
         return None;
     }
     // `egress: { allow: [{host, ports}, ...] }`.
@@ -394,6 +416,34 @@ fn permissions_for_egress(egress: &serde_json::Value) -> Option<Vec<Permission>>
     }
     // Anything else → fail closed.
     None
+}
+
+/// Extract the `all` / `none` mode keyword from either the bare-string
+/// or the `{ "mode": "..." }` object encoding, or `None` for any other
+/// shape.
+///
+/// Both encodings are in active use:
+///
+///   * **bare string** -- the original wire shape; still emitted by
+///     pre-0.1.9 clients and used directly throughout this module's
+///     unit tests.
+///   * **`{ "mode": "<keyword>" }`** -- what config-broker 0.1.9+
+///     normalises `egress: all` / `egress: none` in `plugins.yaml`
+///     into before forwarding to control-plane via session-broker
+///     (see `config-broker::registry::parse_egress`).
+///
+/// Returning `Option<&str>` (rather than e.g. a `Mode` enum) keeps the
+/// caller a single equality check away from the existing match arms
+/// in [`permissions_for_egress`] and avoids inventing a parallel
+/// vocabulary for what is effectively a single string.
+fn egress_mode(egress: &serde_json::Value) -> Option<&str> {
+    if let Some(s) = egress.as_str() {
+        return Some(s);
+    }
+    egress
+        .as_object()
+        .and_then(|obj| obj.get("mode"))
+        .and_then(|v| v.as_str())
 }
 
 fn authority_header_match(host: &str, port: u64) -> Permission {
@@ -579,6 +629,72 @@ mod tests {
         assert!(
             policies.is_empty(),
             "expected zero policies for `egress: none`, got: {policies:?}"
+        );
+    }
+
+    // ── Wire-shape regression tests for the `{ "mode": "..." }` form ────────
+    //
+    // config-broker 0.1.9+ normalises `egress: all` / `egress: none` from
+    // `plugins.yaml` into a `{ "mode": "all" }` / `{ "mode": "none" }`
+    // object on the wire (see `config-broker::registry::parse_egress`). An
+    // earlier version of this module only recognised the bare-string form,
+    // which meant every plugin declared `egress: all` (most of them in
+    // production) compiled to "no policy" — i.e. a default-deny — and
+    // every CONNECT through egress-envoy 403'd. These tests pin the
+    // normalised-object form so a future change that drops one of the
+    // two encodings is caught here rather than in a smoke run.
+
+    #[test]
+    fn egress_mode_all_object_produces_principal_with_any_permission() {
+        let listener = build_listener(&[record(
+            "mcp_session_a",
+            "172.20.0.5",
+            "fetch",
+            json!({"mode": "all"}),
+        )]);
+        let policies = listener_rbac_policies(&listener);
+        let policy = policies
+            .get("session_mcp_session_a")
+            .expect("policy for session_a");
+        assert_eq!(policy.permissions.len(), 1);
+        let permission::Rule::Any(any) = policy.permissions[0].rule.clone().expect("rule") else {
+            panic!("expected Any permission");
+        };
+        assert!(any, "Any(true)");
+    }
+
+    #[test]
+    fn egress_mode_none_object_produces_no_policy_at_all() {
+        let listener = build_listener(&[record(
+            "mcp_session_a",
+            "172.20.0.5",
+            "fs",
+            json!({"mode": "none"}),
+        )]);
+        let policies = listener_rbac_policies(&listener);
+        assert!(
+            policies.is_empty(),
+            "expected zero policies for `egress: {{ mode: \"none\" }}`, got: {policies:?}"
+        );
+    }
+
+    #[test]
+    fn egress_mode_object_and_bare_string_compile_to_identical_policy() {
+        // The two encodings MUST be equivalent — that is the whole point
+        // of accepting both. Build two listeners with the same session
+        // id + IP, one fed the bare-string form and one fed the object
+        // form, and assert the resulting RBAC policy is byte-identical.
+        let bare = build_listener(&[record("mcp_session_a", "172.20.0.5", "fetch", json!("all"))]);
+        let normalised = build_listener(&[record(
+            "mcp_session_a",
+            "172.20.0.5",
+            "fetch",
+            json!({"mode": "all"}),
+        )]);
+        assert_eq!(
+            listener_rbac_policies(&bare),
+            listener_rbac_policies(&normalised),
+            "bare-string and {{ mode: \"all\" }} forms must compile to the same policy",
         );
     }
 

@@ -496,3 +496,89 @@ async fn mixed_egress_modes_compile_to_correct_policy_count() {
     assert!(policies.contains_key("session_mcp_session_b"));
     assert!(!policies.contains_key("session_mcp_session_c"));
 }
+
+/// End-to-end wire-shape regression for the config-broker normalised
+/// egress encoding. config-broker 0.1.9+ normalises `egress: all` /
+/// `egress: none` from `plugins.yaml` into a `{ "mode": "all" }` /
+/// `{ "mode": "none" }` object (see
+/// `config-broker::registry::parse_egress`) and session-broker
+/// forwards that verbatim into `egress_policy` on `POST /sessions`.
+/// An earlier iteration of `permissions_for_egress` only recognised
+/// the bare-string sugar, so every plugin declared `egress: all` in
+/// production silently compiled to "no policy" — denial — and every
+/// CONNECT through egress-envoy 403'd. The lib-side `policy::tests`
+/// cover both encodings; this xds-level test pins the contract
+/// across the gRPC boundary too.
+#[tokio::test]
+async fn mixed_egress_mode_object_form_compiles_to_correct_policy_count() {
+    let server = spawn_xds().await;
+
+    server
+        .store
+        .bulk_seed(vec![
+            record(
+                "mcp_session_a",
+                "172.20.0.5",
+                "fetch",
+                serde_json::json!({"mode": "all"}),
+            ),
+            record(
+                "mcp_session_b",
+                "172.20.0.6",
+                "github-legacy",
+                serde_json::json!({
+                    "allow": [{"host": "api.github.com", "ports": [443]}]
+                }),
+            ),
+            record(
+                "mcp_session_c",
+                "172.20.0.7",
+                "fs",
+                serde_json::json!({"mode": "none"}),
+            ),
+        ])
+        .await
+        .expect("seed");
+
+    let (tx, mut stream) = open_stream(&server.base).await;
+    tx.send(lds_request("", ""))
+        .await
+        .expect("send lds subscribe");
+    let response = next_response_with_timeout(&mut stream).await;
+
+    let listener = Listener::decode(response.resources[0].value.as_slice()).expect("decode");
+
+    use envoy_proto::envoy::config::listener::v3::filter::ConfigType as FilterConfigType;
+    use envoy_proto::envoy::extensions::filters::http::rbac::v3::Rbac as RbacFilter;
+    use envoy_proto::envoy::extensions::filters::network::http_connection_manager::v3::http_filter::ConfigType as HttpFilterConfigType;
+    use envoy_proto::envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager;
+
+    let chain = &listener.filter_chains[0];
+    let FilterConfigType::TypedConfig(hcm_any) =
+        chain.filters[0].config_type.clone().expect("config_type")
+    else {
+        panic!("expected TypedConfig on network filter");
+    };
+    let hcm = HttpConnectionManager::decode(hcm_any.value.as_slice()).expect("decode hcm");
+    let rbac_filter = hcm
+        .http_filters
+        .iter()
+        .find(|f| f.name == "envoy.filters.http.rbac")
+        .expect("rbac filter present");
+    let HttpFilterConfigType::TypedConfig(rbac_any) =
+        rbac_filter.config_type.clone().expect("rbac config_type")
+    else {
+        panic!("expected TypedConfig on rbac filter");
+    };
+    let rbac = RbacFilter::decode(rbac_any.value.as_slice()).expect("decode rbac");
+    let policies = rbac.rules.expect("rules").policies;
+    assert_eq!(
+        policies.len(),
+        2,
+        "expected 2 policies (A={{mode:all}}, B=allow); none for C={{mode:none}}. got: {:?}",
+        policies.keys().collect::<Vec<_>>()
+    );
+    assert!(policies.contains_key("session_mcp_session_a"));
+    assert!(policies.contains_key("session_mcp_session_b"));
+    assert!(!policies.contains_key("session_mcp_session_c"));
+}
