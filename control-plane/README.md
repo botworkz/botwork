@@ -110,13 +110,21 @@ Request body (JSON):
 }
 ```
 
-The three permitted top-level shapes for `egress_policy` (enforced
-upstream by config-broker, parsed here by `policy::permissions_for_egress`):
+The accepted shapes for `egress_policy` (parsed here by
+`policy::permissions_for_egress`):
 
-* `"all"` — unrestricted egress.
-* `"none"` — no policy emitted; envoy default-no-match denies.
+* `"all"` or `{ "mode": "all" }` — unrestricted egress.
+* `"none"` or `{ "mode": "none" }` — no policy emitted; envoy
+  default-no-match denies.
 * `{ "allow": [ {"host": "...", "ports": [443, ...]}, ... ] }` — exact
   `:authority` allowlist.
+
+The `{ "mode": "..." }` object form is what config-broker 0.1.9+
+normalises `egress: all` / `egress: none` from `plugins.yaml` into
+before forwarding via session-broker (see
+`config-broker::registry::parse_egress`). The bare-string sugar is
+kept for older clients and direct callers; both encodings compile to
+the same RBAC policy.
 
 Anything else is **fail-closed**: no policy gets emitted for the
 session, and the egress envoy denies its traffic. This matches the
