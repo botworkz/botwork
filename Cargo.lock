@@ -337,6 +337,7 @@ dependencies = [
  "botwork-entity",
  "botwork-migration",
  "chrono",
+ "regex",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -357,21 +358,30 @@ name = "botwork-config-broker"
 version = "0.0.0"
 dependencies = [
  "axum 0.7.9",
+ "botwork-bootstrap",
+ "botwork-entity",
+ "botwork-migration",
+ "chrono",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
  "regex",
  "reqwest",
+ "sea-orm",
+ "sea-orm-migration",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror",
  "tokio",
  "tower 0.4.13",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

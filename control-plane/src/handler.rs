@@ -74,7 +74,7 @@ const PREFIX: &str = "[control-plane]";
 /// `mcp_session_` prefix is the contract.
 const SESSION_ID_RE: &str = r"^mcp_session_[a-z0-9]+$";
 
-/// Plugin / tenant / namespace shape — same regex used in config-broker
+/// Plugin / tenant / workspace shape — same regex used in config-broker
 /// and session-broker. Validated here so a malformed record never
 /// pollutes the store.
 const NAME_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
@@ -153,7 +153,7 @@ struct PostBody {
     session_id: Option<String>,
     container_ip: Option<String>,
     tenant: Option<String>,
-    namespace: Option<String>,
+    workspace: Option<String>,
     plugin: Option<String>,
     /// `null` is allowed and treated as "no policy / default-open" so a
     /// new plugin entry can be onboarded without a parallel
@@ -201,12 +201,12 @@ async fn post_session(State(state): State<AppState>, body: Option<Json<PostBody>
             "missing required field 'tenant'",
         );
     };
-    let Some(namespace) = payload.namespace else {
-        warn!("{PREFIX} post: invalid_request — missing 'namespace'");
+    let Some(workspace) = payload.workspace else {
+        warn!("{PREFIX} post: invalid_request — missing 'workspace'");
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "missing required field 'namespace'",
+            "missing required field 'workspace'",
         );
     };
     let Some(plugin) = payload.plugin else {
@@ -234,12 +234,12 @@ async fn post_session(State(state): State<AppState>, body: Option<Json<PostBody>
             format!("invalid tenant '{tenant}': must match {NAME_RE}"),
         );
     }
-    if !name_re().is_match(&namespace) {
-        warn!("{PREFIX} post: invalid_request — bad namespace '{namespace}'");
+    if !name_re().is_match(&workspace) {
+        warn!("{PREFIX} post: invalid_request — bad workspace '{workspace}'");
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            format!("invalid namespace '{namespace}': must match {NAME_RE}"),
+            format!("invalid workspace '{workspace}': must match {NAME_RE}"),
         );
     }
     if !name_re().is_match(&plugin) {
@@ -267,7 +267,7 @@ async fn post_session(State(state): State<AppState>, body: Option<Json<PostBody>
         session_id,
         container_ip,
         tenant,
-        namespace,
+        workspace,
         plugin,
         egress_policy: payload.egress_policy.unwrap_or(serde_json::Value::Null),
     };
@@ -525,7 +525,7 @@ mod tests {
             session_id: Some(session_id.to_string()),
             container_ip: Some("172.20.0.5".to_string()),
             tenant: Some("phlax".to_string()),
-            namespace: Some("mcp".to_string()),
+            workspace: Some("mcp".to_string()),
             plugin: Some("fetch".to_string()),
             egress_policy: Some(serde_json::json!({})),
         })
@@ -570,7 +570,7 @@ mod tests {
             session_id: Some("mcp_session_abc".to_string()),
             container_ip: Some("172.20.0.5".to_string()),
             tenant: None,
-            namespace: Some("mcp".to_string()),
+            workspace: Some("mcp".to_string()),
             plugin: Some("fetch".to_string()),
             egress_policy: None,
         });
@@ -591,7 +591,7 @@ mod tests {
             session_id: Some("not-a-session-id".to_string()),
             container_ip: Some("172.20.0.5".to_string()),
             tenant: Some("phlax".to_string()),
-            namespace: Some("mcp".to_string()),
+            workspace: Some("mcp".to_string()),
             plugin: Some("fetch".to_string()),
             egress_policy: None,
         });
@@ -608,7 +608,7 @@ mod tests {
             session_id: Some("mcp_session_abc".to_string()),
             container_ip: Some("not-an-ip".to_string()),
             tenant: Some("phlax".to_string()),
-            namespace: Some("mcp".to_string()),
+            workspace: Some("mcp".to_string()),
             plugin: Some("fetch".to_string()),
             egress_policy: None,
         });
@@ -641,7 +641,7 @@ mod tests {
             session_id: Some("mcp_session_abc".to_string()),
             container_ip: Some("172.20.0.5".to_string()),
             tenant: Some("phlax".to_string()),
-            namespace: Some("mcp".to_string()),
+            workspace: Some("mcp".to_string()),
             plugin: Some("fetch".to_string()),
             egress_policy: None,
         });
@@ -715,7 +715,7 @@ mod tests {
                 session_id: Some(id.to_string()),
                 container_ip: Some("172.20.0.5".to_string()),
                 tenant: Some("phlax".to_string()),
-                namespace: Some("mcp".to_string()),
+                workspace: Some("mcp".to_string()),
                 plugin: Some("fetch".to_string()),
                 egress_policy: None,
             });
@@ -831,7 +831,7 @@ mod tests {
                 session_id: "mcp_session_abc".to_string(),
                 container_ip: "172.20.0.5".parse().unwrap(),
                 tenant: "phlax".to_string(),
-                namespace: "mcp".to_string(),
+                workspace: "mcp".to_string(),
                 plugin: "fetch".to_string(),
                 egress_policy: serde_json::json!({}),
             })

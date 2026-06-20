@@ -30,7 +30,7 @@ fn sample_transport(container: &str) -> TransportState {
         container_ip: "172.20.0.5".to_string(),
         staging_token: "aabbccddeeff".to_string(),
         tenant_name: "acme".to_string(),
-        namespace: "mcp".to_string(),
+        workspace: "mcp".to_string(),
         plugin_name: "plugin-a".to_string(),
         port: 8000,
         path: "/mcp".to_string(),

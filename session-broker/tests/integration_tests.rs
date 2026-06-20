@@ -28,9 +28,9 @@ async fn session_registry_missing_file_gives_empty_start() {
 }
 
 #[tokio::test]
-async fn session_registry_load_rejects_pre_namespace_entries() {
-    // A session-registry file written by a pre-namespace broker is missing
-    // the tenant/namespace fields.  Silently skipping such entries would
+async fn session_registry_load_rejects_pre_workspace_entries() {
+    // A session-registry file written by a pre-workspace broker is missing
+    // the tenant/workspace fields.  Silently skipping such entries would
     // orphan the underlying docker containers — instead, we surface an
     // error so the operator deals with the migration explicitly.
     let dir = tempdir().unwrap();
@@ -66,7 +66,7 @@ async fn session_registry_load_rejects_pre_namespace_entries() {
     let err = registry
         .load_and_reconcile()
         .await
-        .expect_err("must refuse to load pre-namespace registry");
+        .expect_err("must refuse to load pre-workspace registry");
 
     match err {
         RegistryLoadError::SchemaMismatch { ref offending } => {
@@ -137,7 +137,7 @@ async fn session_registry_record_spawn_and_read() {
         "/var/lib/botwork/tenants/acme/staging/aabbccddeeff"
     );
     assert_eq!(entry.tenant, "acme");
-    assert_eq!(entry.namespace, "mcp");
+    assert_eq!(entry.workspace, "mcp");
     assert_eq!(entry.image, "botwork/mcp-echo:local");
     assert_eq!(entry.created_at, now);
     assert!(entry.mcp_session_id.is_none());
@@ -320,7 +320,7 @@ async fn admin_get_sessions_includes_spawned_session() {
         "/var/lib/botwork/tenants/acme/staging/aabbccddeeff"
     );
     assert_eq!(entry["tenant"], "acme");
-    assert_eq!(entry["namespace"], "mcp");
+    assert_eq!(entry["workspace"], "mcp");
     assert_eq!(entry["image"], "botwork/mcp-echo:local");
     assert_eq!(entry["created_at"], "2026-05-25T23:14:09Z");
     // null fields must be present as null, not omitted
@@ -420,7 +420,7 @@ async fn admin_get_control_plane_sessions_returns_transport_sessions_in_record_s
                 container_ip: "172.20.0.6".to_string(),
                 staging_token: "tokenb".to_string(),
                 tenant_name: "phlax".to_string(),
-                namespace: "mcp".to_string(),
+                workspace: "mcp".to_string(),
                 plugin_name: "fetch".to_string(),
                 port: 8000,
                 path: "/mcp".to_string(),
@@ -437,7 +437,7 @@ async fn admin_get_control_plane_sessions_returns_transport_sessions_in_record_s
                 container_ip: "172.20.0.5".to_string(),
                 staging_token: "tokena".to_string(),
                 tenant_name: "phlax".to_string(),
-                namespace: "mcp".to_string(),
+                workspace: "mcp".to_string(),
                 plugin_name: "github".to_string(),
                 port: 8000,
                 path: "/mcp".to_string(),
@@ -473,13 +473,13 @@ async fn admin_get_control_plane_sessions_returns_transport_sessions_in_record_s
     assert_eq!(ids, vec!["mcp_session_a", "mcp_session_b"]);
 
     // Wire shape must match control-plane's SessionRecord: session_id,
-    // container_ip, tenant, namespace, plugin, egress_policy. Nothing
+    // container_ip, tenant, workspace, plugin, egress_policy. Nothing
     // else (no agent_id, no upstream_auth, no transport plumbing).
     let a = &sessions[0];
     assert_eq!(a["session_id"], "mcp_session_a");
     assert_eq!(a["container_ip"], "172.20.0.5");
     assert_eq!(a["tenant"], "phlax");
-    assert_eq!(a["namespace"], "mcp");
+    assert_eq!(a["workspace"], "mcp");
     assert_eq!(a["plugin"], "github");
     assert_eq!(a["egress_policy"]["allow"][0]["host"], "api.github.com");
 

@@ -78,7 +78,7 @@ async fn insert_transport(state: &AppState, mcp_session_id: &str, container: &st
             container_ip: "172.20.0.5".to_string(),
             staging_token: "aabbccdd".to_string(),
             tenant_name: "tenant1".to_string(),
-            namespace: "mcp".to_string(),
+            workspace: "mcp".to_string(),
             plugin_name: "plugin-a".to_string(),
             port: 8000,
             path: "/mcp".to_string(),

@@ -1,33 +1,19 @@
 //! botwork-config-broker library entrypoint.
 //!
-//! Splits cleanly into two modules:
-//! * `registry`: parses `plugins.yaml`, holds `PluginEntry` values.
-//! * `handler`: axum router exposing `POST /resolve`, renders the wire shape.
+//! Post-RFE #101 PR2, config-broker is a thin reader on top of the
+//! `botwork-entity` schema. It resolves a `(tenant, workspace, plugin)`
+//! triple to a `PluginDescriptor` by joining four tables and rendering
+//! the row(s) into the wire shape session-broker expects.
 //!
-//! The trust boundary is the docker network (or whatever cluster posture is
-//! deployed). v0 has no caller authentication; treat any reachable peer as
-//! authorised. See README for the full posture.
+//! All validation lives in `botwork-bootstrap` on the write side; the
+//! broker trusts the DB. The only validation it still does at request
+//! time is the regex shape of the request fields themselves
+//! (`tenant`/`workspace`/`plugin` names) — operator-facing 400 errors
+//! that wouldn't be useful to surface as a 502 from a "row not found".
+//!
+//! Trust boundary is the docker network (`botwork-internal`). No
+//! caller authentication in v0; see README for the full posture.
 
 pub mod handler;
-pub mod registry;
-
-use std::path::Path;
-use std::sync::Arc;
 
 pub use handler::{build_router, AppState};
-pub use registry::{
-    load, PluginEntry, PluginRegistry, PluginResources, RegistryError, UpstreamAuth,
-    CONFIG_ENV_NAME,
-};
-
-/// Build an `AppState` from a `plugins.yaml` path. Refuses to start on
-/// validation errors — same posture session-broker had before the split.
-pub fn build_app_state(path: &Path) -> Result<AppState, RegistryError> {
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| RegistryError::Invalid(format!("non-UTF8 path: {}", path.display())))?;
-    let registry = load(path_str)?;
-    Ok(AppState {
-        registry: Arc::new(registry),
-    })
-}

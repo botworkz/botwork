@@ -28,25 +28,25 @@ use crate::secrets;
 use crate::session_registry::{is_container_running, utc_now};
 use crate::{
     log_info, redact_token, AppState, PendingInit, SessionLiveness, TransportState,
-    COLD_START_TIMEOUT, DEFAULT_DISCONNECT_GRACE_SECS, LIVENESS_TTL, NAMESPACE_RE,
-    TENANT_NAMESPACE_PLUGIN_PATH_RE, TENANT_RE, TOMBSTONE_TTL,
+    COLD_START_TIMEOUT, DEFAULT_DISCONNECT_GRACE_SECS, LIVENESS_TTL, TENANT_RE,
+    TENANT_WORKSPACE_PLUGIN_PATH_RE, TOMBSTONE_TTL, WORKSPACE_RE,
 };
 
 static TENANT_PATTERN: OnceLock<Regex> = OnceLock::new();
-static NAMESPACE_PATTERN: OnceLock<Regex> = OnceLock::new();
-static TENANT_NAMESPACE_PLUGIN_PATH_PATTERN: OnceLock<Regex> = OnceLock::new();
+static WORKSPACE_PATTERN: OnceLock<Regex> = OnceLock::new();
+static TENANT_WORKSPACE_PLUGIN_PATH_PATTERN: OnceLock<Regex> = OnceLock::new();
 
 fn tenant_pattern() -> &'static Regex {
     TENANT_PATTERN.get_or_init(|| Regex::new(TENANT_RE).expect("valid tenant regex"))
 }
 
-fn namespace_pattern() -> &'static Regex {
-    NAMESPACE_PATTERN.get_or_init(|| Regex::new(NAMESPACE_RE).expect("valid namespace regex"))
+fn workspace_pattern() -> &'static Regex {
+    WORKSPACE_PATTERN.get_or_init(|| Regex::new(WORKSPACE_RE).expect("valid workspace regex"))
 }
 
-fn tenant_namespace_plugin_path_pattern() -> &'static Regex {
-    TENANT_NAMESPACE_PLUGIN_PATH_PATTERN.get_or_init(|| {
-        Regex::new(TENANT_NAMESPACE_PLUGIN_PATH_RE).expect("valid tenant/namespace/plugin regex")
+fn tenant_workspace_plugin_path_pattern() -> &'static Regex {
+    TENANT_WORKSPACE_PLUGIN_PATH_PATTERN.get_or_init(|| {
+        Regex::new(TENANT_WORKSPACE_PLUGIN_PATH_RE).expect("valid tenant/workspace/plugin regex")
     })
 }
 
@@ -108,20 +108,20 @@ pub fn split_path_and_query(path: &str) -> (&str, &str) {
     }
 }
 
-pub fn parse_tenant_namespace_plugin(path: &str) -> Option<(String, String, String)> {
+pub fn parse_tenant_workspace_plugin(path: &str) -> Option<(String, String, String)> {
     let (base_path, _) = split_path_and_query(path);
-    let captures = tenant_namespace_plugin_path_pattern().captures(base_path)?;
+    let captures = tenant_workspace_plugin_path_pattern().captures(base_path)?;
     let tenant = captures.get(1)?.as_str().to_string();
-    let namespace = captures.get(2)?.as_str().to_string();
+    let workspace = captures.get(2)?.as_str().to_string();
     let plugin = captures.get(3)?.as_str().to_string();
-    Some((tenant, namespace, plugin))
+    Some((tenant, workspace, plugin))
 }
 
 pub fn parse_full_path(path: &str, plugin_path: &str) -> Option<(String, String, String, String)> {
     let (base_path, query) = split_path_and_query(path);
-    let captures = tenant_namespace_plugin_path_pattern().captures(base_path)?;
+    let captures = tenant_workspace_plugin_path_pattern().captures(base_path)?;
     let tenant = captures.get(1)?.as_str().to_string();
-    let namespace = captures.get(2)?.as_str().to_string();
+    let workspace = captures.get(2)?.as_str().to_string();
     let plugin = captures.get(3)?.as_str().to_string();
     let remainder = captures.get(4).map_or("", |m| m.as_str());
     let prefix = if plugin_path == "/" { "" } else { plugin_path };
@@ -131,7 +131,7 @@ pub fn parse_full_path(path: &str, plugin_path: &str) -> Option<(String, String,
     } else {
         body_raw
     };
-    Some((tenant, namespace, plugin, format!("{body}{query}")))
+    Some((tenant, workspace, plugin, format!("{body}{query}")))
 }
 
 pub fn forward_path(path: &str, plugin_path: &str) -> String {
@@ -195,8 +195,8 @@ fn staging_path(tenant_name: &str, token: &str) -> String {
     format!("/var/lib/botwork/tenants/{tenant_name}/staging/{token}")
 }
 
-fn agent_dir(tenant_name: &str, namespace: &str, agent_id: &str) -> String {
-    format!("/var/lib/botwork/tenants/{tenant_name}/namespaces/{namespace}/agents/{agent_id}")
+fn agent_dir(tenant_name: &str, workspace: &str, agent_id: &str) -> String {
+    format!("/var/lib/botwork/tenants/{tenant_name}/workspaces/{workspace}/agents/{agent_id}")
 }
 
 fn upstream(container_name: &str, port: u16) -> String {
@@ -756,7 +756,7 @@ async fn spawn_new_container(
     state: &AppState,
     client_addr: &str,
     tenant_name: &str,
-    namespace: &str,
+    workspace: &str,
     plugin_name: &str,
     descriptor: &PluginDescriptor,
     upstream_authorization: Option<String>,
@@ -811,7 +811,7 @@ async fn spawn_new_container(
         session_id: &container_name,
         container_ip: &container_ip,
         tenant: tenant_name,
-        namespace,
+        workspace,
         plugin: plugin_name,
         egress_policy: &descriptor.egress,
     };
@@ -837,7 +837,7 @@ async fn spawn_new_container(
         container_ip,
         staging_token: token,
         tenant_name: tenant_name.to_string(),
-        namespace: namespace.to_string(),
+        workspace: workspace.to_string(),
         plugin_name: plugin_name.to_string(),
         descriptor: descriptor.clone(),
         upstream_authorization,
@@ -966,8 +966,8 @@ impl ExternalProcessorService {
                     "session tenant mismatch",
                 );
             }
-            if let Some((path_tenant_name, path_namespace, path_plugin_name)) =
-                parse_tenant_namespace_plugin(&stream.path)
+            if let Some((path_tenant_name, path_workspace, path_plugin_name)) =
+                parse_tenant_workspace_plugin(&stream.path)
             {
                 if path_tenant_name != stream.trusted_tenant {
                     return logged_immediate_response(
@@ -977,12 +977,12 @@ impl ExternalProcessorService {
                         "tenant path/header mismatch",
                     );
                 }
-                if path_namespace != transport.namespace {
+                if path_workspace != transport.workspace {
                     return logged_immediate_response(
                         stream,
                         "request_headers",
                         403,
-                        "session namespace mismatch",
+                        "session workspace mismatch",
                     );
                 }
                 if path_plugin_name != transport.plugin_name {
@@ -1067,8 +1067,8 @@ impl ExternalProcessorService {
                     "session tenant mismatch",
                 );
             }
-            if let Some((path_tenant_name, path_namespace, path_plugin_name)) =
-                parse_tenant_namespace_plugin(&stream.path)
+            if let Some((path_tenant_name, path_workspace, path_plugin_name)) =
+                parse_tenant_workspace_plugin(&stream.path)
             {
                 if path_tenant_name != stream.trusted_tenant {
                     return logged_immediate_response(
@@ -1078,12 +1078,12 @@ impl ExternalProcessorService {
                         "tenant path/header mismatch",
                     );
                 }
-                if path_namespace != transport.namespace {
+                if path_workspace != transport.workspace {
                     return logged_immediate_response(
                         stream,
                         "request_headers",
                         403,
-                        "session namespace mismatch",
+                        "session workspace mismatch",
                     );
                 }
                 if path_plugin_name != transport.plugin_name {
@@ -1152,8 +1152,8 @@ impl ExternalProcessorService {
                             "session tenant mismatch",
                         );
                     }
-                    if let Some((path_tenant_name, path_namespace, path_plugin_name)) =
-                        parse_tenant_namespace_plugin(&stream.path)
+                    if let Some((path_tenant_name, path_workspace, path_plugin_name)) =
+                        parse_tenant_workspace_plugin(&stream.path)
                     {
                         if path_tenant_name != stream.trusted_tenant {
                             return logged_immediate_response(
@@ -1163,12 +1163,12 @@ impl ExternalProcessorService {
                                 "tenant path/header mismatch",
                             );
                         }
-                        if path_namespace != transport.namespace {
+                        if path_workspace != transport.workspace {
                             return logged_immediate_response(
                                 stream,
                                 "request_headers",
                                 403,
-                                "session namespace mismatch",
+                                "session workspace mismatch",
                             );
                         }
                         if path_plugin_name != transport.plugin_name {
@@ -1210,23 +1210,23 @@ impl ExternalProcessorService {
                 );
             }
 
-            let Some((path_tenant_name, namespace, plugin_name)) =
-                parse_tenant_namespace_plugin(&stream.path)
+            let Some((path_tenant_name, workspace, plugin_name)) =
+                parse_tenant_workspace_plugin(&stream.path)
             else {
                 return logged_immediate_response(
                     stream,
                     "request_headers",
                     400,
-                    "namespace required: use /<tenant>/<namespace>/<plugin>",
+                    "workspace required: use /<tenant>/<workspace>/<plugin>",
                 );
             };
 
-            if !namespace_pattern().is_match(&namespace) {
+            if !workspace_pattern().is_match(&workspace) {
                 return logged_immediate_response(
                     stream,
                     "request_headers",
                     400,
-                    "invalid namespace",
+                    "invalid workspace",
                 );
             }
 
@@ -1244,7 +1244,7 @@ impl ExternalProcessorService {
             let descriptor = match config_broker::resolve(
                 &state.config_broker_endpoint,
                 &stream.trusted_tenant,
-                &namespace,
+                &workspace,
                 &plugin_name,
                 std::time::Duration::from_secs(5),
             )
@@ -1342,7 +1342,7 @@ impl ExternalProcessorService {
                 state,
                 &stream.client_addr,
                 &stream.trusted_tenant,
-                &namespace,
+                &workspace,
                 &plugin_name,
                 &descriptor,
                 upstream_authorization.clone(),
@@ -1367,7 +1367,7 @@ impl ExternalProcessorService {
                     &pending.container_name,
                     &staging_path(&pending.tenant_name, &pending.staging_token),
                     &pending.tenant_name,
-                    &pending.namespace,
+                    &pending.workspace,
                     &pending.descriptor.image,
                     &pending.created_at,
                 )
@@ -1485,7 +1485,7 @@ impl ExternalProcessorService {
                 let result = call_bind_agent(
                     &state.launcher_socket_path,
                     &staging_path(&transport.tenant_name, &transport.staging_token),
-                    &agent_dir(&transport.tenant_name, &transport.namespace, &agent_id),
+                    &agent_dir(&transport.tenant_name, &transport.workspace, &agent_id),
                 )
                 .await;
                 if result.is_ok() {
@@ -1568,7 +1568,7 @@ impl ExternalProcessorService {
                     container_ip: pending.container_ip.clone(),
                     staging_token: pending.staging_token.clone(),
                     tenant_name: pending.tenant_name.clone(),
-                    namespace: pending.namespace.clone(),
+                    workspace: pending.workspace.clone(),
                     plugin_name: pending.plugin_name.clone(),
                     port: pending.descriptor.port,
                     path: pending.descriptor.path.clone(),
@@ -1737,7 +1737,7 @@ mod tests {
     fn parse_full_path_three_components_required() {
         // Two components is the old shape — must return None
         assert!(parse_full_path("/tenant/plugin", "/mcp").is_none());
-        // Three components: tenant/namespace/plugin
+        // Three components: tenant/workspace/plugin
         let parsed = parse_full_path("/tenant/mcp/plugin", "/mcp").expect("valid path");
         assert_eq!(parsed.0, "tenant");
         assert_eq!(parsed.1, "mcp");
@@ -1770,9 +1770,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_tenant_namespace_plugin_three_components() {
-        assert!(parse_tenant_namespace_plugin("/t/p").is_none());
-        let parsed = parse_tenant_namespace_plugin("/t/n/p").expect("valid path");
+    fn parse_tenant_workspace_plugin_three_components() {
+        assert!(parse_tenant_workspace_plugin("/t/p").is_none());
+        let parsed = parse_tenant_workspace_plugin("/t/n/p").expect("valid path");
         assert_eq!(parsed, ("t".to_string(), "n".to_string(), "p".to_string()));
     }
 
@@ -2064,7 +2064,7 @@ mod tests {
             container_ip: "172.20.0.5".to_string(),
             staging_token: "stage".to_string(),
             tenant_name: "tenant1".to_string(),
-            namespace: "mcp".to_string(),
+            workspace: "mcp".to_string(),
             plugin_name: "plugin-a".to_string(),
             port: 8000,
             path: "/mcp".to_string(),

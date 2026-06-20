@@ -94,11 +94,11 @@ pub struct SessionRecord {
     /// elsewhere; if dual-stack ever lands the schema bumps then.
     pub container_ip: Ipv4Addr,
     /// `<tenant>` segment from the request URL grammar
-    /// `/<tenant>/<namespace>/<plugin>`. Shape-validated, not yet keyed
+    /// `/<tenant>/<workspace>/<plugin>`. Shape-validated, not yet keyed
     /// on for policy resolution.
     pub tenant: String,
-    /// `<namespace>` segment from the same URL grammar.
-    pub namespace: String,
+    /// `<workspace>` segment from the same URL grammar.
+    pub workspace: String,
     /// `<plugin>` segment from the same URL grammar. Joined with the
     /// `egress_policy` below to give envoy "this src IP is this plugin
     /// and this is its policy."
@@ -415,7 +415,7 @@ mod tests {
             session_id: id.to_string(),
             container_ip: ip.parse().expect("test ip"),
             tenant: "phlax".to_string(),
-            namespace: "mcp".to_string(),
+            workspace: "mcp".to_string(),
             plugin: plugin.to_string(),
             egress_policy: serde_json::json!({}),
         }

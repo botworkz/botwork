@@ -65,7 +65,7 @@ async fn get_control_plane_sessions(
                     session_id: session_id.clone(),
                     container_ip: transport.container_ip.clone(),
                     tenant: transport.tenant_name.clone(),
-                    namespace: transport.namespace.clone(),
+                    workspace: transport.workspace.clone(),
                     plugin: transport.plugin_name.clone(),
                     // Surface a JSON `null` (not omit) for parity with
                     // the wire body control-plane already accepts.
@@ -98,7 +98,7 @@ struct ControlPlaneSessionView {
     session_id: String,
     container_ip: String,
     tenant: String,
-    namespace: String,
+    workspace: String,
     plugin: String,
     egress_policy: serde_json::Value,
 }
