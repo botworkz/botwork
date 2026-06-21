@@ -331,6 +331,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "botwork-admin-api"
+version = "0.0.0"
+dependencies = [
+ "axum 0.7.9",
+ "botwork-bootstrap",
+ "botwork-entity",
+ "botwork-migration",
+ "http",
+ "reqwest",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "botwork-bootstrap"
 version = "0.0.0"
 dependencies = [

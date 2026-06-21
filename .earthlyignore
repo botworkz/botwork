@@ -16,6 +16,11 @@ containers/db-migrate/*
 !containers/bootstrap/
 containers/bootstrap/*
 !containers/bootstrap/Dockerfile
+!containers/admin-api/
+containers/admin-api/*
+!containers/admin-api/Dockerfile
+!admin-api/
+!admin-api/**
 !bootstrap/
 !bootstrap/**
 !session-broker/

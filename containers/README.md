@@ -1,6 +1,6 @@
 # Containers
 
-`botwork` builds five container images:
+`botwork` builds six container images:
 
 - `session-broker`: Rust session broker service image.
 - `config-broker`: Rust config broker service image (resolves plugin
@@ -15,6 +15,9 @@
   `/etc/botwork/bootstrap.yaml` and upserts the rows it describes
   (tenants/workspaces/plugins/workspace_plugin bindings) into postgres.
   Idempotent across reboots. See `bootstrap/` and RFE #101.
+- `admin-api`: Rust HTTP+JSON service that will own the CRUD surface
+  on top of `botwork-entity`. v0 ships only `GET /admin/api/v1/health`;
+  entity handlers land in RFE #106 PR2.
 
 ## Build locally
 
@@ -35,13 +38,14 @@ earthly +config-broker-image
 earthly +control-plane-image
 earthly +db-migrate-image
 earthly +bootstrap-image
+earthly +admin-api-image
 # Or build everything:
 earthly +images
 ```
 
 This produces `botwork/session-broker:local`, `botwork/config-broker:local`,
-`botwork/control-plane:local`, `botwork/db-migrate:local`, and
-`botwork/bootstrap:local`.
+`botwork/control-plane:local`, `botwork/db-migrate:local`,
+`botwork/bootstrap:local`, and `botwork/admin-api:local`.
 
 > **Release builds** stamp each image with `org.opencontainers.image.revision`
 > set to `$GITHUB_SHA` and verify the label matches before pushing to GHCR —
@@ -79,7 +83,8 @@ by the root `VERSION` file (repo root, not this directory).
      `ghcr.io/botworkz/botwork/config-broker:<VERSION>`,
      `ghcr.io/botworkz/botwork/control-plane:<VERSION>`,
      `ghcr.io/botworkz/botwork/db-migrate:<VERSION>`,
-     `ghcr.io/botworkz/botwork/bootstrap:<VERSION>`, and the corresponding
+     `ghcr.io/botworkz/botwork/bootstrap:<VERSION>`,
+     `ghcr.io/botworkz/botwork/admin-api:<VERSION>`, and the corresponding
      `:latest` tags to GHCR.
    - Builds release binaries for `botwork-launcher` and `botwork-tools`.
    - Creates a GitHub Release `v<VERSION>` with those binaries as assets.
