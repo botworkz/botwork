@@ -13,13 +13,17 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.7"
-# botwork-admin-core: shared per-entry validators between admin-api and
-# bootstrap (RFE #106 PR2 extraction). v0 reads don't need them; PR3's
-# write endpoints do. Keeping the dep in [dependencies] from PR2 means
-# the admin-core code is already in the workspace's binary plan when
-# write handlers land, no further infra churn.
+# botwork-admin-core: per-entry validators shared with bootstrap
+# (RFE #106 PR2 extraction). PR3 consumes them on the write side
+# (validate_one for plugin POST/PUT, ValidationError -> ApiError).
 botwork-admin-core = { path = "../admin-core" }
 botwork-entity = { path = "../db/entity" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+regex = "1"
+# Live-state coupling against control-plane (RFE #106 PR3). reqwest
+# is also pulled in by sea-orm-migration on the dev side; sharing the
+# major here keeps the lockfile resolution monomorphic.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sea-orm = { version = "1.1.20", default-features = false, features = [
     "macros",
     "runtime-tokio-rustls",
@@ -30,6 +34,7 @@ sea-orm = { version = "1.1.20", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"
@@ -44,12 +49,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 botwork-bootstrap = { path = "../bootstrap" }
 botwork-migration = { path = "../db/migration" }
 http = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# wiremock spins a localhost HTTP server in-process so the live-state
+# coupling tests don't need a real control-plane. Same crate
+# session-broker uses to stub control-plane's POST /sessions in its
+# own integration tests (post-#92).
+wiremock = "0.6"
 sea-orm-migration = { version = "1.1.20", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",
 ] }
-serde_yaml = "0.9"
 testcontainers = "0.27.3"
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 tower = { version = "0.4", features = ["util"] }
