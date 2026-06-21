@@ -12,6 +12,7 @@ WORKDIR /build
 
 COPY admin-api/ ./admin-api/
 COPY admin-core/ ./admin-core/
+COPY admin-ui/ ./admin-ui/
 COPY bootstrap/ ./bootstrap/
 COPY config-broker/ ./config-broker/
 COPY control-plane/ ./control-plane/

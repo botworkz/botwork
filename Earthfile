@@ -8,6 +8,14 @@ admin-api-image:
         .
     SAVE IMAGE botwork/admin-api:local
 
+admin-ui-image:
+    ARG GIT_SHA=""
+    FROM DOCKERFILE --platform=linux/amd64 \
+        -f containers/admin-ui/Dockerfile \
+        --build-arg GIT_SHA=${GIT_SHA} \
+        .
+    SAVE IMAGE botwork/admin-ui:local
+
 session-broker-image:
     ARG GIT_SHA=""
     FROM DOCKERFILE --platform=linux/amd64 \
@@ -50,6 +58,7 @@ bootstrap-image:
 
 images:
     BUILD +admin-api-image
+    BUILD +admin-ui-image
     BUILD +session-broker-image
     BUILD +config-broker-image
     BUILD +control-plane-image

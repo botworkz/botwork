@@ -1,0 +1,27 @@
+# Trunk configuration for botwork-admin-ui-wasm.
+#
+# Build:  trunk build --release
+# Dev:    trunk serve            (live-reloads in the browser)
+#
+# Output is written to `dist/` (gitignored). The botwork-admin-ui-server
+# crate embeds `dist/` verbatim via `include_dir!`, so the production
+# image is "trunk build then cargo build then distroless" with no
+# filesystem dependency at runtime.
+
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+# Listen on loopback only — dev convenience, never exposed to the LAN.
+address = "127.0.0.1"
+port = 8080
+
+# Proxy /admin/api/v1/* to a locally-running admin-api binary so the
+# dev loop is "cargo run -p botwork-admin-api in one terminal, trunk
+# serve in another, open http://127.0.0.1:8080/." No CORS, no docker.
+# In production the bundle is served from /admin/ on the same origin
+# as the API by the ingress envoy, so the fetch paths are unchanged.
+[[proxy]]
+backend = "http://127.0.0.1:9400/admin/api/v1/"
+rewrite = "/admin/api/v1/"

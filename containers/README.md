@@ -1,6 +1,6 @@
 # Containers
 
-`botwork` builds six container images:
+`botwork` builds seven container images:
 
 - `session-broker`: Rust session broker service image.
 - `config-broker`: Rust config broker service image (resolves plugin
@@ -18,6 +18,11 @@
 - `admin-api`: Rust HTTP+JSON service that will own the CRUD surface
   on top of `botwork-entity`. v0 ships only `GET /admin/api/v1/health`;
   entity handlers land in RFE #106 PR2.
+- `admin-ui`: Rust HTTP service that serves the operator-facing
+  Leptos admin panel. v0 ships only `/healthz` + the trunk-built
+  shell at `/admin/`; the entity views land alongside admin-api PR2.
+  Built via the only Dockerfile in the repo that runs `trunk build`
+  before `cargo build`. See `admin-ui/README.md` and RFE #106.
 
 ## Build locally
 
@@ -39,13 +44,15 @@ earthly +control-plane-image
 earthly +db-migrate-image
 earthly +bootstrap-image
 earthly +admin-api-image
+earthly +admin-ui-image
 # Or build everything:
 earthly +images
 ```
 
 This produces `botwork/session-broker:local`, `botwork/config-broker:local`,
 `botwork/control-plane:local`, `botwork/db-migrate:local`,
-`botwork/bootstrap:local`, and `botwork/admin-api:local`.
+`botwork/bootstrap:local`, `botwork/admin-api:local`, and
+`botwork/admin-ui:local`.
 
 > **Release builds** stamp each image with `org.opencontainers.image.revision`
 > set to `$GITHUB_SHA` and verify the label matches before pushing to GHCR —
@@ -84,7 +91,8 @@ by the root `VERSION` file (repo root, not this directory).
      `ghcr.io/botworkz/botwork/control-plane:<VERSION>`,
      `ghcr.io/botworkz/botwork/db-migrate:<VERSION>`,
      `ghcr.io/botworkz/botwork/bootstrap:<VERSION>`,
-     `ghcr.io/botworkz/botwork/admin-api:<VERSION>`, and the corresponding
+     `ghcr.io/botworkz/botwork/admin-api:<VERSION>`,
+     `ghcr.io/botworkz/botwork/admin-ui:<VERSION>`, and the corresponding
      `:latest` tags to GHCR.
    - Builds release binaries for `botwork-launcher` and `botwork-tools`.
    - Creates a GitHub Release `v<VERSION>` with those binaries as assets.

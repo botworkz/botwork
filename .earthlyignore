@@ -19,10 +19,23 @@ containers/bootstrap/*
 !containers/admin-api/
 containers/admin-api/*
 !containers/admin-api/Dockerfile
+!containers/admin-ui/
+containers/admin-ui/*
+!containers/admin-ui/Dockerfile
 !admin-api/
 !admin-api/**
 !admin-core/
 !admin-core/**
+!admin-ui/
+!admin-ui/**
+# The trunk-emitted bundle is *generated* by `trunk build --release`
+# inside the container builder stage, so any host-side `dist/` is
+# stale at best and lockfile-poisoning at worst. Strip it from the
+# build context, but keep the `.gitkeep` placeholder so the empty
+# directory is created (include_dir! refuses a missing path; trunk
+# itself prefers to populate an existing dir).
+admin-ui/wasm/dist/*
+!admin-ui/wasm/dist/.gitkeep
 !bootstrap/
 !bootstrap/**
 !session-broker/

@@ -447,3 +447,74 @@ jobs:
           exit 1
         fi
         grep -q "BOTWORK_DATABASE_URL is not set" misslog
+
+    - name: Build admin-ui
+      run: |
+        set -euo pipefail
+        earthly +admin-ui-image
+    - name: Smoke test admin-ui
+      run: |
+        set -euo pipefail
+        # End-to-end production-path proof for admin-ui (RFE #106
+        # follow-up — Leptos control panel skeleton):
+        #
+        #   1. boot admin-ui on a throwaway docker network with the
+        #      `admin_ui` alias production uses (no postgres, no
+        #      db-migrate — admin-ui is a pure static-bundle server,
+        #      it has no DB connection);
+        #   2. curl /healthz from a sibling client container, assert
+        #      the JSON contract field;
+        #   3. curl /admin/ from a sibling client container, assert
+        #      we get an HTML body containing the trunk-stamped
+        #      marker string — this is the proof that the multi-
+        #      stage Dockerfile actually ran `trunk build` and the
+        #      include_dir! macro saw a populated dist/.
+        #
+        # No "fail-loud on missing URL" arm here because admin-ui
+        # has no required env. The bind address has a default and
+        # the bundle is baked into the binary.
+        net="botwork-smoke-admin-ui-$$"
+        ui="botwork-smoke-admin-ui-svc-$$"
+        trap "docker rm -f ${ui} >/dev/null 2>&1 || true; \
+              docker network rm ${net} >/dev/null 2>&1 || true" EXIT
+        docker network create "${net}" >/dev/null
+
+        docker run -d --name "${ui}" \
+          --network "${net}" --network-alias admin_ui \
+          botwork/admin-ui:local >/dev/null
+
+        # Wait for the listener to bind. The startup log line is
+        # `[admin-ui] starting on 0.0.0.0:9500`; grep for it rather
+        # than sleeping a fixed amount so a slow scheduler doesn't
+        # flake the test.
+        ready=0
+        for _ in $(seq 1 30); do
+          if docker logs "${ui}" 2>&1 | grep -q "starting on 0.0.0.0:9500"; then
+            ready=1
+            break
+          fi
+          sleep 1
+        done
+        if [[ "${ready}" -ne 1 ]]; then
+          echo "admin-ui did not bind in time" >&2
+          docker logs "${ui}" >&2 || true
+          exit 1
+        fi
+
+        # 2. — /healthz.
+        body="$(docker run --rm --network "${net}" curlimages/curl:8.10.1 \
+          --fail --silent --show-error \
+          http://admin_ui:9500/healthz)"
+        echo "healthz body: ${body}"
+        echo "${body}" | grep -q '"status":"ok"'
+
+        # 3. — /admin/ should return the trunk-built shell, not 404.
+        # We grep for the page <title> we set in admin-ui/wasm/index.html;
+        # if the include_dir! bundle is empty this assertion fails
+        # loudly rather than the more confusing "404 from the server".
+        body="$(docker run --rm --network "${net}" curlimages/curl:8.10.1 \
+          --fail --silent --show-error \
+          http://admin_ui:9500/admin/)"
+        echo "admin body bytes: $(printf '%s' "${body}" | wc -c)"
+        echo "${body}" | grep -q "botwork admin"
+        echo "${body}" | grep -q "data-trunk"
