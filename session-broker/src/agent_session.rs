@@ -337,6 +337,68 @@ impl AgentSessionWriter {
         Ok(row.id)
     }
 
+    /// RFE #105 round-3 PR2: expose the `agent_session.id` PK for
+    /// the `(tenant, workspace, agent_session_id)` triple after
+    /// `record_bind_agent` has run. session-broker uses this to
+    /// backfill `session_worker.agent_session_id` without bypassing
+    /// the writer's tenant/workspace id cache.
+    ///
+    /// Returns `None` if any of the rows are missing — caller
+    /// `warn!`s + carries on, same shape as every other DB write
+    /// in this module.
+    pub async fn resolve_pk(
+        &self,
+        tenant_name: &str,
+        workspace_name: &str,
+        agent_session_id: &str,
+    ) -> Option<Uuid> {
+        let tenant_id = match self.tenant_id(tenant_name).await {
+            Ok(id) => id,
+            Err(err) => {
+                warn!(
+                    "{PREFIX} resolve_pk tenant lookup failed for \
+                     tenant={tenant_name}: {err}"
+                );
+                return None;
+            }
+        };
+        let workspace_id = match self.workspace_id(tenant_id, workspace_name).await {
+            Ok(id) => id,
+            Err(err) => {
+                warn!(
+                    "{PREFIX} resolve_pk workspace lookup failed for \
+                     tenant={tenant_name} workspace={workspace_name}: {err}"
+                );
+                return None;
+            }
+        };
+        match agent_session::Entity::find()
+            .filter(agent_session::Column::TenantId.eq(tenant_id))
+            .filter(agent_session::Column::WorkspaceId.eq(workspace_id))
+            .filter(agent_session::Column::AgentSessionId.eq(agent_session_id))
+            .one(self.db.as_ref())
+            .await
+        {
+            Ok(Some(row)) => Some(row.id),
+            Ok(None) => {
+                warn!(
+                    "{PREFIX} resolve_pk found no agent_session row for \
+                     tenant={tenant_name} workspace={workspace_name} \
+                     agent_session_id={agent_session_id}"
+                );
+                None
+            }
+            Err(err) => {
+                warn!(
+                    "{PREFIX} resolve_pk DB query failed for \
+                     tenant={tenant_name} workspace={workspace_name} \
+                     agent_session_id={agent_session_id}: {err}"
+                );
+                None
+            }
+        }
+    }
+
     async fn workspace_id(
         &self,
         tenant_id: Uuid,

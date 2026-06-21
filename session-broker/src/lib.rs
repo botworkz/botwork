@@ -5,8 +5,10 @@ pub mod control_plane;
 pub mod exit_listener;
 pub mod ext_proc;
 pub mod launcher;
+pub mod recovery;
 pub mod secrets;
 pub mod session_registry;
+pub mod session_worker;
 pub mod sweeper;
 
 use std::collections::HashMap;
@@ -228,6 +230,22 @@ pub struct AppState {
     /// (everything behind `Arc`) so every clone of `AppState` carries
     /// the same handle.
     pub agent_session_writer: Option<Arc<crate::agent_session::AgentSessionWriter>>,
+    /// RFE #105 round-3 PR2: write-through handle for the
+    /// `session_worker` table — one row per spawned plugin container.
+    /// Same `None`-in-tests convention as `agent_session_writer`.
+    ///
+    /// session-broker is the single writer of this table; reads happen
+    /// from `recover_live_workers` at startup (paired with `docker ps`)
+    /// and from the future janitor for sweep policy.
+    pub session_worker_writer: Option<Arc<crate::session_worker::SessionWorkerWriter>>,
+    /// RFE #105 round-3 PR2: shared `DatabaseConnection` so the broker
+    /// can resolve cross-table reads outside of either writer's
+    /// surface. Currently used only to resolve the
+    /// `agent_session.id` PK after the per-name upsert lands in
+    /// `AgentSessionWriter::record_bind_agent` — without that the
+    /// `session_worker.agent_session_id` backfill would have to grow
+    /// its own SELECT path.
+    pub db: Option<Arc<sea_orm::DatabaseConnection>>,
 }
 
 pub fn log_info(message: &str) {
@@ -260,17 +278,12 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "/var/lib/botwork/sessions.json".to_string());
 
     let session_registry = Arc::new(SessionRegistry::new(&session_registry_path));
-    // Skip-malformed-row + WARN posture (RFE #105 / 2026-06-21): pre-PR2
-    // this returned Err on any single malformed row, which cascaded into
-    // a full broker exit-on-start and took control-plane + envoy down
-    // with it via systemd. The current loader logs the offending entries
-    // and proceeds; this `.map_err` is therefore practically dead but
-    // kept so a future tightening of `RegistryLoadError` would still be
-    // fail-loud at startup.
-    session_registry
-        .load_and_reconcile()
-        .await
-        .map_err(|e| format!("{e}"))?;
+    // Round-3 cutover: sessions.json is no longer the source of truth.
+    // If the file exists from a prior installation, dump its content
+    // to the journal once (so an operator can audit it against
+    // `docker ps`) and unlink it. The new `recover_live_workers`
+    // path below rebuilds in-memory state from the DB + docker labels.
+    crate::recovery::migrate_legacy_sessions_json(&session_registry_path);
 
     // RFE #105 PR2: connect to postgres and build the agent_session
     // write-through handle. Same env contract as config-broker /
@@ -296,8 +309,12 @@ pub async fn run() -> Result<(), String> {
             return Err(format!("failed to connect to postgres: {err}"));
         }
     };
+    let db_arc = Arc::new(db);
     let agent_session_writer = Some(Arc::new(crate::agent_session::AgentSessionWriter::new(
-        Arc::new(db),
+        Arc::clone(&db_arc),
+    )));
+    let session_worker_writer = Some(Arc::new(crate::session_worker::SessionWorkerWriter::new(
+        Arc::clone(&db_arc),
     )));
 
     let admin_addr = std::env::var("BOTWORK_SESSION_BROKER_ADMIN_ADDR")
@@ -327,6 +344,8 @@ pub async fn run() -> Result<(), String> {
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
         agent_session_writer,
+        session_worker_writer,
+        db: Some(db_arc),
     };
 
     log_info(&format!(
@@ -337,6 +356,15 @@ pub async fn run() -> Result<(), String> {
         "control-plane endpoint: {}",
         state.control_plane_endpoint
     ));
+
+    // Round-3 cutover: rebuild in-memory routing state from
+    // session_worker rows + docker ps + docker inspect labels.
+    // Replaces the JSON-based load_and_reconcile path. Orphan
+    // containers (live in docker, no DB row) are reaped immediately
+    // per the design call — "if it's not in DB it shouldn't be
+    // running" — and audit rows with no live container get their
+    // reaped_at column set.
+    crate::recovery::recover_live_workers(&state).await;
 
     ext_proc::seed_startup_liveness(&state).await;
 

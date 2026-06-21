@@ -324,6 +324,14 @@ fn app_state_for_registry(registry: Arc<SessionRegistry>) -> AppState {
         // `run()` in production; tests pass `None` so the suite
         // doesn't need a testcontainers postgres.
         agent_session_writer: None,
+        // RFE #105 round-3 PR2: the cutover wires two
+        // additional DB-bound handles next to
+        // agent_session_writer. Test builders pass `None` the
+        // same way to stay hermetic — production populates
+        // both via `run()` once the `connect_from_env()`
+        // handle is in hand.
+        session_worker_writer: None,
+        db: None,
     }
 }
 

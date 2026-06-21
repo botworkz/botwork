@@ -112,6 +112,7 @@ pub async fn launch_session(
     staging_path: &str,
     env: &[(String, String)],
     resources: &PluginResources,
+    labels: &[(String, String)],
 ) -> Result<LaunchOutcome, LauncherError> {
     // network is intentionally not threaded from session-broker into the
     // launcher payload (post-0.1.4). The launcher resolves it from its own
@@ -153,6 +154,29 @@ pub async fn launch_session(
             resources_payload.insert("pids".to_string(), Value::Number(pids.into()));
         }
         payload.insert("resources".to_string(), Value::Object(resources_payload));
+    }
+    // RFE #105 round-3: pass container labels through to the
+    // launcher. The launcher's wire validator (#115) enforces the
+    // `io.botworkz.*` namespace + value shape, so the broker writes
+    // the entries verbatim. Empty slice ⇒ omit the field entirely
+    // for parity with the env slice (older launcher images stay
+    // wire-compatible, though the new schema flow requires the
+    // newer launcher).
+    if !labels.is_empty() {
+        payload.insert(
+            "labels".to_string(),
+            Value::Array(
+                labels
+                    .iter()
+                    .map(|(name, value)| {
+                        serde_json::json!({
+                            "name": name,
+                            "value": value,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
     }
     let (status, body) = launcher_post(
         socket_path,
@@ -356,6 +380,98 @@ mod tests {
             "/tmp/staging",
             env,
             resources,
+            // Test helper exercises the spawn path with the
+            // pre-round-3-PR2 shape (no labels); the labels-emitted
+            // case is covered by `launcher_post_includes_labels_when_slice_non_empty`
+            // below.
+            &[],
+        )
+        .await
+        .expect("launch succeeds");
+        server.await.expect("server result")
+    }
+
+    // ── RFE #105 round-3 PR2: labels on the launcher payload ───────────────
+
+    #[tokio::test]
+    async fn launcher_post_omits_labels_when_slice_empty() {
+        let body = capture_launch_body(&[], &PluginResources::default()).await;
+        assert!(
+            !body.contains("\"labels\""),
+            "labels field must be absent when slice is empty: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn launcher_post_includes_labels_when_slice_non_empty() {
+        let labels = vec![
+            ("io.botworkz.tenant".to_string(), "acme".to_string()),
+            ("io.botworkz.workspace".to_string(), "mcp".to_string()),
+            ("io.botworkz.plugin".to_string(), "mcp-bash".to_string()),
+        ];
+        let body = capture_launch_body_with_labels(&[], &PluginResources::default(), &labels).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        let entries = parsed["labels"].as_array().expect("labels array");
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().expect("name"))
+            .collect();
+        let values: Vec<&str> = entries
+            .iter()
+            .map(|e| e["value"].as_str().expect("value"))
+            .collect();
+        // Order is preserved across the wire so the launcher's argv
+        // (and the resulting `docker inspect`) stay deterministic.
+        assert_eq!(
+            names,
+            vec![
+                "io.botworkz.tenant",
+                "io.botworkz.workspace",
+                "io.botworkz.plugin",
+            ]
+        );
+        assert_eq!(values, vec!["acme", "mcp", "mcp-bash"]);
+    }
+
+    async fn capture_launch_body_with_labels(
+        env: &[(String, String)],
+        resources: &PluginResources,
+        labels: &[(String, String)],
+    ) -> String {
+        let temp = tempdir().expect("tempdir");
+        let socket_path = temp.path().join("launcher.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut stream).await;
+            let body = request
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("request body")
+                .to_string();
+            let body_json =
+                r#"{"name":"mcp_session_abc","status":"started","container_ip":"172.20.0.5"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\nContent-Type: application/json\nContent-Length: {}\nConnection: close\n\n{body_json}",
+                body_json.len()
+            );
+            let response = response.replace('\n', "\r\n");
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            body
+        });
+
+        let _ = launch_session(
+            path_to_string(&socket_path).as_str(),
+            "mcp_session_abc",
+            "botwork/mcp-a:local",
+            "/tmp/staging",
+            env,
+            resources,
+            labels,
         )
         .await
         .expect("launch succeeds");

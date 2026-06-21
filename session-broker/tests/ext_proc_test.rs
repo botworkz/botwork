@@ -67,6 +67,14 @@ fn app_state_with_plugins_and_endpoints(
         // RFE #105 PR2: DB write-through is production-only; tests
         // pass `None` so they stay hermetic.
         agent_session_writer: None,
+        // RFE #105 round-3 PR2: the cutover wires two
+        // additional DB-bound handles next to
+        // agent_session_writer. Test builders pass `None` the
+        // same way to stay hermetic — production populates
+        // both via `run()` once the `connect_from_env()`
+        // handle is in hand.
+        session_worker_writer: None,
+        db: None,
     }
 }
 
@@ -119,6 +127,14 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         // RFE #105 PR2: DB write-through is production-only; tests
         // pass `None` so they stay hermetic.
         agent_session_writer: None,
+        // RFE #105 round-3 PR2: the cutover wires two
+        // additional DB-bound handles next to
+        // agent_session_writer. Test builders pass `None` the
+        // same way to stay hermetic — production populates
+        // both via `run()` once the `connect_from_env()`
+        // handle is in hand.
+        session_worker_writer: None,
+        db: None,
     }
 }
 
@@ -2009,6 +2025,14 @@ fn app_state_with_session_registry(
         // RFE #105 PR2: DB write-through is production-only; tests
         // pass `None` so they stay hermetic.
         agent_session_writer: None,
+        // RFE #105 round-3 PR2: the cutover wires two
+        // additional DB-bound handles next to
+        // agent_session_writer. Test builders pass `None` the
+        // same way to stay hermetic — production populates
+        // both via `run()` once the `connect_from_env()`
+        // handle is in hand.
+        session_worker_writer: None,
+        db: None,
     }
 }
 
