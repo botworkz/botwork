@@ -13,6 +13,12 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.7"
+# botwork-admin-core: shared per-entry validators between admin-api and
+# bootstrap (RFE #106 PR2 extraction). v0 reads don't need them; PR3's
+# write endpoints do. Keeping the dep in [dependencies] from PR2 means
+# the admin-core code is already in the workspace's binary plan when
+# write handlers land, no further infra churn.
+botwork-admin-core = { path = "../admin-core" }
 botwork-entity = { path = "../db/entity" }
 sea-orm = { version = "1.1.20", default-features = false, features = [
     "macros",
@@ -28,6 +34,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 # Same posture as config-broker: spin a real postgres via testcontainers,

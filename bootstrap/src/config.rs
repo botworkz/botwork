@@ -34,20 +34,21 @@
 //! ```
 //!
 //! Top-level plugin entries carry the full set of fields that the
-//! config-broker `/resolve` wire shape exposes; see
-//! [`plugin_spec`] for the validation rules. Per-binding `config:`
-//! lives under `tenants[].workspaces[].plugins[].config` and is
-//! validated separately.
+//! config-broker `/resolve` wire shape exposes; the validation rules
+//! live in `botwork-admin-core::plugin_spec` (RFE #106 PR2). Per-
+//! binding `config:` lives under
+//! `tenants[].workspaces[].plugins[].config` and is validated
+//! separately by the same crate.
 
 use std::collections::HashSet;
 use std::path::Path;
 
+use botwork_admin_core::plugin_spec::{
+    validate_one, validate_workspace_plugin_config, RawPluginEntry, ValidatedPlugin,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::BootstrapError;
-use crate::plugin_spec::{
-    validate_all, validate_workspace_plugin_config, RawPluginEntry, ValidatedPlugin,
-};
 
 /// Top-level shape: a list of tenants (each with its workspaces and
 /// plugin bindings) plus a flat list of globally-named plugins.
@@ -81,8 +82,8 @@ pub struct WorkspaceRaw {
 pub struct WorkspacePluginRaw {
     pub name: String,
     /// Optional per-binding config blob (YAML mapping). Validated by
-    /// `plugin_spec::validate_workspace_plugin_config` against the
-    /// same size cap as static env values.
+    /// `botwork_admin_core::validate_workspace_plugin_config` against
+    /// the same size cap as static env values.
     #[serde(default)]
     pub config: Option<serde_yaml::Value>,
 }
@@ -131,7 +132,17 @@ impl BootstrapConfig {
     /// Pulled out of `load` so tests can construct `BootstrapConfigRaw`
     /// directly without going through the on-disk path.
     pub fn from_raw(raw: BootstrapConfigRaw) -> Result<Self, BootstrapError> {
-        let plugins = validate_all(&raw.plugins)?;
+        // Per-entry validation lives in admin-core; dup-name detection
+        // lives here (it's a list-level rule the validator doesn't own).
+        let mut plugins = Vec::with_capacity(raw.plugins.len());
+        let mut seen_plugin: HashSet<&str> = HashSet::new();
+        for entry in &raw.plugins {
+            let validated = validate_one(entry)?; // -> ValidatedPlugin via admin-core
+            if !seen_plugin.insert(entry.name.as_str()) {
+                return Err(BootstrapError::DuplicatePlugin(entry.name.clone()));
+            }
+            plugins.push(validated);
+        }
         let plugin_names: HashSet<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
 
         let mut tenants = Vec::with_capacity(raw.tenants.len());
@@ -257,7 +268,7 @@ plugins:
             "https://example.com"
         );
         assert_eq!(cfg.plugins.len(), 2);
-        // Defaults filled in.
+        // Defaults filled in by admin-core::validate_one.
         let bash = cfg.plugins.iter().find(|p| p.name == "mcp-bash").unwrap();
         assert_eq!(bash.port, 8000);
         assert_eq!(bash.path, "/");
@@ -375,5 +386,23 @@ plugins:
         let f = yaml_to_file(&yaml);
         let err = BootstrapConfig::load(f.path()).unwrap_err();
         assert!(matches!(err, BootstrapError::BindingInvalid { .. }));
+    }
+
+    #[test]
+    fn fails_on_duplicate_plugin_name() {
+        let f = yaml_to_file(
+            r#"
+tenants: []
+plugins:
+- name: mcp-bash
+  image: ghcr.io/example/mcp-bash:1.0
+  egress: none
+- name: mcp-bash
+  image: ghcr.io/example/mcp-bash:2.0
+  egress: all
+"#,
+        );
+        let err = BootstrapConfig::load(f.path()).unwrap_err();
+        assert!(matches!(err, BootstrapError::DuplicatePlugin(_)));
     }
 }

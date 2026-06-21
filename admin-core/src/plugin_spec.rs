@@ -1,8 +1,9 @@
 //! Full plugin-spec validation + normalisation.
 //!
-//! Lifted from the pre-cutover `config-broker/src/registry.rs`
-//! verbatim (modulo `serde_yaml::Value` → `serde_json::Value` plumbing).
-//! Rules:
+//! Originally lifted from the pre-cutover `config-broker/src/registry.rs`
+//! into `botwork-bootstrap/src/plugin_spec.rs`; pulled out of bootstrap
+//! into `botwork-admin-core` so admin-api (RFE #106 PR3+) can consume
+//! the same rules. The rule set is unchanged from the bootstrap copy:
 //!
 //! * `image` — required non-empty string.
 //! * `port` — integer 1..=65535. Default 8000.
@@ -25,8 +26,15 @@
 //!   launcher's `BOTWORK_LAUNCHER_DEFAULT_NETWORK` is the single
 //!   source of truth for plugin network membership).
 //!
-//! All errors carry the plugin name. The bootstrap binary exits 5
-//! (config validation failure) on the first one.
+//! All errors carry the plugin name (or binding context).
+//!
+//! ## Scope: per-entry only
+//!
+//! This module validates ONE plugin entry at a time (or one binding
+//! config blob). Cross-entry rules (duplicate names, unknown plugin
+//! refs in bindings) live with the caller — bootstrap enforces them
+//! while traversing its yaml tree, admin-api enforces them per-request
+//! against the live DB. There is no `validate_all` here.
 //!
 //! ## Constants kept in sync with launcher
 //!
@@ -39,7 +47,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::error::BootstrapError;
+use crate::error::ValidationError;
 
 // Keep in sync with launcher/src/validate.rs RESERVED_ENV_NAMES.
 pub const RESERVED_ENV_NAMES: &[&str] = &["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"];
@@ -61,16 +69,17 @@ pub const CONFIG_ENV_NAME: &str = "BOTWORK_MCP_CONFIG";
 pub const PLUGIN_NAME_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
 
 /// Raw plugin entry as it appears in bootstrap.yaml's top-level
-/// `plugins:` list. Field shapes mirror the old `plugins.yaml`
-/// structure; `serde_yaml::from_str` populates this directly and
-/// validation produces a [`ValidatedPlugin`].
+/// `plugins:` list (or as a JSON request body to admin-api). Field
+/// shapes mirror the original `plugins.yaml` structure;
+/// `serde_yaml::from_str` / `serde_json::from_str` populates this
+/// directly and validation produces a [`ValidatedPlugin`].
 ///
-/// `serde(deny_unknown_fields)` so a typo (`upsteam_auth`) is a hard
-/// error rather than a silently-dropped field. The historical
-/// `network:` field is intercepted in [`validate`] with a clearer
-/// migration message; here we just accept anything under
-/// `extra_fields` so the deserialiser doesn't reject the row before
-/// the validator can name what's wrong.
+/// `serde(deny_unknown_fields)` is deliberately NOT applied here —
+/// the historical `network:` field is captured below so the
+/// validator can emit a precise migration error rather than a generic
+/// "unknown field". Callers that want strict-shape deny should apply
+/// it at their own wrapper struct (bootstrap does this on its yaml
+/// envelope, not on individual plugin entries).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RawPluginEntry {
     /// Globally-unique plugin name. Defaults to empty when deserialising
@@ -120,27 +129,15 @@ pub struct ValidatedPlugin {
     pub egress: JsonValue,
 }
 
-/// Validate a list of raw plugin entries. The list is `&[RawPluginEntry]`
-/// (not a map) because bootstrap.yaml's `plugins:` is a sequence to
-/// preserve order in operator-facing files; the validator dedupes by
-/// `name`.
-pub fn validate_all(raws: &[RawPluginEntry]) -> Result<Vec<ValidatedPlugin>, BootstrapError> {
-    let mut seen_names: HashSet<&str> = HashSet::new();
-    let mut out = Vec::with_capacity(raws.len());
-    for raw in raws {
-        let validated = validate_one(raw)?;
-        if !seen_names.insert(raw.name.as_str()) {
-            return Err(BootstrapError::DuplicatePlugin(raw.name.clone()));
-        }
-        out.push(validated);
-    }
-    Ok(out)
-}
-
-fn validate_one(raw: &RawPluginEntry) -> Result<ValidatedPlugin, BootstrapError> {
+/// Validate a single raw plugin entry into a [`ValidatedPlugin`].
+///
+/// Duplicate-name detection across a list is NOT done here — the
+/// caller traverses its own collection (yaml sequence in bootstrap,
+/// DB row set in admin-api) and decides what duplicate means.
+pub fn validate_one(raw: &RawPluginEntry) -> Result<ValidatedPlugin, ValidationError> {
     let name = raw.name.trim().to_string();
     if name.is_empty() {
-        return Err(BootstrapError::EmptyName("plugins[].name"));
+        return Err(ValidationError::EmptyName("plugins[].name"));
     }
     if !regex::Regex::new(PLUGIN_NAME_RE)
         .expect("valid plugin name regex")
@@ -197,7 +194,7 @@ fn validate_one(raw: &RawPluginEntry) -> Result<ValidatedPlugin, BootstrapError>
     })
 }
 
-fn validate_path(plugin: &str, raw: Option<&str>) -> Result<String, BootstrapError> {
+fn validate_path(plugin: &str, raw: Option<&str>) -> Result<String, ValidationError> {
     let raw = match raw {
         None => return Ok("/".to_string()),
         Some(p) => p,
@@ -236,7 +233,7 @@ fn validate_path(plugin: &str, raw: Option<&str>) -> Result<String, BootstrapErr
     Ok(path.to_string())
 }
 
-fn validate_upstream_auth(plugin: &str, raw: Option<&str>) -> Result<String, BootstrapError> {
+fn validate_upstream_auth(plugin: &str, raw: Option<&str>) -> Result<String, ValidationError> {
     let Some(raw) = raw else {
         return Ok("none".to_string());
     };
@@ -294,7 +291,7 @@ fn valid_env_name(name: &str) -> bool {
 fn validate_env(
     plugin: &str,
     raw: Option<&serde_yaml::Value>,
-) -> Result<JsonValue, BootstrapError> {
+) -> Result<JsonValue, ValidationError> {
     let Some(raw) = raw else {
         return Ok(JsonValue::Array(Vec::new()));
     };
@@ -379,7 +376,7 @@ fn validate_env(
 fn validate_resources(
     plugin: &str,
     raw: Option<&serde_yaml::Value>,
-) -> Result<Option<JsonValue>, BootstrapError> {
+) -> Result<Option<JsonValue>, ValidationError> {
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -439,7 +436,7 @@ fn validate_resources(
 fn validate_egress(
     plugin: &str,
     raw: Option<&serde_yaml::Value>,
-) -> Result<JsonValue, BootstrapError> {
+) -> Result<JsonValue, ValidationError> {
     let raw = raw.ok_or_else(|| {
         plugin_err(
             plugin,
@@ -538,7 +535,7 @@ fn validate_allow_entry(
     plugin: &str,
     index: usize,
     entry: &serde_yaml::Value,
-) -> Result<(), BootstrapError> {
+) -> Result<(), ValidationError> {
     let mapping = entry.as_mapping().ok_or_else(|| {
         plugin_err(
             plugin,
@@ -656,14 +653,15 @@ fn validate_allow_entry(
 }
 
 /// Validate a per-binding `config:` blob (lives under
-/// `tenants[].workspaces[].plugins[].config` in bootstrap.yaml).
+/// `tenants[].workspaces[].plugins[].config` in bootstrap.yaml, or
+/// as the `config` field on an admin-api workspace_plugin payload).
 ///
 /// Returns `Ok(None)` for absent / empty; `Ok(Some(json))` for a
 /// non-empty mapping. Rejects non-mapping shapes and oversized blobs.
 pub fn validate_workspace_plugin_config(
     binding_context: &str,
     raw: Option<&serde_yaml::Value>,
-) -> Result<Option<JsonValue>, BootstrapError> {
+) -> Result<Option<JsonValue>, ValidationError> {
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -700,15 +698,15 @@ pub fn validate_workspace_plugin_config(
     Ok(Some(json_val))
 }
 
-fn plugin_err(plugin: &str, suffix: &str) -> BootstrapError {
-    BootstrapError::PluginInvalid {
+fn plugin_err(plugin: &str, suffix: &str) -> ValidationError {
+    ValidationError::PluginInvalid {
         plugin: plugin.to_string(),
         detail: suffix.to_string(),
     }
 }
 
-fn binding_err(context: &str, suffix: &str) -> BootstrapError {
-    BootstrapError::BindingInvalid {
+fn binding_err(context: &str, suffix: &str) -> ValidationError {
+    ValidationError::BindingInvalid {
         context: context.to_string(),
         detail: suffix.to_string(),
     }
@@ -909,9 +907,29 @@ mod tests {
     }
 
     #[test]
-    fn validate_all_rejects_duplicate_plugin_names() {
-        let a = raw("p", "image: ghcr.io/example/p:1.0\negress: all\n");
-        let b = raw("p", "image: ghcr.io/example/p:2.0\negress: all\n");
-        assert!(validate_all(&[a, b]).is_err());
+    fn binding_config_size_limit_enforced() {
+        let big = "x".repeat(70 * 1024);
+        let raw_yaml: serde_yaml::Value = serde_yaml::from_str(&format!("big: \"{big}\"")).unwrap();
+        let err = validate_workspace_plugin_config(
+            "tenant 'a' workspace 'b' plugin 'c'",
+            Some(&raw_yaml),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ValidationError::BindingInvalid { .. }));
+    }
+
+    #[test]
+    fn binding_config_returns_none_for_absent_or_empty() {
+        assert!(validate_workspace_plugin_config("ctx", None)
+            .unwrap()
+            .is_none());
+        let null: serde_yaml::Value = serde_yaml::Value::Null;
+        assert!(validate_workspace_plugin_config("ctx", Some(&null))
+            .unwrap()
+            .is_none());
+        let empty: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
+        assert!(validate_workspace_plugin_config("ctx", Some(&empty))
+            .unwrap()
+            .is_none());
     }
 }

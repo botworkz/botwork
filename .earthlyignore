@@ -21,6 +21,8 @@ containers/admin-api/*
 !containers/admin-api/Dockerfile
 !admin-api/
 !admin-api/**
+!admin-core/
+!admin-core/**
 !bootstrap/
 !bootstrap/**
 !session-broker/

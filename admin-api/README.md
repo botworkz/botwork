@@ -5,17 +5,34 @@
 that today is owned by the `botwork-bootstrap` boot oneshot.
 
 See [RFE #106](https://github.com/botworkz/botwork/issues/106) for the
-design context — this is the v0 skeleton PR that lands the
-service-shaped scaffolding and a single health endpoint. The entity
-CRUD handlers land in PR2 once the write-side validators have been
-lifted out of `bootstrap/` into a shared `botwork-admin-core` lib.
+design context. PR1 landed the service-shaped scaffolding + a single
+health endpoint; PR2 (this PR) adds read-side endpoints for all four
+entities and extracts the per-entry validators into a shared
+`botwork-admin-core` crate. The write endpoints (POST/PUT/DELETE,
+delete-guards, xDS coupling) land in PR3.
 
-## What v0 ships
+## What ships post-PR2
 
-* one `GET /admin/api/v1/health` endpoint that returns
-  `{ "status": "ok", "db": "reachable" | "unreachable" }` (`SELECT 1`
-  probe; 200 in both arms so operators can curl the service even when
-  the DB is sad);
+```text
+GET /admin/api/v1/health                            -> { status, db }
+
+GET /admin/api/v1/tenants                           -> { items: [...], total }
+GET /admin/api/v1/tenants/{id}                      -> Tenant
+
+GET /admin/api/v1/workspaces                        -> { items: [...], total }
+    ?tenant_id=<uuid>                                  (optional filter)
+GET /admin/api/v1/workspaces/{id}                   -> Workspace
+
+GET /admin/api/v1/plugins                           -> { items: [...], total }
+GET /admin/api/v1/plugins/{id}                      -> Plugin
+
+GET /admin/api/v1/workspace_plugins                 -> { items: [...], total }
+    ?workspace_id=<uuid>&plugin_id=<uuid>              (optional filters)
+GET /admin/api/v1/workspace_plugins/{wid}/{pid}     -> WorkspacePlugin
+```
+
+Plus the unchanged infrastructure from PR1:
+
 * the container image (`botwork/admin-api:local`, distroless,
   uid 1100, same posture as config-broker);
 * the `Earthfile` + `Makefile` + release workflow entries that build
@@ -24,35 +41,34 @@ lifted out of `bootstrap/` into a shared `botwork-admin-core` lib.
   on a throwaway docker network and curls `/admin/api/v1/health` from
   a sibling client container.
 
-The companion changes that put admin-api in the deployed VM image
-(`shasset.yaml` pin, systemd unit, image-loader entry, goss assertion,
-end-to-end smoke) land in a follow-up PR against `botworkz/vm` once
-this image is published to GHCR.
+### Response shapes
 
-The production v0 invocation pattern (matching the future systemd
-unit `botwork-admin-api.service`):
+* **Success body** — entity model serialised verbatim via SeaORM's
+  derived `Serialize`. List endpoints wrap the body in
+  `{ "items": [...], "total": N }` so pagination
+  (`?limit=&offset=`, `next_cursor`) can land later as a pure-additive
+  change.
+* **Error envelope** (mirrors config-broker / control-plane):
+
+  ```json
+  { "error": "<machine code>", "message": "<human detail>" }
+  ```
+
+  v0 emits `not_found`, `bad_request`, `internal`. PR3 adds
+  `conflict` (delete-guard hit) and `precondition_failed` (optimistic
+  lock lost).
+
+### Hitting it from on the VM
+
+Once admin-api is running on the deployed VM, the service is reachable
+inside the docker network by alias. The simplest curl from the VM host
+is via a one-shot client container on the same network:
 
 ```bash
-docker run --rm --name botwork-admin-api \
-  --network botwork-internal --network-alias admin_api \
-  --user 1100:1100 \
-  --env-file /var/lib/botwork-db/secret.env \
-  -e BOTWORK_DATABASE_URL \
-  botwork/admin-api:local
-```
-
-## Hitting it from on the VM
-
-Once the vm-side companion PR lands and admin-api is running, the
-service is reachable inside the docker network by alias. The
-simplest curl from the VM host is via a one-shot client container
-on the same network:
-
-```bash
-# From an SSH session on the VM, after the vm-side companion lands:
+# From an SSH session on the VM:
 docker run --rm --network botwork-internal curlimages/curl:8.10.1 \
-  http://admin_api:9400/admin/api/v1/health
-# -> {"status":"ok","db":"reachable"}
+  http://admin_api:9400/admin/api/v1/tenants
+# -> {"items":[{"id":"...","name":"phlax","created_at":"...","updated_at":"..."}],"total":1}
 ```
 
 No host port is published. LAN exposure waits on the overlay
@@ -70,6 +86,20 @@ extending ext_authz to recognise an admin scope on `/admin/api/*`
   `envoy.filters.http.ext_authz` seam. admin-api itself stays
   credless and reads `x-botwork-tenant` (and, when the overlay adds
   it, `x-botwork-role`) verbatim from the request.
+
+## Production invocation pattern
+
+```bash
+docker run --rm --name botwork-admin-api \
+  --network botwork-internal --network-alias admin_api \
+  --user 1100:1100 \
+  --env-file /var/lib/botwork-db/secret.env \
+  -e BOTWORK_DATABASE_URL \
+  botwork/admin-api:local
+```
+
+This is what the `botwork-admin-api.service` systemd unit (lives in
+`botworkz/vm`) runs.
 
 ## Environment variables
 
@@ -95,8 +125,8 @@ extending ext_authz to recognise an admin scope on `/admin/api/*`
 | 4    | Failed to bind `BOTWORK_ADMIN_API_BIND`.                             |
 | 5    | `axum::serve` returned an error (transport / shutdown failure).      |
 
-systemd's `Restart=always` on `botwork-admin-api.service` (added in
-the vm-side companion PR) picks up any non-zero exit and retries.
+systemd's `Restart=always` on `botwork-admin-api.service` picks up any
+non-zero exit and retries.
 
 ## Test posture
 
@@ -108,10 +138,12 @@ under `[dev-dependencies]` (enforced by
 `db/migration/tests/no_env_leakage.rs`).
 
 The integration test `tests/integration.rs` spins a real postgres,
-runs `Migrator::up`, binds the router on a random local port, and
-asserts the health endpoint reports `db: "reachable"`. End-to-end
-production-path proof lives in `.github/workflows/containers.yml`
-(the `admin-api` smoke step).
+runs `Migrator::up`, applies a fixture `bootstrap.yaml` (1 tenant,
+1 workspace, 2 plugins, 2 bindings with one carrying a `config:`
+blob) via `botwork_bootstrap::apply`, binds the router on a random
+local port, and exercises every read endpoint plus the
+list-with-filter shape. End-to-end production-path proof lives in
+`.github/workflows/containers.yml` (the `admin-api` smoke step).
 
 ## Container image
 
