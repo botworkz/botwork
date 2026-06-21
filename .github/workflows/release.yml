@@ -236,6 +236,36 @@ jobs:
         docker push "${REPO}:${VERSION}"
         docker push "${REPO}:latest"
 
+    # ── Container: build and push admin-api ─────────────────────────────────
+    # Symmetric to config-broker. admin-api is an HTTP+JSON server that
+    # wraps the entity layer (RFE #106). v0 ships only a health endpoint;
+    # the entity CRUD handlers land in PR2. Same build/verify/tag/push
+    # contract so vm-side shasset can pin this image alongside the others.
+    - name: Build and push admin-api container
+      if: steps.version.outputs.is_release == 'true'
+      run: |
+        set -euo pipefail
+        VERSION="${{ steps.version.outputs.version }}"
+        REPO="ghcr.io/botworkz/botwork/admin-api"
+        # Platform is pinned in Earthfile via FROM DOCKERFILE --platform=linux/amd64.
+        earthly --no-cache --build-arg GIT_SHA="${GITHUB_SHA}" +admin-api-image
+        expected="${GITHUB_SHA}"
+        actual="$(docker image inspect botwork/admin-api:local \
+          --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+        if [[ "${actual}" != "${expected}" ]]; then
+          echo "ERROR: built image has revision label '${actual}' but" \
+               "workflow was triggered by commit '${expected}'." >&2
+          echo "Refusing to push a release container whose provenance does not match the triggering commit." >&2
+          echo "Also dumping all labels on the built image for diagnosis:" >&2
+          docker image inspect botwork/admin-api:local --format '{{ json .Config.Labels }}' >&2
+          exit 1
+        fi
+        echo "verified: image revision label matches GITHUB_SHA (${expected})"
+        docker tag botwork/admin-api:local "${REPO}:${VERSION}"
+        docker tag botwork/admin-api:local "${REPO}:latest"
+        docker push "${REPO}:${VERSION}"
+        docker push "${REPO}:latest"
+
     # ── Binaries: build botwork-launcher and botwork-tools ──────────────────
     - uses: dtolnay/rust-toolchain@stable
       if: steps.version.outputs.is_release == 'true'
