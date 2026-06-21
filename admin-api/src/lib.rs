@@ -1,15 +1,51 @@
 //! `botwork-admin-api` — HTTP+JSON CRUD service on top of `botwork-entity`.
 //!
-//! This crate is the v0 skeleton tracked by RFE #106. It ships:
+//! This crate is the operator-facing writer over the v0 schema. It is
+//! the eventual replacement for `botwork-bootstrap`; for now both
+//! live side-by-side and share the per-entry validators in
+//! `botwork-admin-core`.
 //!
-//! * a single `GET /admin/api/v1/health` endpoint that confirms the
-//!   binary is up and (lazily) that the DB is reachable; and
-//! * the systemd + container + image-loader wiring so the service
-//!   shows up in the deployed VM stack.
+//! # What v0 ships (post-RFE #106 PR2)
 //!
-//! The actual entity CRUD handlers (`/tenants`, `/workspaces`,
-//! `/plugins`, `/workspace_plugins`) land in PR2 once the validator
-//! crate (`botwork-admin-core`) is extracted from `bootstrap/`.
+//! Read-only handlers over all four entities:
+//!
+//! ```text
+//! GET /admin/api/v1/health                            -> { status, db }
+//!
+//! GET /admin/api/v1/tenants                           -> { items: [...], total }
+//! GET /admin/api/v1/tenants/{id}                      -> Tenant
+//!
+//! GET /admin/api/v1/workspaces                        -> { items: [...], total }
+//!     ?tenant_id=<uuid>                                  (optional filter)
+//! GET /admin/api/v1/workspaces/{id}                   -> Workspace
+//!
+//! GET /admin/api/v1/plugins                           -> { items: [...], total }
+//! GET /admin/api/v1/plugins/{id}                      -> Plugin
+//!
+//! GET /admin/api/v1/workspace_plugins                 -> { items: [...], total }
+//!     ?workspace_id=<uuid>&plugin_id=<uuid>              (optional filters)
+//! GET /admin/api/v1/workspace_plugins/{wid}/{pid}     -> WorkspacePlugin
+//! ```
+//!
+//! Write endpoints (POST/PUT/DELETE per entity), delete-guard
+//! preflights, optimistic locking via `updated_at`, and the xDS gate
+//! against control-plane on binding mutations all land in RFE #106
+//! PR3.
+//!
+//! # Response shapes
+//!
+//! * **Success body** — entity model serialised verbatim via SeaORM's
+//!   derived `Serialize`. List endpoints wrap in
+//!   `{ "items": [...], "total": N }` so pagination can land later
+//!   without a breaking change.
+//! * **Error envelope** (mirrors config-broker / control-plane):
+//!
+//!   ```json
+//!   { "error": "<machine code>", "message": "<human detail>" }
+//!   ```
+//!
+//!   v0 emits: `not_found`, `bad_request`, `internal` — see
+//!   [`handler::ErrorBody`] for the contract.
 //!
 //! # Trust posture (mirrors config-broker / control-plane)
 //!
@@ -38,5 +74,6 @@
 //!   `info`.
 
 pub mod handler;
+pub mod read;
 
 pub use handler::{build_router, AppState};

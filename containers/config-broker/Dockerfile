@@ -11,6 +11,7 @@ FROM rust:1.90-slim-bookworm AS builder
 WORKDIR /build
 
 COPY admin-api/ ./admin-api/
+COPY admin-core/ ./admin-core/
 COPY bootstrap/ ./bootstrap/
 COPY config-broker/ ./config-broker/
 COPY control-plane/ ./control-plane/

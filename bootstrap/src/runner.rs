@@ -19,9 +19,10 @@ use uuid::Uuid;
 
 use botwork_entity::{plugin, tenant, workspace, workspace_plugin};
 
+use botwork_admin_core::plugin_spec::ValidatedPlugin;
+
 use crate::config::BootstrapConfig;
 use crate::error::BootstrapError;
-use crate::plugin_spec::ValidatedPlugin;
 
 /// Per-table mutation counts so the production binary can emit a
 /// one-line journal summary; tests assert "second run was a no-op".

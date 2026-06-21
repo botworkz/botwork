@@ -6,9 +6,10 @@
 //! `botwork-config-broker.service` (which reads from the DB).
 //!
 //! The yaml shape carries the full plugin spec (image, port, path,
-//! upstream_auth, env, resources, egress) as RFE #101 PR2; the
-//! pre-cutover registry validation has moved here from config-broker.
-//! See [`plugin_spec`] for the validation rules.
+//! upstream_auth, env, resources, egress) as RFE #101 PR2; per-entry
+//! validation rules live in `botwork-admin-core` (RFE #106 PR2)
+//! shared with `botwork-admin-api`. List-level rules (duplicate
+//! names, unknown plugin refs in bindings) live here.
 //!
 //! # Lifetime
 //!
@@ -33,12 +34,18 @@
 
 pub mod config;
 pub mod error;
-pub mod plugin_spec;
 pub mod runner;
 
 pub use config::{
     BootstrapConfig, BootstrapConfigRaw, TenantEntry, WorkspaceEntry, WorkspacePluginEntry,
 };
 pub use error::BootstrapError;
-pub use plugin_spec::{RawPluginEntry, ValidatedPlugin};
+
+// Re-export the validator types so existing downstream callers
+// (`botwork-admin-api`'s integration test uses these via
+// `botwork_bootstrap::{BootstrapConfig, BootstrapConfigRaw}`) get the
+// same surface they had before the admin-core extraction. New code
+// should depend on `botwork-admin-core` directly.
+pub use botwork_admin_core::plugin_spec::{RawPluginEntry, ValidatedPlugin};
+
 pub use runner::apply;

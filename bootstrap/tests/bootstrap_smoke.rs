@@ -13,8 +13,9 @@
 
 use std::time::Duration;
 
-use botwork_bootstrap::plugin_spec::RawPluginEntry;
-use botwork_bootstrap::{apply, BootstrapConfig, BootstrapConfigRaw};
+// Per-entry validator types live in botwork-admin-core post RFE #106 PR2;
+// botwork_bootstrap re-exports them for compat with pre-extraction callers.
+use botwork_bootstrap::{apply, BootstrapConfig, BootstrapConfigRaw, RawPluginEntry};
 use botwork_entity::connection::connect;
 use botwork_migration::Migrator;
 use sea_orm::{ConnectionTrait, DatabaseConnection, FromQueryResult, Statement};
