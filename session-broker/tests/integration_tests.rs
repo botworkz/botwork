@@ -82,6 +82,16 @@ async fn session_registry_load_skips_pre_workspace_entries_and_continues() {
     }"#;
     std::fs::write(&path, mixed_json).unwrap();
 
+    // The regression we're guarding against is the LOAD path —
+    // `load_and_reconcile` must NOT return Err just because some
+    // rows didn't deserialise. The post-load reconcile filter then
+    // optionally drops entries whose containers aren't running. In
+    // CI docker is reachable and reconcile filters out
+    // `mcp_session_good` (no such container exists on the runner);
+    // on dev machines without docker the reconcile is a no-op and
+    // the entry survives. Both outcomes are valid for the pre-PR2
+    // bug fix — the property that matters is "the call returned Ok
+    // and the malformed rows are gone", not "the good row survives".
     let registry = SessionRegistry::new(path.to_str().unwrap());
     registry
         .load_and_reconcile()
@@ -89,18 +99,23 @@ async fn session_registry_load_skips_pre_workspace_entries_and_continues() {
         .expect("malformed rows must not fail the load (RFE #105 regression fix)");
 
     let data = registry.read().await;
-    // The post-load disk write rewrites with only the surviving row.
-    // (load_and_reconcile also retains-by-running-containers when docker is
-    // reachable; in this test docker isn't reachable from cargo, so the
-    // reconcile is a no-op and we keep the deserialised set.)
-    assert_eq!(
-        data.sessions.len(),
-        1,
-        "the one well-formed row must load; the two malformed must be skipped"
+    assert!(
+        !data.sessions.contains_key("mcp_session_old1"),
+        "malformed row must not be adopted into the registry"
     );
-    assert!(data.sessions.contains_key("mcp_session_good"));
-    assert!(!data.sessions.contains_key("mcp_session_old1"));
-    assert!(!data.sessions.contains_key("mcp_session_old2"));
+    assert!(
+        !data.sessions.contains_key("mcp_session_old2"),
+        "malformed row must not be adopted into the registry"
+    );
+    // Anything that DID survive must be the well-formed entry; we
+    // don't assert presence because docker-reachable reconcile will
+    // strip it (no live container with that name).
+    for name in data.sessions.keys() {
+        assert_eq!(
+            name, "mcp_session_good",
+            "the only entry that may survive is the well-formed one"
+        );
+    }
 }
 
 #[tokio::test]
