@@ -11,7 +11,7 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use botwork_admin_api::{build_router, AppState};
+use botwork_admin_api::{build_router, AppState, ControlPlaneClient};
 use botwork_entity::connection::{connect_from_env, ConnectError, DATABASE_URL_ENV};
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -52,8 +52,15 @@ async fn main() -> ExitCode {
         }
     };
 
+    // Live-state coupling target. ControlPlaneClient reads
+    // BOTWORK_CONTROL_PLANE_ENDPOINT (default
+    // http://control_plane:9300) and the break-glass
+    // BOTWORK_ADMIN_API_DISABLE_LIVE_GATE flag. The client builds
+    // its own reqwest pool; the construction is cheap.
+    let control_plane = ControlPlaneClient::from_env();
+
     let bind = bind_from_env();
-    let app = build_router(AppState { db });
+    let app = build_router(AppState { db, control_plane });
 
     let listener = match TcpListener::bind(&bind).await {
         Ok(listener) => listener,
