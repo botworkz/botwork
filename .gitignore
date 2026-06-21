@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 Cargo.lock.bak
+# Trunk emits everything here; the .gitkeep file (and only that file)
+# is checked in so the directory exists for include_dir!.
+/admin-ui/wasm/dist/*
+!/admin-ui/wasm/dist/.gitkeep

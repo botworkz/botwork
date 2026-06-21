@@ -1,0 +1,32 @@
+[package]
+name = "botwork-admin-ui-server"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "botwork_admin_ui_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "botwork-admin-ui-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+# `include_dir!` pulls admin-ui/wasm/dist/ into the binary at compile
+# time so the distroless runtime image carries no extra filesystem
+# bits. `glob` feature lets us iterate entries when emitting the file
+# list; we don't actually need it for the v0 route table but it's a
+# small cost and keeps the API forward-compatible.
+include_dir = { version = "0.7", features = ["glob"] }
+mime_guess = "2"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde_json = "1"
+tower = { version = "0.4", features = ["util"] }

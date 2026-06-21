@@ -266,6 +266,38 @@ jobs:
         docker push "${REPO}:${VERSION}"
         docker push "${REPO}:latest"
 
+    # ── Container: build and push admin-ui ──────────────────────────────────
+    # Symmetric to admin-api. admin-ui is the operator-facing Leptos panel
+    # (RFE #106 follow-up). v0 ships a one-page health-probe shell; entity
+    # CRUD views land alongside the admin-api PR2 work. The image is the
+    # only botwork image whose build runs `trunk build --release` before
+    # `cargo build`; that wrinkle is entirely inside the Dockerfile so the
+    # publish contract here stays the same.
+    - name: Build and push admin-ui container
+      if: steps.version.outputs.is_release == 'true'
+      run: |
+        set -euo pipefail
+        VERSION="${{ steps.version.outputs.version }}"
+        REPO="ghcr.io/botworkz/botwork/admin-ui"
+        # Platform is pinned in Earthfile via FROM DOCKERFILE --platform=linux/amd64.
+        earthly --no-cache --build-arg GIT_SHA="${GITHUB_SHA}" +admin-ui-image
+        expected="${GITHUB_SHA}"
+        actual="$(docker image inspect botwork/admin-ui:local \
+          --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+        if [[ "${actual}" != "${expected}" ]]; then
+          echo "ERROR: built image has revision label '${actual}' but" \
+               "workflow was triggered by commit '${expected}'." >&2
+          echo "Refusing to push a release container whose provenance does not match the triggering commit." >&2
+          echo "Also dumping all labels on the built image for diagnosis:" >&2
+          docker image inspect botwork/admin-ui:local --format '{{ json .Config.Labels }}' >&2
+          exit 1
+        fi
+        echo "verified: image revision label matches GITHUB_SHA (${expected})"
+        docker tag botwork/admin-ui:local "${REPO}:${VERSION}"
+        docker tag botwork/admin-ui:local "${REPO}:latest"
+        docker push "${REPO}:${VERSION}"
+        docker push "${REPO}:latest"
+
     # ── Binaries: build botwork-launcher and botwork-tools ──────────────────
     - uses: dtolnay/rust-toolchain@stable
       if: steps.version.outputs.is_release == 'true'
