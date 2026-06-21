@@ -28,21 +28,41 @@ async fn session_registry_missing_file_gives_empty_start() {
 }
 
 #[tokio::test]
-async fn session_registry_load_rejects_pre_workspace_entries() {
-    // A session-registry file written by a pre-workspace broker is missing
-    // the tenant/workspace fields.  Silently skipping such entries would
-    // orphan the underlying docker containers — instead, we surface an
-    // error so the operator deals with the migration explicitly.
+async fn session_registry_load_skips_pre_workspace_entries_and_continues() {
+    // RFE #105 / 2026-06-21 regression:
+    //
+    // A session-registry file written by a pre-workspace broker is
+    // missing the tenant/workspace fields. The pre-PR2 broker
+    // returned `Err(SchemaMismatch)` from `load_and_reconcile`, which
+    // cascaded into a full broker exit-on-start on every box that
+    // had been redeployed across the v0.3.0 namespace→workspace
+    // rename. That cascade brought down control-plane and envoy.
+    //
+    // The new behaviour: skip malformed rows, WARN with the count +
+    // container names, and let the rest of the file load. The good
+    // row in this fixture must survive the load; the two bad rows
+    // are dropped (operator can `docker rm -f` them after the fact).
     let dir = tempdir().unwrap();
     let path = dir.path().join("sessions.json");
 
-    let old_json = r#"{
+    let mixed_json = r#"{
         "version": 1,
         "updated_at": "2026-01-01T00:00:00Z",
         "sessions": {
             "mcp_session_old1": {
                 "container": "mcp_session_old1",
                 "staging_path": "/staging/old1",
+                "image": "botwork/mcp-echo:local",
+                "created_at": "2026-01-01T00:00:00Z",
+                "mcp_session_id": null,
+                "agent_id": null,
+                "bound_at": null
+            },
+            "mcp_session_good": {
+                "container": "mcp_session_good",
+                "staging_path": "/staging/good",
+                "tenant": "acme",
+                "workspace": "mcp",
                 "image": "botwork/mcp-echo:local",
                 "created_at": "2026-01-01T00:00:00Z",
                 "mcp_session_id": null,
@@ -60,25 +80,70 @@ async fn session_registry_load_rejects_pre_workspace_entries() {
             }
         }
     }"#;
-    std::fs::write(&path, old_json).unwrap();
+    std::fs::write(&path, mixed_json).unwrap();
 
     let registry = SessionRegistry::new(path.to_str().unwrap());
-    let err = registry
+    registry
         .load_and_reconcile()
         .await
-        .expect_err("must refuse to load pre-workspace registry");
+        .expect("malformed rows must not fail the load (RFE #105 regression fix)");
 
-    match err {
-        RegistryLoadError::SchemaMismatch { ref offending } => {
-            assert_eq!(offending.len(), 2);
-            assert!(offending.contains(&"mcp_session_old1".to_string()));
-            assert!(offending.contains(&"mcp_session_old2".to_string()));
+    let data = registry.read().await;
+    // The post-load disk write rewrites with only the surviving row.
+    // (load_and_reconcile also retains-by-running-containers when docker is
+    // reachable; in this test docker isn't reachable from cargo, so the
+    // reconcile is a no-op and we keep the deserialised set.)
+    assert_eq!(
+        data.sessions.len(),
+        1,
+        "the one well-formed row must load; the two malformed must be skipped"
+    );
+    assert!(data.sessions.contains_key("mcp_session_good"));
+    assert!(!data.sessions.contains_key("mcp_session_old1"));
+    assert!(!data.sessions.contains_key("mcp_session_old2"));
+}
+
+#[tokio::test]
+async fn session_registry_load_with_all_malformed_returns_empty() {
+    // Boundary: every row is malformed. The loader must still succeed,
+    // and `sessions` ends up empty. Distinct from the pre-PR2
+    // behaviour which would have returned SchemaMismatch.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+
+    let all_bad = r#"{
+        "version": 1,
+        "updated_at": "2026-01-01T00:00:00Z",
+        "sessions": {
+            "mcp_session_old1": {
+                "container": "mcp_session_old1",
+                "staging_path": "/staging/old1",
+                "image": "botwork/mcp-echo:local",
+                "created_at": "2026-01-01T00:00:00Z"
+            }
         }
-        other => panic!("expected SchemaMismatch, got {other:?}"),
-    }
+    }"#;
+    std::fs::write(&path, all_bad).unwrap();
 
-    // The error message must tell the operator both the count and the
-    // migration steps, including the listed container names.
+    let registry = SessionRegistry::new(path.to_str().unwrap());
+    registry
+        .load_and_reconcile()
+        .await
+        .expect("all-malformed file must still load successfully");
+    let data = registry.read().await;
+    assert!(data.sessions.is_empty());
+}
+
+#[test]
+fn schema_mismatch_display_is_preserved_for_future_strict_callers() {
+    // `SchemaMismatch` is no longer returned by the production loader
+    // (which now skips + WARNs per RFE #105). The variant survives
+    // for a hypothetical future strict caller — if you remove it,
+    // also remove this test. The check here just guarantees the
+    // operator-facing message is stable for grep tooling.
+    let err = RegistryLoadError::SchemaMismatch {
+        offending: vec!["mcp_session_old1".into(), "mcp_session_old2".into()],
+    };
     let display = err.to_string();
     assert!(display.contains("2 entries"), "message: {display}");
     assert!(display.contains("mcp_session_old1"), "message: {display}");
@@ -239,6 +304,11 @@ fn app_state_for_registry(registry: Arc<SessionRegistry>) -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        // RFE #105 PR2: admin-endpoint tests exercise the JSON
+        // surface only. agent_session write-through is plumbed via
+        // `run()` in production; tests pass `None` so the suite
+        // doesn't need a testcontainers postgres.
+        agent_session_writer: None,
     }
 }
 

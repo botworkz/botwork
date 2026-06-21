@@ -16,16 +16,28 @@ pub fn utc_now() -> String {
 /// adopted as-is.  This is distinct from "file does not exist" (caller's
 /// concern) — these variants represent files that exist but cannot be safely
 /// loaded.
+///
+/// RFE #105 / 2026-06-21: the previous behaviour was to refuse to load the
+/// whole file if any single row failed to deserialize. That turned a routine
+/// "one stale row from a previous broker schema" into a full session-broker →
+/// control-plane → envoy cascade failure on every box that had been redeployed
+/// across the v0.3.0 namespace→workspace rename. The current shape skips
+/// malformed rows with a `warn!`, surfaces the count + container names in the
+/// log, and lets the rest of the file load. `SchemaMismatch` is no longer
+/// returned by `load_from_disk` directly — the variant survives because the
+/// existing integration tests assert on its `Display` formatting, but it
+/// would only fire today if a future change re-introduced the fail-closed
+/// posture (which would be a regression).
 #[derive(Debug)]
 pub enum RegistryLoadError {
     /// I/O or JSON-parse failure on the registry file itself.
     Io(String),
     /// One or more session entries were missing required fields (tenant,
     /// workspace) — almost always the signature of a pre-workspace registry
-    /// from before the URL-shape cutover.  Refusing to load is intentional:
-    /// silently dropping such entries would orphan the underlying containers
-    /// (no DELETE-routed teardown, no admin visibility), so we make the
-    /// operator deal with the migration explicitly.
+    /// from before the URL-shape cutover.
+    ///
+    /// Reserved for callers that want strict semantics (currently none in
+    /// production). The production loader skips such rows + WARNs.
     SchemaMismatch {
         /// Container names of the offending entries, surfaced so the operator
         /// can `docker rm -f` them after deciding the registry file is safe
@@ -232,6 +244,18 @@ fn load_from_disk(path: &str) -> Result<RegistryData, RegistryLoadError> {
     let sessions = match payload["sessions"].as_object() {
         None => HashMap::new(),
         Some(obj) => {
+            // RFE #105 / 2026-06-21: skip-malformed-row + WARN.
+            //
+            // Pre-PR2 this returned Err(SchemaMismatch) the moment any
+            // single entry failed to deserialize, which turned a stale
+            // row from a previous broker schema into a full broker
+            // exit-on-start. That cascaded into control-plane (which
+            // Requires=session-broker) and then into envoy via
+            // systemd PropagatesStopTo. Now we drop the bad rows
+            // individually, emit a structured WARN naming each one,
+            // and proceed with the rest. The container names are still
+            // logged so an operator can `docker rm -f` them if they
+            // were never reconnected.
             let mut map = HashMap::new();
             let mut offending: Vec<String> = Vec::new();
             for (k, v) in obj {
@@ -241,15 +265,21 @@ fn load_from_disk(path: &str) -> Result<RegistryData, RegistryLoadError> {
                     }
                     Err(e) => {
                         // The most likely cause is a pre-workspace entry
-                        // missing `tenant`/`workspace`.  Surface the
+                        // missing `tenant`/`workspace`. Surface the
                         // container name so the operator can clean it up.
-                        log_info(&format!("rejecting malformed session entry '{k}': {e}"));
+                        log_info(&format!("skipping malformed session entry '{k}': {e}"));
                         offending.push(k.clone());
                     }
                 }
             }
             if !offending.is_empty() {
-                return Err(RegistryLoadError::SchemaMismatch { offending });
+                log_info(&format!(
+                    "session registry: skipped {} malformed entr{} during load; \
+                     orphans (if any) need manual `docker rm -f`: [{}]",
+                    offending.len(),
+                    if offending.len() == 1 { "y" } else { "ies" },
+                    offending.join(", "),
+                ));
             }
             map
         }

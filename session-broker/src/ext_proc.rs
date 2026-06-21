@@ -483,6 +483,26 @@ fn logged_immediate_response(
 async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
     // Cancel any pending grace timer first so it doesn't fire after teardown.
     liveness_remove(state, &teardown.mcp_session_id).await;
+    // RFE #105 PR2: capture the agent_session identity BEFORE the
+    // transport is removed below. We need (tenant, workspace,
+    // agent_id) to write `state=inactive` after the container is
+    // actually torn down. agent_id may be None (the container was
+    // torn down before any /bind-agent saw goose); in that case
+    // there's no DB row to transition and we skip the write.
+    let agent_session_identity = {
+        let sessions = state.transport_sessions.lock().await;
+        sessions
+            .get(&teardown.mcp_session_id)
+            .and_then(|transport| {
+                transport.agent_id.as_ref().map(|agent_id| {
+                    (
+                        transport.tenant_name.clone(),
+                        transport.workspace.clone(),
+                        agent_id.clone(),
+                    )
+                })
+            })
+    };
     call_teardown(
         &state.launcher_socket_path,
         &teardown.container_name,
@@ -504,6 +524,11 @@ async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
         .session_registry
         .record_teardown(&teardown.container_name)
         .await;
+    if let (Some(writer), Some((tenant, workspace, agent_id))) =
+        (state.agent_session_writer.as_ref(), agent_session_identity)
+    {
+        writer.record_inactive(&tenant, &workspace, &agent_id).await;
+    }
 }
 
 /// Cancels any pending grace timer and removes the liveness entry for
@@ -538,6 +563,32 @@ async fn liveness_bump(state: &AppState, mcp_session_id: &str) {
         log_info(&format!(
             "liveness: session={mcp_session_id} reconnected, grace cancelled"
         ));
+        // RFE #105 PR2: a cancelled grace handle means we were in
+        // `state=grace` and a new stream came in before the grace
+        // timer fired. Flip the agent_session row back to `active`
+        // and bump `reactivation_count`. record_bind_agent's
+        // UPDATE branch handles both — it INSERTs only if the row
+        // doesn't exist, and the `is_reactivation` check inside it
+        // is what bumps the counter.
+        if let Some(writer) = state.agent_session_writer.as_ref() {
+            let identity = {
+                let sessions = state.transport_sessions.lock().await;
+                sessions.get(mcp_session_id).and_then(|transport| {
+                    transport.agent_id.as_ref().map(|agent_id| {
+                        (
+                            transport.tenant_name.clone(),
+                            transport.workspace.clone(),
+                            agent_id.clone(),
+                        )
+                    })
+                })
+            };
+            if let Some((tenant, workspace, agent_id)) = identity {
+                writer
+                    .record_bind_agent(&tenant, &workspace, &agent_id)
+                    .await;
+            }
+        }
     }
 }
 
@@ -562,6 +613,30 @@ pub async fn liveness_drop(state: &AppState, mcp_session_id: &str) {
     match result {
         Ok(1) => {
             // Was 1, now 0 — arm the grace timer.
+            //
+            // RFE #105 PR2: also flip the agent_session row to
+            // `state=grace`. The reap_session path (if the grace
+            // timer fires) transitions to `inactive` via the
+            // teardown_session write below; if the client
+            // reconnects, liveness_bump above moves the row back to
+            // `active`.
+            if let Some(writer) = state.agent_session_writer.as_ref() {
+                let identity = {
+                    let sessions = state.transport_sessions.lock().await;
+                    sessions.get(mcp_session_id).and_then(|transport| {
+                        transport.agent_id.as_ref().map(|agent_id| {
+                            (
+                                transport.tenant_name.clone(),
+                                transport.workspace.clone(),
+                                agent_id.clone(),
+                            )
+                        })
+                    })
+                };
+                if let Some((tenant, workspace, agent_id)) = identity {
+                    writer.record_grace(&tenant, &workspace, &agent_id).await;
+                }
+            }
             schedule_grace_timer(state.clone(), mcp_session_id.to_string(), liveness).await;
         }
         Ok(_) => {} // still > 0
@@ -743,11 +818,29 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
         let mut sessions = state.transport_sessions.lock().await;
         sessions.remove(mcp_session_id);
     }
+    // RFE #105 PR2: shadow the eviction into agent_session. Same
+    // shape as teardown_session above — capture the identity before
+    // we lose the in-memory transport, then transition to `inactive`
+    // after the launcher's teardown returns. agent_id is None when
+    // the container died before /bind-agent ran; nothing to write.
+    let agent_session_identity = transport.agent_id.as_ref().map(|agent_id| {
+        (
+            transport.tenant_name.clone(),
+            transport.workspace.clone(),
+            agent_id.clone(),
+        )
+    });
     let registry = Arc::clone(&state.session_registry);
+    let agent_session_writer = state.agent_session_writer.clone();
     let launcher_path = state.launcher_socket_path.clone();
     tokio::spawn(async move {
         registry.record_teardown(&container_name).await;
         call_teardown(&launcher_path, &container_name, &staging_path).await;
+        if let (Some(writer), Some((tenant, workspace, agent_id))) =
+            (agent_session_writer, agent_session_identity)
+        {
+            writer.record_inactive(&tenant, &workspace, &agent_id).await;
+        }
     });
 }
 
@@ -1505,6 +1598,19 @@ impl ExternalProcessorService {
                         .session_registry
                         .record_agent_bound(&transport.container_name, &agent_id, &bound_at)
                         .await;
+                    // RFE #105 PR2: mirror the bind into postgres. The
+                    // JSON registry above stays authoritative for
+                    // recovery in PR2; the DB writer is shadow until
+                    // round-3 deletes the JSON path.
+                    if let Some(writer) = state.agent_session_writer.as_ref() {
+                        writer
+                            .record_bind_agent(
+                                &transport.tenant_name,
+                                &transport.workspace,
+                                &agent_id,
+                            )
+                            .await;
+                    }
                 }
             }
         }
@@ -1713,6 +1819,11 @@ mod tests {
             tombstones: Arc::new(Mutex::new(HashMap::new())),
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+            // The ext_proc unit tests live within the crate and don't
+            // touch the agent_session write-through path. Production
+            // sets this via `run()`; tests pass `None` so they don't
+            // need to stand up a testcontainers postgres.
+            agent_session_writer: None,
         }
     }
 

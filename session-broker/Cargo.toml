@@ -14,6 +14,11 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.7"
 base64 = "0.22"
+# RFE #105 PR2: session-broker becomes a DB writer. botwork-entity + sea-orm
+# mirror the shape config-broker / bootstrap use. tracing surfaces the
+# new write-through warnings via the structured filter rather than the
+# bespoke log_info path.
+botwork-entity = { path = "../db/entity" }
 chrono = { version = "0.4", features = ["clock"] }
 envoy-proto = { git = "https://github.com/phlax/envoy-proto-rs", tag = "v0.0.1" }
 http-body-util = "0.1"
@@ -22,15 +27,35 @@ hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 prost = "0.13"
 rand = "0.8"
 regex = "1"
+sea-orm = { version = "1.1.20", default-features = false, features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "net", "io-util", "time"] }
 tokio-stream = "0.1"
 tonic = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 axum = { version = "0.7", features = [] }
+botwork-bootstrap = { path = "../bootstrap" }
+botwork-migration = { path = "../db/migration" }
 http = "1"
+sea-orm-migration = { version = "1.1.20", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+] }
 tempfile = "3"
+serde_yaml = "0.9"
+testcontainers = "0.27.3"
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 tower = { version = "0.4", features = ["util"] }

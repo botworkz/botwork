@@ -64,6 +64,9 @@ fn app_state_with_plugins_and_endpoints(
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        // RFE #105 PR2: DB write-through is production-only; tests
+        // pass `None` so they stay hermetic.
+        agent_session_writer: None,
     }
 }
 
@@ -113,6 +116,9 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        // RFE #105 PR2: DB write-through is production-only; tests
+        // pass `None` so they stay hermetic.
+        agent_session_writer: None,
     }
 }
 
@@ -2000,6 +2006,9 @@ fn app_state_with_session_registry(
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        // RFE #105 PR2: DB write-through is production-only; tests
+        // pass `None` so they stay hermetic.
+        agent_session_writer: None,
     }
 }
 
