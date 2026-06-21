@@ -28,9 +28,21 @@ impl Validators {
         ))
         .map_err(|err| err.to_string())?;
         let agent_dir_re = Regex::new(&format!(
-            // Namespace shares tenant's character class (lowercase, digits, hyphens, 1-31 chars).
-            // Reusing TENANT_RE here; introduce a separate NAMESPACE_RE if the rules diverge.
-            r"^/var/lib/botwork/tenants/{TENANT_RE}/namespaces/{TENANT_RE}/agents/[A-Za-z0-9_-]{{1,64}}$"
+            // Workspace segment shares the tenant character class (lowercase,
+            // digits, hyphens, 1-31 chars). Reusing TENANT_RE here; introduce
+            // a separate WORKSPACE_RE if the rules diverge.
+            //
+            // The producer side (session-broker's ext_proc.rs::agent_dir) writes
+            //   /var/lib/botwork/tenants/<t>/workspaces/<w>/agents/<id>
+            // since RFE #101 PR2 renamed `namespace` -> `workspace` across the
+            // session/control plane. The validator MUST track that rename: an
+            // out-of-sync regex here causes every /bind-agent POST to 400 with
+            // "invalid agent_dir", which silently breaks the per-agent
+            // workspace bind mount — `fs write` and `exec-bash cat` then look
+            // at disjoint container-local `/workspace` directories and the
+            // cross-plugin assertion in the smoke harness fails on missing
+            // shared file content rather than on the actual root cause.
+            r"^/var/lib/botwork/tenants/{TENANT_RE}/workspaces/{TENANT_RE}/agents/[A-Za-z0-9_-]{{1,64}}$"
         ))
         .map_err(|err| err.to_string())?;
 
@@ -176,7 +188,7 @@ mod tests {
         assert!(validators.valid_network("botwork_network-1"));
         assert!(validators.valid_staging_path("/var/lib/botwork/tenants/acme/staging/aabbccddeeff"));
         assert!(validators
-            .valid_agent_dir("/var/lib/botwork/tenants/acme/namespaces/mcp/agents/my_agent-1"));
+            .valid_agent_dir("/var/lib/botwork/tenants/acme/workspaces/mcp/agents/my_agent-1"));
     }
 
     #[test]
@@ -198,7 +210,7 @@ mod tests {
         assert!(!validators.valid_agent_dir("/var/lib/botwork/tenants/acme/agents/invalid.agent"));
         assert!(!validators.valid_agent_dir("/tmp/agents/agentA"));
         assert!(!validators
-            .valid_agent_dir("/var/lib/botwork/tenants/acme/namespaces/mcp/agents/invalid.agent"));
+            .valid_agent_dir("/var/lib/botwork/tenants/acme/workspaces/mcp/agents/invalid.agent"));
     }
 
     #[test]
@@ -214,11 +226,11 @@ mod tests {
         );
 
         let agent = validators
-            .safe_agent_dir("/var/lib/botwork/tenants/acme/namespaces/mcp/agents/agent_A")
+            .safe_agent_dir("/var/lib/botwork/tenants/acme/workspaces/mcp/agents/agent_A")
             .expect("agent dir should validate");
         assert_eq!(
             agent,
-            "/var/lib/botwork/tenants/acme/namespaces/mcp/agents/agent_A"
+            "/var/lib/botwork/tenants/acme/workspaces/mcp/agents/agent_A"
         );
     }
 
