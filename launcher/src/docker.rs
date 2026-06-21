@@ -18,6 +18,17 @@ pub struct ContainerLaunch<'a> {
     pub memory_limit: &'a str,
     pub read_only_rootfs: bool,
     pub env: &'a [(String, String)],
+    /// RFE #105 round-3: docker labels stamped onto the container via
+    /// `--label key=value`. The wire-side validator (see
+    /// `validate.rs::valid_label_name`) has already gated keys to the
+    /// `io.botworkz.*` namespace and rejected newlines / null bytes
+    /// from values, so docker.rs treats the slice as trusted.
+    ///
+    /// Empty by default; container behaviour is unchanged when no
+    /// labels are present. Order is preserved on argv so the
+    /// `docker inspect` output a future operator reads stays
+    /// predictable.
+    pub labels: &'a [(String, String)],
 }
 
 /// Outcome of `ensure_container`: lifecycle status plus the container's
@@ -332,6 +343,15 @@ fn docker_run_args(request: &ContainerLaunch<'_>) -> Vec<String> {
         run_cmd.push(format!("{}:/workspace:rslave", request.staging_path));
     }
 
+    // RFE #105 round-3: stamp docker labels in declaration order.
+    // Labels are not secret-bearing (the wire validator forbids
+    // newlines/null bytes in values), so they ride on argv next to
+    // the plain env entries. Same `KEY=VALUE` argv shape `-e` uses.
+    for (key, value) in request.labels {
+        run_cmd.push("--label".to_string());
+        run_cmd.push(format!("{key}={value}"));
+    }
+
     run_cmd.push("--user".to_string());
     run_cmd.push(format!("{}:{}", request.plugin_uid, request.plugin_gid));
     run_cmd.push(request.image.to_string());
@@ -388,6 +408,7 @@ mod tests {
             memory_limit: "512m",
             read_only_rootfs: true,
             env: &[],
+            labels: &[],
         });
 
         assert!(args.contains(&"--cap-drop=ALL".to_string()));
@@ -422,6 +443,7 @@ mod tests {
             memory_limit: "512m",
             read_only_rootfs: false,
             env: &env,
+            labels: &[],
         });
 
         let foo = args
@@ -460,6 +482,7 @@ mod tests {
             memory_limit: "512m",
             read_only_rootfs: false,
             env: &env,
+            labels: &[],
         });
 
         assert!(args
@@ -486,6 +509,7 @@ mod tests {
             memory_limit: "512m",
             read_only_rootfs: false,
             env: &env,
+            labels: &[],
         });
 
         // Secret value must never appear anywhere in argv.
@@ -545,6 +569,7 @@ mod tests {
             memory_limit: "512m",
             read_only_rootfs: false,
             env: &env,
+            labels: &[],
         });
 
         assert!(
@@ -556,6 +581,122 @@ mod tests {
             stdin.is_empty(),
             "stdin bytes must be empty for non-sensitive env"
         );
+    }
+
+    // ── RFE #105 round-3: docker labels on argv ──────────────────────────────
+
+    #[test]
+    fn docker_run_args_omit_label_flag_when_labels_slice_empty() {
+        // Older callers (every session-broker prior to round-3 PR2)
+        // pass `labels: &[]`. The argv must be identical to the
+        // pre-PR shape — no spurious `--label` entries — so a
+        // newer launcher image works against the older broker.
+        let args = docker_run_args(&ContainerLaunch {
+            name: "mcp_session_aabbccddeeff",
+            image: "botwork/mcp-echo:local",
+            network: "botwork",
+            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            with_workspace: false,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            pids_limit: 256,
+            cpu_limit: "1.0",
+            memory_limit: "512m",
+            read_only_rootfs: false,
+            env: &[],
+            labels: &[],
+        });
+        assert!(
+            !args.iter().any(|a| a == "--label"),
+            "no --label entry must appear when labels slice is empty"
+        );
+    }
+
+    #[test]
+    fn docker_run_args_emit_label_flags_in_declaration_order() {
+        // The labels in session-broker's payload are tenant, workspace,
+        // plugin in that order; argv preserves the order so the
+        // janitor (and the operator running `docker inspect`) sees a
+        // stable layout.
+        let labels = vec![
+            ("io.botworkz.tenant".to_string(), "acme".to_string()),
+            ("io.botworkz.workspace".to_string(), "mcp".to_string()),
+            ("io.botworkz.plugin".to_string(), "mcp-bash".to_string()),
+        ];
+        let args = docker_run_args(&ContainerLaunch {
+            name: "mcp_session_aabbccddeeff",
+            image: "botwork/mcp-echo:local",
+            network: "botwork",
+            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            with_workspace: false,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            pids_limit: 256,
+            cpu_limit: "1.0",
+            memory_limit: "512m",
+            read_only_rootfs: false,
+            env: &[],
+            labels: &labels,
+        });
+        let tenant_idx = args
+            .windows(2)
+            .position(|p| p == ["--label", "io.botworkz.tenant=acme"])
+            .expect("tenant label argv pair");
+        let workspace_idx = args
+            .windows(2)
+            .position(|p| p == ["--label", "io.botworkz.workspace=mcp"])
+            .expect("workspace label argv pair");
+        let plugin_idx = args
+            .windows(2)
+            .position(|p| p == ["--label", "io.botworkz.plugin=mcp-bash"])
+            .expect("plugin label argv pair");
+        assert!(
+            tenant_idx < workspace_idx && workspace_idx < plugin_idx,
+            "labels must appear in declaration order on argv (got {tenant_idx} {workspace_idx} {plugin_idx})"
+        );
+        // Image is always the last positional argument; labels must
+        // land before it (docker is strict about post-image args
+        // being interpreted as the container's CMD override).
+        let image_idx = args
+            .iter()
+            .position(|a| a == "botwork/mcp-echo:local")
+            .expect("image argv");
+        assert!(
+            plugin_idx < image_idx,
+            "labels must precede the image positional ({plugin_idx} vs {image_idx})"
+        );
+    }
+
+    #[test]
+    fn docker_run_args_label_values_with_spaces_pass_through() {
+        // Wire validator rejects newlines + nulls in values, but spaces
+        // are legal (docker tolerates them; only the KEY=VALUE split
+        // matters). This test pins the argv emission so a future
+        // tightening of the validator doesn't accidentally break the
+        // KEY=VALUE-with-spaces shape that operator-typed labels
+        // might use.
+        let labels = vec![(
+            "io.botworkz.tenant".to_string(),
+            "value with spaces".to_string(),
+        )];
+        let args = docker_run_args(&ContainerLaunch {
+            name: "mcp_session_aabbccddeeff",
+            image: "botwork/mcp-echo:local",
+            network: "botwork",
+            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            with_workspace: false,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            pids_limit: 256,
+            cpu_limit: "1.0",
+            memory_limit: "512m",
+            read_only_rootfs: false,
+            env: &[],
+            labels: &labels,
+        });
+        assert!(args
+            .windows(2)
+            .any(|p| p == ["--label", "io.botworkz.tenant=value with spaces"]));
     }
 
     // ── inspect_ip_format ──────────────────────────────────────────────────

@@ -9,6 +9,24 @@ const AGENTS_BASE: &str = "/var/lib/botwork/tenants";
 const TENANT_RE: &str = r"[a-z][a-z0-9-]{0,30}";
 pub const RESERVED_ENV_NAMES: &[&str] = &["PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"];
 
+/// Docker label namespace prefix the launcher / session-broker pair owns.
+///
+/// Docker's own convention is reverse-DNS for vendor labels, so we sit
+/// under `io.botworkz.*`. session-broker stamps every spawned container
+/// with `io.botworkz.tenant`, `io.botworkz.workspace`,
+/// `io.botworkz.plugin` (RFE #105 round-3) — and the future janitor
+/// will read those keys back via `docker inspect` to bisect
+/// docker-vs-DB drift when reconciling routing state on broker
+/// restart.
+///
+/// We enforce the prefix at the launcher's wire boundary (not on
+/// session-broker's outbound side) because the launcher is the trust
+/// gate the session-broker side talks through: an arbitrary
+/// caller-supplied label namespace would expand the label-key
+/// search surface the janitor has to walk on every recovery cycle.
+/// One namespace = one grep, future-proof.
+pub const LABEL_NAMESPACE_PREFIX: &str = "io.botworkz.";
+
 #[derive(Clone, Debug)]
 pub struct Validators {
     name_re: Regex,
@@ -79,6 +97,26 @@ impl Validators {
         valid_env_name(name)
     }
 
+    /// RFE #105 round-3: gate caller-supplied docker label keys.
+    ///
+    /// Rules:
+    /// * starts with [`LABEL_NAMESPACE_PREFIX`] (`io.botworkz.`);
+    /// * the trailing segment matches `[a-z][a-z0-9_-]*` — the
+    ///   character class docker itself accepts, plus the
+    ///   lowercase-only rule we apply to env names so the iden
+    ///   policy stays uniform across the surfaces a caller can
+    ///   stamp on a container;
+    /// * total length capped at 128 bytes (well under docker's
+    ///   own label-key cap; same shape we use for image refs).
+    ///
+    /// The trust posture is "caller can pick the trailing
+    /// segment, launcher pins the namespace". This keeps the
+    /// future janitor's recovery `docker inspect | grep
+    /// io.botworkz.` cheap and bisectable.
+    pub fn valid_label_name(&self, name: &str) -> bool {
+        valid_label_name(name)
+    }
+
     pub fn safe_staging_path(&self, value: &str) -> Result<String, LauncherError> {
         if !self.valid_staging_path(value) {
             return Err(LauncherError::BadRequest(
@@ -123,6 +161,35 @@ impl Validators {
 /// all three call sites.
 pub fn is_sensitive_env(name: &str) -> bool {
     name.starts_with("BOTWORK_SECRET_")
+}
+
+/// RFE #105 round-3: see [`Validators::valid_label_name`] for the
+/// rationale. Free function so the launcher's wire-layer payload
+/// parser can call it without holding a `Validators` instance, and so
+/// the tests can exercise it directly.
+pub fn valid_label_name(name: &str) -> bool {
+    const MAX_LABEL_NAME_LEN: usize = 128;
+    if name.len() > MAX_LABEL_NAME_LEN {
+        return false;
+    }
+    let Some(suffix) = name.strip_prefix(LABEL_NAMESPACE_PREFIX) else {
+        return false;
+    };
+    // Trailing segment: lowercase ASCII alpha to start, then any
+    // mix of lowercase alpha / digits / `_` / `-`. Empty suffix is
+    // explicitly rejected — `io.botworkz.` on its own is not a key.
+    let bytes = suffix.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let first = bytes[0];
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    bytes
+        .iter()
+        .skip(1)
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
 }
 
 pub fn valid_env_name(name: &str) -> bool {
@@ -172,7 +239,9 @@ fn normalize_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_env_name, Validators, RESERVED_ENV_NAMES};
+    use super::{
+        valid_env_name, valid_label_name, Validators, LABEL_NAMESPACE_PREFIX, RESERVED_ENV_NAMES,
+    };
 
     fn validators() -> Validators {
         Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators")
@@ -274,5 +343,82 @@ mod tests {
         let validators = validators();
         assert!(validators.valid_env_name("BOTWORK_SECRET"));
         assert!(!validators.valid_env_name("PATH"));
+    }
+
+    // ── RFE #105 round-3: docker label validator ────────────────────────────
+
+    #[test]
+    fn valid_label_name_accepts_namespaced_keys() {
+        // The three keys session-broker will stamp on every spawn.
+        assert!(valid_label_name("io.botworkz.tenant"));
+        assert!(valid_label_name("io.botworkz.workspace"));
+        assert!(valid_label_name("io.botworkz.plugin"));
+        // Trailing segment may use the full lowercase / digit / `_` / `-`
+        // character class — the validator must not gate that.
+        assert!(valid_label_name("io.botworkz.foo_bar"));
+        assert!(valid_label_name("io.botworkz.foo-bar"));
+        assert!(valid_label_name("io.botworkz.foo1"));
+        assert!(valid_label_name("io.botworkz.a"));
+    }
+
+    #[test]
+    fn valid_label_name_rejects_unprefixed_keys() {
+        // Plain docker conventions and other reverse-DNS namespaces
+        // must be refused — we own io.botworkz.* exclusively.
+        assert!(!valid_label_name("tenant"));
+        assert!(!valid_label_name("com.docker.compose.project"));
+        assert!(!valid_label_name("botwork.tenant"));
+        // Missing the trailing dot in the prefix is a different
+        // namespace ("io.botworkz" is not a key, and "io.botworkzx.*"
+        // is a sibling namespace we don't own).
+        assert!(!valid_label_name("io.botworkz"));
+        assert!(!valid_label_name("io.botworkzx.tenant"));
+    }
+
+    #[test]
+    fn valid_label_name_rejects_empty_suffix() {
+        // `io.botworkz.` on its own is not a key (the prefix is a
+        // namespace, not a key in itself).
+        assert!(!valid_label_name("io.botworkz."));
+    }
+
+    #[test]
+    fn valid_label_name_rejects_bad_suffix_chars() {
+        // Suffix must START with a lowercase letter.
+        assert!(!valid_label_name("io.botworkz.1tenant"));
+        assert!(!valid_label_name("io.botworkz._tenant"));
+        assert!(!valid_label_name("io.botworkz.-tenant"));
+        // Uppercase is a uniform no across env/label/iden rules.
+        assert!(!valid_label_name("io.botworkz.Tenant"));
+        assert!(!valid_label_name("io.botworkz.TENANT"));
+        // No dots in the suffix — the prefix already encodes the
+        // dotted namespace, an internal dot would imply a new
+        // sub-namespace we haven't reserved.
+        assert!(!valid_label_name("io.botworkz.foo.bar"));
+        // Whitespace, null, equals — all docker-side hazards.
+        assert!(!valid_label_name("io.botworkz.foo bar"));
+        assert!(!valid_label_name("io.botworkz.foo\0bar"));
+        assert!(!valid_label_name("io.botworkz.foo=bar"));
+    }
+
+    #[test]
+    fn valid_label_name_enforces_length_cap() {
+        // 128 bytes total. Prefix is 12 chars, so suffix can be 116.
+        let suffix_ok = "a".repeat(116);
+        let key_ok = format!("{LABEL_NAMESPACE_PREFIX}{suffix_ok}");
+        assert_eq!(key_ok.len(), 128);
+        assert!(valid_label_name(&key_ok));
+
+        let suffix_overflow = "a".repeat(117);
+        let key_too_long = format!("{LABEL_NAMESPACE_PREFIX}{suffix_overflow}");
+        assert_eq!(key_too_long.len(), 129);
+        assert!(!valid_label_name(&key_too_long));
+    }
+
+    #[test]
+    fn validators_expose_valid_label_name() {
+        let validators = validators();
+        assert!(validators.valid_label_name("io.botworkz.tenant"));
+        assert!(!validators.valid_label_name("tenant"));
     }
 }
