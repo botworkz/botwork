@@ -134,6 +134,12 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Workspace,
+    /// One session, many workers — round-3 / RFE #105. The inverse
+    /// side (worker → session) lives on `session_worker`. CASCADE on
+    /// agent_session delete sweeps the worker history alongside the
+    /// session row.
+    #[sea_orm(has_many = "super::session_worker::Entity")]
+    SessionWorker,
 }
 
 impl Related<super::tenant::Entity> for Entity {
@@ -145,6 +151,12 @@ impl Related<super::tenant::Entity> for Entity {
 impl Related<super::workspace::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Workspace.def()
+    }
+}
+
+impl Related<super::session_worker::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::SessionWorker.def()
     }
 }
 
