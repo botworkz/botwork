@@ -21,6 +21,11 @@ fn make_state(registry: Arc<SessionRegistry>) -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        // RFE #105 PR2: agent_session write-through is plumbed in
+        // production via `run()`. These tests exercise only the
+        // container-exit path and don't care about the DB; passing
+        // `None` keeps the test setup hermetic.
+        agent_session_writer: None,
     }
 }
 

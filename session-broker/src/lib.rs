@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod agent_session;
 pub mod config_broker;
 pub mod control_plane;
 pub mod exit_listener;
@@ -220,6 +221,13 @@ pub struct AppState {
     /// last ext_proc stream closes, a grace timer is started; expiry triggers
     /// automatic session teardown.
     pub stream_liveness: Arc<Mutex<HashMap<String, Arc<SessionLiveness>>>>,
+    /// RFE #105 PR2: optional handle for the `agent_session`
+    /// write-through path. `None` in tests that don't care about the
+    /// DB; `Some(_)` in production where `run()` connects to
+    /// postgres at startup. The writer is internally cheap to clone
+    /// (everything behind `Arc`) so every clone of `AppState` carries
+    /// the same handle.
+    pub agent_session_writer: Option<Arc<crate::agent_session::AgentSessionWriter>>,
 }
 
 pub fn log_info(message: &str) {
@@ -235,19 +243,62 @@ pub fn log_info(message: &str) {
 }
 
 pub async fn run() -> Result<(), String> {
+    // tracing-subscriber: the existing log_info path keeps doing what it
+    // does (println prefixed with [session-broker]). The new agent_session
+    // write-through code uses tracing's `warn!`/`info!` macros so the
+    // diagnostics show up alongside the existing log lines as long as a
+    // subscriber is installed. Match the shape config-broker / control-
+    // plane use so RUST_LOG works the same way across the workspace.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
+
     let session_registry_path = std::env::var("BOTWORK_SESSION_REGISTRY_PATH")
         .unwrap_or_else(|_| "/var/lib/botwork/sessions.json".to_string());
 
     let session_registry = Arc::new(SessionRegistry::new(&session_registry_path));
-    // Refuse to start if the on-disk registry exists but cannot be safely
-    // loaded — most commonly because it predates the workspace cutover.
-    // Silently dropping such entries would orphan their containers (no
-    // DELETE-routed teardown, no admin visibility), so this is intentional.
-    // The error message tells the operator exactly what to clean up.
+    // Skip-malformed-row + WARN posture (RFE #105 / 2026-06-21): pre-PR2
+    // this returned Err on any single malformed row, which cascaded into
+    // a full broker exit-on-start and took control-plane + envoy down
+    // with it via systemd. The current loader logs the offending entries
+    // and proceeds; this `.map_err` is therefore practically dead but
+    // kept so a future tightening of `RegistryLoadError` would still be
+    // fail-loud at startup.
     session_registry
         .load_and_reconcile()
         .await
         .map_err(|e| format!("{e}"))?;
+
+    // RFE #105 PR2: connect to postgres and build the agent_session
+    // write-through handle. Same env contract as config-broker /
+    // bootstrap / admin-api — `BOTWORK_DATABASE_URL` is required in
+    // production and is rendered into the systemd unit by the
+    // `EnvironmentFile=/var/lib/botwork-db/secret.env` line.
+    //
+    // We fail-fast on missing/invalid URL: session-broker is now a DB
+    // consumer, so a misconfigured deploy must trip a unit-failure
+    // restart loop rather than silently degrading to "JSON-only" mode.
+    // The `Restart=always` posture on botwork-session-broker.service
+    // picks this up.
+    let db = match botwork_entity::connection::connect_from_env().await {
+        Ok(db) => db,
+        Err(botwork_entity::connection::ConnectError::MissingUrl) => {
+            return Err(format!(
+                "{} is not set; PR2 makes session-broker a DB consumer — \
+                 add EnvironmentFile=/var/lib/botwork-db/secret.env to the systemd unit",
+                botwork_entity::connection::DATABASE_URL_ENV
+            ));
+        }
+        Err(botwork_entity::connection::ConnectError::Db(err)) => {
+            return Err(format!("failed to connect to postgres: {err}"));
+        }
+    };
+    let agent_session_writer = Some(Arc::new(crate::agent_session::AgentSessionWriter::new(
+        Arc::new(db),
+    )));
 
     let admin_addr = std::env::var("BOTWORK_SESSION_BROKER_ADMIN_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:9002".to_string());
@@ -275,6 +326,7 @@ pub async fn run() -> Result<(), String> {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        agent_session_writer,
     };
 
     log_info(&format!(
