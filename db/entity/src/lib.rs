@@ -25,6 +25,15 @@
 //!   composite PK. Carries the per-binding `config` blob (nullable —
 //!   nothing today populates inheritance from the plugin row).
 //!
+//! [RFE #105](https://github.com/botworkz/botwork/issues/105) adds a
+//! fifth entity:
+//!
+//! * [`agent_session`] — durable identity of a goose agent's session
+//!   keyed on `(tenant_id, workspace_id, agent_session_id)`. Tracks
+//!   the lifecycle (`active`, `grace`, `inactive`, `teardown_requested`,
+//!   `purged`) across container churn. Per-container metadata stays
+//!   in session-broker's in-memory state.
+//!
 //! Resolve hot-path (config-broker, post-cutover):
 //!
 //! ```sql
@@ -54,6 +63,7 @@
 //! storage layer; validation happens on the wire boundary
 //! (config-broker / future admin-api), not in the entity layer.
 
+pub mod agent_session;
 pub mod connection;
 pub mod plugin;
 pub mod tenant;

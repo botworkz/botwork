@@ -17,6 +17,11 @@
 //! * outbound to workspace_plugin: **CASCADE** — deleting a workspace
 //!   tears down its bindings as part of the same statement, since a
 //!   binding without a workspace is meaningless.
+//! * outbound to agent_session: **CASCADE** — RFE #105. Same reason
+//!   as workspace_plugin: an agent session pinned to a non-existent
+//!   workspace has no meaning, and we want the FK to enforce the
+//!   invariant rather than leave dangling rows for the janitor to
+//!   reconcile.
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -46,6 +51,9 @@ pub enum Relation {
     /// Owns the workspace_plugin binding rows. CASCADE on workspace delete.
     #[sea_orm(has_many = "super::workspace_plugin::Entity")]
     WorkspacePlugin,
+    /// Owns the agent_session rows (RFE #105). CASCADE on workspace delete.
+    #[sea_orm(has_many = "super::agent_session::Entity")]
+    AgentSession,
 }
 
 impl Related<super::tenant::Entity> for Entity {
@@ -57,6 +65,12 @@ impl Related<super::tenant::Entity> for Entity {
 impl Related<super::workspace_plugin::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::WorkspacePlugin.def()
+    }
+}
+
+impl Related<super::agent_session::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::AgentSession.def()
     }
 }
 

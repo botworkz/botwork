@@ -7,17 +7,23 @@
 //!
 //! 1. `Migrator::up` returns `Ok(())`.
 //! 2. The `seaql_migrations` tracking table exists in `public` (and lists
-//!    our migration).
-//! 3. The four core tables (`tenant`, `workspace`, `plugin`,
-//!    `workspace_plugin`) all exist.
+//!    our migrations in order).
+//! 3. The five v1 tables (`tenant`, `workspace`, `plugin`,
+//!    `workspace_plugin`, `agent_session`) all exist.
 //! 4. A second `up` invocation against the same DB is also `Ok(())`
 //!    (idempotency — the oneshot can restart safely).
 //! 5. FK semantics are wired the right way:
 //!    * `workspace.tenant_id → tenant.id`  ON DELETE **RESTRICT**
 //!    * `workspace_plugin.workspace_id → workspace.id`  ON DELETE **CASCADE**
 //!    * `workspace_plugin.plugin_id → plugin.id`  ON DELETE **RESTRICT**
+//!    * `agent_session.tenant_id → tenant.id`  ON DELETE **CASCADE** (RFE #105)
+//!    * `agent_session.workspace_id → workspace.id`  ON DELETE **CASCADE** (RFE #105)
 //! 6. The composite uniqueness `UNIQUE(tenant_id, name)` on workspace lets
 //!    multiple tenants own a workspace called `mcp` without collision.
+//! 7. The natural-key UNIQUE on
+//!    `agent_session (tenant_id, workspace_id, agent_session_id)` lets the
+//!    same `agent_session_id` live under distinct tenants/workspaces but
+//!    rejects a duplicate within one workspace (RFE #105).
 //!
 //! The test gates on whether docker is reachable. In CI, the runner has
 //! docker and the test runs in full. On dev machines without docker, the
@@ -143,7 +149,13 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         table_exists(&db, "seaql_migrations").await,
         "seaql_migrations table should exist after first Migrator::up"
     );
-    for table in ["tenant", "workspace", "plugin", "workspace_plugin"] {
+    for table in [
+        "tenant",
+        "workspace",
+        "plugin",
+        "workspace_plugin",
+        "agent_session",
+    ] {
         assert!(
             table_exists(&db, table).await,
             "{table} table should exist after first Migrator::up"
@@ -158,6 +170,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
     let expected_migrations = vec![
         "m20260620_000001_create_core_tables".to_owned(),
         "m20260620_000002_extend_plugin_schema".to_owned(),
+        "m20260622_000001_create_agent_session".to_owned(),
     ];
     assert_eq!(
         applied_migration_names(&db).await,
@@ -179,6 +192,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
 
     assert_fk_actions(&db).await;
     assert_workspace_name_unique_per_tenant(&db).await;
+    assert_agent_session_natural_key_unique_per_workspace(&db).await;
 }
 
 async fn table_exists(db: &DatabaseConnection, name: &str) -> bool {
@@ -228,6 +242,12 @@ async fn assert_fk_actions(db: &DatabaseConnection) {
         ("fk_workspace_tenant", "RESTRICT"),
         ("fk_workspace_plugin_workspace", "CASCADE"),
         ("fk_workspace_plugin_plugin", "RESTRICT"),
+        // RFE #105: agent_session is a secondary projection of
+        // (tenant, workspace); the inbound FKs must cascade so the
+        // janitor never has to reconcile dangling rows after a
+        // tenant- or workspace-level delete.
+        ("fk_agent_session_tenant", "CASCADE"),
+        ("fk_agent_session_workspace", "CASCADE"),
     ] {
         let backend = db.get_database_backend();
         let stmt = Statement::from_sql_and_values(
@@ -309,4 +329,107 @@ async fn assert_workspace_name_unique_per_tenant(db: &DatabaseConnection) {
     ))
     .await
     .expect("tenant cleanup");
+}
+
+/// RFE #105: assert the `agent_session` natural-key UNIQUE accepts
+/// the same `agent_session_id` under distinct workspaces (and under
+/// distinct tenants) but rejects a duplicate within one workspace.
+/// This is the bind-time invariant session-broker relies on when it
+/// asks "have I seen this triple before?".
+///
+/// Also drops both tenants at the end and asserts the agent_session
+/// rows cascaded — proving the FK `ON DELETE CASCADE` is wired the
+/// way RFE #105 specifies. We delete in workspace-first order to
+/// stay within the workspace.tenant_id RESTRICT posture; the
+/// agent_session rows then go away with their workspace.
+async fn assert_agent_session_natural_key_unique_per_workspace(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    // Two tenants with one workspace each. Plant the same
+    // agent_session_id under both — must succeed, because the unique
+    // key includes tenant_id + workspace_id.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name) VALUES \
+           (gen_random_uuid(), 'agent-tenant-a'), \
+           (gen_random_uuid(), 'agent-tenant-b')"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed agent-session tenants");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO workspace (id, tenant_id, name) \
+         SELECT gen_random_uuid(), id, 'mcp' \
+         FROM tenant WHERE name IN ('agent-tenant-a', 'agent-tenant-b')"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed agent-session workspaces");
+
+    // Same agent_session_id under both tenants — must both insert.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO agent_session (id, tenant_id, workspace_id, agent_session_id, state) \
+         SELECT gen_random_uuid(), t.id, w.id, 'goose-abc', 'active' \
+         FROM tenant t JOIN workspace w ON w.tenant_id = t.id \
+         WHERE t.name IN ('agent-tenant-a', 'agent-tenant-b')"
+            .to_owned(),
+    ))
+    .await
+    .expect(
+        "same agent_session_id under distinct (tenant, workspace) must both insert via ux_agent_session_natural_key",
+    );
+
+    // Repeat under one tenant/workspace — must violate the UNIQUE.
+    let dup_stmt = Statement::from_string(
+        backend,
+        "INSERT INTO agent_session (id, tenant_id, workspace_id, agent_session_id, state) \
+         SELECT gen_random_uuid(), t.id, w.id, 'goose-abc', 'active' \
+         FROM tenant t JOIN workspace w ON w.tenant_id = t.id \
+         WHERE t.name = 'agent-tenant-a'"
+            .to_owned(),
+    );
+    let dup = db.execute(dup_stmt).await;
+    assert!(
+        dup.is_err(),
+        "second agent_session row for same (tenant, workspace, agent_session_id) \
+         must violate ux_agent_session_natural_key"
+    );
+
+    // Drop workspaces — CASCADE should take the agent_session rows
+    // with them. Workspace delete also reaches workspace_plugin /
+    // agent_session via CASCADE; the only edge with RESTRICT
+    // semantics is workspace.tenant_id (tested above), which is why
+    // we do the workspace delete before the tenant delete.
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM workspace WHERE tenant_id IN \
+         (SELECT id FROM tenant WHERE name IN ('agent-tenant-a', 'agent-tenant-b'))"
+            .to_owned(),
+    ))
+    .await
+    .expect("workspace cleanup (cascades into agent_session)");
+
+    // Assert the cascade actually fired.
+    let remaining = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT count(*)::int AS c FROM agent_session WHERE agent_session_id = 'goose-abc'"
+                .to_owned(),
+        ))
+        .await
+        .expect("count agent_session rows after cascade")
+        .expect("count returns one row");
+    let count: i32 = remaining.try_get("", "c").expect("c column");
+    assert_eq!(
+        count, 0,
+        "agent_session rows must cascade-delete with their workspace"
+    );
+
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM tenant WHERE name IN ('agent-tenant-a', 'agent-tenant-b')".to_owned(),
+    ))
+    .await
+    .expect("agent-session tenant cleanup");
 }
