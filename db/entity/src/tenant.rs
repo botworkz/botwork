@@ -4,12 +4,17 @@
 //! types (`phlax`, in the dev deployment) and the join key used by
 //! `/resolve`. Surrogate `id` is the FK target for [`workspace`].
 //!
-//! `ON DELETE` semantics on the inbound FK (workspace.tenant_id):
-//! **RESTRICT** — deleting a tenant must be a deliberate two-step
-//! operation (drop workspaces first, then the tenant). The day a stray
-//! `DELETE FROM tenant WHERE name = 'phlax'` slips into a migration
-//! during admin-api bring-up, we want it to fail loudly rather than
-//! cascade-delete every binding.
+//! `ON DELETE` semantics on the inbound FKs:
+//! * `workspace.tenant_id` → **RESTRICT** — deleting a tenant must be a
+//!   deliberate two-step operation (drop workspaces first, then the
+//!   tenant). The day a stray `DELETE FROM tenant WHERE name = 'phlax'`
+//!   slips into a migration during admin-api bring-up, we want it to
+//!   fail loudly rather than cascade-delete every binding.
+//! * `agent_session.tenant_id` → **CASCADE** — agent sessions are a
+//!   secondary projection of the tenant; they have no value once the
+//!   parent is gone (RFE #105). The RESTRICT on workspace still
+//!   enforces the two-step posture, since workspaces have to drop
+//!   first.
 //!
 //! [`workspace`]: super::workspace
 
@@ -33,11 +38,21 @@ pub enum Relation {
     /// is defined on the workspace entity.
     #[sea_orm(has_many = "super::workspace::Entity")]
     Workspace,
+    /// A tenant has many agent sessions (RFE #105). Inverse side
+    /// (agent_session → tenant) is defined on agent_session.
+    #[sea_orm(has_many = "super::agent_session::Entity")]
+    AgentSession,
 }
 
 impl Related<super::workspace::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Workspace.def()
+    }
+}
+
+impl Related<super::agent_session::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::AgentSession.def()
     }
 }
 

@@ -29,6 +29,7 @@ use sea_orm_migration::prelude::*;
 
 pub mod m20260620_000001_create_core_tables;
 pub mod m20260620_000002_extend_plugin_schema;
+pub mod m20260622_000001_create_agent_session;
 
 /// The migrator.
 pub struct Migrator;
@@ -39,6 +40,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260620_000001_create_core_tables::Migration),
             Box::new(m20260620_000002_extend_plugin_schema::Migration),
+            Box::new(m20260622_000001_create_agent_session::Migration),
         ]
     }
 }
