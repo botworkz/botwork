@@ -36,6 +36,18 @@ struct LaunchRequest<'a> {
     cpu_limit: Option<&'a str>,
     memory_limit: Option<&'a str>,
     env: Vec<(String, String)>,
+    /// RFE #105 round-3: caller-supplied docker labels, threaded
+    /// through to `docker run --label key=value` in declaration order.
+    /// session-broker uses this to stamp every spawned container with
+    /// its `(tenant, workspace, plugin)` identity so the cold-start
+    /// recovery path can `docker ps --filter name=mcp_session_*` +
+    /// `docker inspect` and rebuild routing state by joining the
+    /// labels against the `session_worker` table (round-3 PR2).
+    ///
+    /// Owned `Vec<(String, String)>` rather than borrowed slice on
+    /// the parsed view because the validator copies values out of the
+    /// JSON payload; same shape as `env`.
+    labels: Vec<(String, String)>,
 }
 
 struct BindAgentRequest<'a> {
@@ -134,17 +146,24 @@ async fn handle_launch(
                 .unwrap_or(&state.config.container_memory_limit),
             read_only_rootfs: state.config.container_read_only_rootfs,
             env: &env,
+            // RFE #105 round-3: caller-supplied docker labels. The
+            // launcher passes these through verbatim — the validator
+            // already enforces shape/length caps + reserved-prefix
+            // rules at the wire boundary, so docker.rs treats the
+            // slice as trusted.
+            labels: &launch.labels,
         },
         &state.validators,
     )?;
 
     log_info(&format!(
-        "launch ok: name={} image={} network={} staging_path={} env_count={} ip={}",
+        "launch ok: name={} image={} network={} staging_path={} env_count={} label_count={} ip={}",
         launch.name,
         launch.image,
         launch.network,
         launch.staging_path,
         env.len(),
+        launch.labels.len(),
         outcome.container_ip,
     ));
 
@@ -258,6 +277,13 @@ fn parse_launch_payload<'a>(
 ) -> Result<LaunchRequest<'a>, LauncherError> {
     const MAX_ENV_ENTRIES: usize = 64;
     const MAX_ENV_VALUE_LEN: usize = 64 * 1024;
+    // RFE #105 round-3: parallel caps for the labels surface. Docker
+    // itself doesn't impose a hard count limit but does fold every
+    // label into the container's metadata which the daemon keeps
+    // hot; the same 64 / 64 KiB shape we use for env entries is the
+    // right defensive floor.
+    const MAX_LABEL_ENTRIES: usize = 64;
+    const MAX_LABEL_VALUE_LEN: usize = 64 * 1024;
 
     let name = payload
         .get("name")
@@ -429,6 +455,65 @@ fn parse_launch_payload<'a>(
         Some(_) => return Err(LauncherError::BadRequest("invalid env".to_string())),
     };
 
+    // RFE #105 round-3: docker labels. Optional in the payload to
+    // keep older session-broker builds wire-compatible. When present,
+    // every entry passes the same `valid_label_name` rule documented
+    // in `validate.rs`. Cap counts mirror the env-list caps because
+    // docker's own limit is the practical one (an unbounded label
+    // list could OOM the daemon's image-id index) and our wire
+    // contract should fail fast at the same threshold.
+    let labels = match payload.get("labels") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(entries)) => {
+            if entries.len() > MAX_LABEL_ENTRIES {
+                return Err(LauncherError::PayloadTooLarge(
+                    "too many label entries".to_string(),
+                ));
+            }
+            let mut seen = HashSet::new();
+            let mut labels = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let Value::Object(entry_obj) = entry else {
+                    return Err(LauncherError::BadRequest("invalid label entry".to_string()));
+                };
+                if entry_obj.len() != 2 {
+                    return Err(LauncherError::BadRequest("invalid label entry".to_string()));
+                }
+                let name = entry_obj
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| LauncherError::BadRequest("invalid label entry".to_string()))?;
+                let value = entry_obj
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| LauncherError::BadRequest("invalid label entry".to_string()))?;
+                if !validators.valid_label_name(name) {
+                    return Err(LauncherError::BadRequest(format!(
+                        "invalid label name: {name}"
+                    )));
+                }
+                if value.contains('\0') || value.contains('\n') || value.contains('\r') {
+                    return Err(LauncherError::BadRequest("invalid label value".to_string()));
+                }
+                if value.len() > MAX_LABEL_VALUE_LEN {
+                    return Err(LauncherError::PayloadTooLarge(
+                        "label value too large".to_string(),
+                    ));
+                }
+                if !seen.insert(name) {
+                    return Err(LauncherError::BadRequest(format!(
+                        "duplicate label name: {name}"
+                    )));
+                }
+                labels.push((name.to_string(), value.to_string()));
+            }
+            labels
+        }
+        Some(_) => {
+            return Err(LauncherError::BadRequest("invalid labels".to_string()));
+        }
+    };
+
     Ok(LaunchRequest {
         name,
         image,
@@ -439,6 +524,7 @@ fn parse_launch_payload<'a>(
         cpu_limit,
         memory_limit,
         env,
+        labels,
     })
 }
 
@@ -1141,6 +1227,199 @@ mod tests {
         assert!(matches!(
             parse_json_object(request).await,
             Err(LauncherError::PayloadTooLarge(msg)) if msg == "request body exceeds 65536 bytes"
+        ));
+    }
+
+    // ── RFE #105 round-3: launch payload labels ─────────────────────────────
+    //
+    // The wire contract is documented on the `LaunchRequest::labels`
+    // field and the `validate.rs::valid_label_name` validator; these
+    // tests pin it as observable behaviour.
+    //
+    // session-broker (round-3 PR2) will pass three entries every
+    // spawn: `io.botworkz.tenant`, `io.botworkz.workspace`,
+    // `io.botworkz.plugin`. The "older callers (no labels field)"
+    // case must keep working unchanged — that's the whole reason
+    // this PR ships as a standalone wire-additive change ahead of
+    // the broker-side rewrite.
+    //
+    // (`io.botworkz.tenant` is what an operator will eventually
+    // `docker ps --filter label=…` to bisect a stuck session.)
+
+    #[test]
+    fn launch_payload_omits_labels_field_is_empty_slice() {
+        // Wire compat: today's session-broker never sets `labels`;
+        // the launcher must default it to empty and behave identically
+        // to the pre-PR shape. Without this, every spawn from the
+        // legacy broker would 400 the moment the launcher images
+        // bump.
+        let validators = validators();
+        let payload = valid_launch_payload();
+        let parsed = parse_launch_payload(&payload, &validators, "botwork-test")
+            .expect("payload without labels must parse");
+        assert!(parsed.labels.is_empty());
+    }
+
+    #[test]
+    fn launch_payload_labels_null_is_empty_slice() {
+        // Parity with `env: null` and `network: null` — JSON null is
+        // treated as "omitted" rather than rejected.
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert("labels".to_string(), Value::Null);
+        let parsed = parse_launch_payload(&payload, &validators, "botwork-test")
+            .expect("labels: null must parse");
+        assert!(parsed.labels.is_empty());
+    }
+
+    #[test]
+    fn launch_payload_accepts_labels_array_in_declaration_order() {
+        // session-broker's labels arrive in a stable order
+        // (tenant, workspace, plugin); the launcher must round-trip
+        // that order so the eventual `docker ps --format`-readable
+        // output is predictable for operator + janitor scripts.
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "labels".to_string(),
+            serde_json::json!([
+                {"name": "io.botworkz.tenant",    "value": "acme"},
+                {"name": "io.botworkz.workspace", "value": "mcp"},
+                {"name": "io.botworkz.plugin",    "value": "mcp-bash"},
+            ]),
+        );
+        let parsed = parse_launch_payload(&payload, &validators, "botwork-test")
+            .expect("well-formed labels must parse");
+        assert_eq!(
+            parsed.labels,
+            vec![
+                ("io.botworkz.tenant".to_string(), "acme".to_string()),
+                ("io.botworkz.workspace".to_string(), "mcp".to_string()),
+                ("io.botworkz.plugin".to_string(), "mcp-bash".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_payload_label_outside_namespace_is_400() {
+        // Belt + braces with the validator's own tests: the
+        // wire-side rejection must produce a clean 400 with the
+        // operator-readable message (not a panic, not a 500).
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "labels".to_string(),
+            serde_json::json!([
+                {"name": "tenant", "value": "acme"},
+            ]),
+        );
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-test"),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid label name: tenant"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_label_entry_must_be_name_value_object() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        // Bare-string entry instead of {name,value}.
+        payload.insert(
+            "labels".to_string(),
+            serde_json::json!(["io.botworkz.tenant=acme"]),
+        );
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-test"),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid label entry"
+        ));
+        // Extra keys beyond name/value.
+        payload.insert(
+            "labels".to_string(),
+            serde_json::json!([
+                {"name": "io.botworkz.tenant", "value": "acme", "extra": "no"},
+            ]),
+        );
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-test"),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid label entry"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_label_value_with_newline_or_null_is_400() {
+        // docker.rs writes `--label key=value` directly to argv;
+        // a newline in the value would break docker's KEY=VALUE
+        // parser, and a null byte is a UTF-8 hazard. Both refused
+        // at the wire boundary so docker.rs can treat the slice
+        // as trusted.
+        let validators = validators();
+        for bad in ["nl\nhere", "nul\0byte", "cr\rhere"] {
+            let mut payload = valid_launch_payload();
+            payload.insert(
+                "labels".to_string(),
+                serde_json::json!([{"name": "io.botworkz.tenant", "value": bad}]),
+            );
+            assert!(matches!(
+                parse_launch_payload(&payload, &validators, "botwork-test"),
+                Err(LauncherError::BadRequest(msg)) if msg == "invalid label value",
+            ));
+        }
+    }
+
+    #[test]
+    fn launch_payload_label_value_too_large_is_413() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        let oversize = "a".repeat(64 * 1024 + 1);
+        payload.insert(
+            "labels".to_string(),
+            serde_json::json!([{"name": "io.botworkz.tenant", "value": oversize}]),
+        );
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-test"),
+            Err(LauncherError::PayloadTooLarge(msg)) if msg == "label value too large"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_duplicate_label_names_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert(
+            "labels".to_string(),
+            serde_json::json!([
+                {"name": "io.botworkz.tenant", "value": "acme"},
+                {"name": "io.botworkz.tenant", "value": "other"},
+            ]),
+        );
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-test"),
+            Err(LauncherError::BadRequest(msg)) if msg == "duplicate label name: io.botworkz.tenant"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_too_many_label_entries_is_413() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        let entries: Vec<Value> = (0..65)
+            .map(|i| serde_json::json!({"name": format!("io.botworkz.k{i}"), "value": "v"}))
+            .collect();
+        payload.insert("labels".to_string(), Value::Array(entries));
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-test"),
+            Err(LauncherError::PayloadTooLarge(msg)) if msg == "too many label entries"
+        ));
+    }
+
+    #[test]
+    fn launch_payload_labels_wrong_type_is_400() {
+        let validators = validators();
+        let mut payload = valid_launch_payload();
+        payload.insert("labels".to_string(), Value::String("invalid".to_string()));
+        assert!(matches!(
+            parse_launch_payload(&payload, &validators, "botwork-test"),
+            Err(LauncherError::BadRequest(msg)) if msg == "invalid labels"
         ));
     }
 }
