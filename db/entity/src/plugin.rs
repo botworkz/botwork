@@ -76,11 +76,24 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::workspace_plugin::Entity")]
     WorkspacePlugin,
+    /// A plugin owns zero-or-more `session_worker` rows — one per
+    /// currently-or-historically spawned container of this plugin
+    /// (RFE #105 round-3). Inverse side (worker → plugin) lives on
+    /// `session_worker`; the FK is RESTRICT so a plugin row with
+    /// live workers can't be silently dropped.
+    #[sea_orm(has_many = "super::session_worker::Entity")]
+    SessionWorker,
 }
 
 impl Related<super::workspace_plugin::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::WorkspacePlugin.def()
+    }
+}
+
+impl Related<super::session_worker::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::SessionWorker.def()
     }
 }
 

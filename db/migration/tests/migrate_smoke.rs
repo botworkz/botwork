@@ -8,8 +8,8 @@
 //! 1. `Migrator::up` returns `Ok(())`.
 //! 2. The `seaql_migrations` tracking table exists in `public` (and lists
 //!    our migrations in order).
-//! 3. The five v1 tables (`tenant`, `workspace`, `plugin`,
-//!    `workspace_plugin`, `agent_session`) all exist.
+//! 3. The six v1 tables (`tenant`, `workspace`, `plugin`,
+//!    `workspace_plugin`, `agent_session`, `session_worker`) all exist.
 //! 4. A second `up` invocation against the same DB is also `Ok(())`
 //!    (idempotency — the oneshot can restart safely).
 //! 5. FK semantics are wired the right way:
@@ -18,12 +18,20 @@
 //!    * `workspace_plugin.plugin_id → plugin.id`  ON DELETE **RESTRICT**
 //!    * `agent_session.tenant_id → tenant.id`  ON DELETE **CASCADE** (RFE #105)
 //!    * `agent_session.workspace_id → workspace.id`  ON DELETE **CASCADE** (RFE #105)
+//!    * `session_worker.agent_session_id → agent_session.id`  ON DELETE **CASCADE** (RFE #105 round-3)
+//!    * `session_worker.plugin_id → plugin.id`  ON DELETE **RESTRICT** (RFE #105 round-3)
 //! 6. The composite uniqueness `UNIQUE(tenant_id, name)` on workspace lets
 //!    multiple tenants own a workspace called `mcp` without collision.
 //! 7. The natural-key UNIQUE on
 //!    `agent_session (tenant_id, workspace_id, agent_session_id)` lets the
 //!    same `agent_session_id` live under distinct tenants/workspaces but
 //!    rejects a duplicate within one workspace (RFE #105).
+//! 8. The partial UNIQUE
+//!    `(agent_session_id, plugin_id) WHERE reaped_at IS NULL AND
+//!     agent_session_id IS NOT NULL` on `session_worker` rejects two
+//!    live workers for the same `(agent, plugin)` pair, but accepts
+//!    multiple audit rows (reaped_at NOT NULL) and multiple pre-bind
+//!    rows (agent_session_id NULL) (RFE #105 round-3).
 //!
 //! The test gates on whether docker is reachable. In CI, the runner has
 //! docker and the test runs in full. On dev machines without docker, the
@@ -155,6 +163,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "plugin",
         "workspace_plugin",
         "agent_session",
+        "session_worker",
     ] {
         assert!(
             table_exists(&db, table).await,
@@ -171,6 +180,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "m20260620_000001_create_core_tables".to_owned(),
         "m20260620_000002_extend_plugin_schema".to_owned(),
         "m20260622_000001_create_agent_session".to_owned(),
+        "m20260622_000002_create_session_worker".to_owned(),
     ];
     assert_eq!(
         applied_migration_names(&db).await,
@@ -193,6 +203,8 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
     assert_fk_actions(&db).await;
     assert_workspace_name_unique_per_tenant(&db).await;
     assert_agent_session_natural_key_unique_per_workspace(&db).await;
+    assert_session_worker_live_per_plugin_uniqueness(&db).await;
+    assert_session_worker_cascade_on_agent_session_delete(&db).await;
 }
 
 async fn table_exists(db: &DatabaseConnection, name: &str) -> bool {
@@ -248,6 +260,13 @@ async fn assert_fk_actions(db: &DatabaseConnection) {
         // tenant- or workspace-level delete.
         ("fk_agent_session_tenant", "CASCADE"),
         ("fk_agent_session_workspace", "CASCADE"),
+        // RFE #105 round-3: session_worker is a per-incarnation
+        // projection of the agent session. CASCADE on the session
+        // FK so the audit history goes away with the session row;
+        // RESTRICT on the plugin FK so a plugin row with live
+        // workers can't be silently dropped.
+        ("fk_session_worker_agent_session", "CASCADE"),
+        ("fk_session_worker_plugin", "RESTRICT"),
     ] {
         let backend = db.get_database_backend();
         let stmt = Statement::from_sql_and_values(
@@ -432,4 +451,331 @@ async fn assert_agent_session_natural_key_unique_per_workspace(db: &DatabaseConn
     ))
     .await
     .expect("agent-session tenant cleanup");
+}
+
+/// RFE #105 round-3: assert the `session_worker` partial UNIQUE
+/// enforces "one live worker per (agent_session, plugin)" but lets
+/// audit history (`reaped_at IS NOT NULL`) and the pre-bind window
+/// (`agent_session_id IS NULL`) live alongside it. Each is a property
+/// session-broker leans on for its routing + recovery semantics:
+///
+/// * two live workers for the same (agent, plugin) pair would be a
+///   routing leak (session-broker keys on `(plugin, mcp_session_id)`,
+///   not on container name);
+/// * an unlimited number of *audit* rows must coexist because a single
+///   session reconnects to many container incarnations over its
+///   lifetime — that's exactly the cost/billing surface the row is
+///   here to record;
+/// * a row in the spawn-to-first-bind window has `agent_session_id`
+///   NULL, and the partial UNIQUE explicitly exempts those rows from
+///   the constraint so concurrent spawns under separate sessions can
+///   both have pre-bind workers for the same plugin.
+async fn assert_session_worker_live_per_plugin_uniqueness(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name) VALUES (gen_random_uuid(), 'worker-tenant')".to_owned(),
+    ))
+    .await
+    .expect("seed worker tenant");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO workspace (id, tenant_id, name) \
+         SELECT gen_random_uuid(), id, 'mcp' FROM tenant WHERE name = 'worker-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed worker workspace");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO agent_session (id, tenant_id, workspace_id, agent_session_id, state) \
+         SELECT gen_random_uuid(), t.id, w.id, 'goose-worker-1', 'active' \
+         FROM tenant t JOIN workspace w ON w.tenant_id = t.id \
+         WHERE t.name = 'worker-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed worker agent_session");
+    // Use a placeholder plugin row — agent_session schema doesn't
+    // reference it directly, but session_worker.plugin_id does.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO plugin (id, name, image, port, path, upstream_auth, env, egress) VALUES \
+           (gen_random_uuid(), 'worker-plugin-a', 'botwork/p:1', 8000, '/', 'none', \
+            '[]'::jsonb, '{\"mode\":\"none\"}'::jsonb), \
+           (gen_random_uuid(), 'worker-plugin-b', 'botwork/p:1', 8000, '/', 'none', \
+            '[]'::jsonb, '{\"mode\":\"none\"}'::jsonb)"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed worker plugins");
+
+    // 1. Live worker A under plugin-a: OK.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO session_worker \
+           (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, spawned_at) \
+         SELECT gen_random_uuid(), a.id, p.id, 'mcp_session_aaaaaaaaaaaa', '172.20.0.10', \
+                'live-sess-a', CURRENT_TIMESTAMP \
+         FROM agent_session a CROSS JOIN plugin p \
+         WHERE a.agent_session_id = 'goose-worker-1' AND p.name = 'worker-plugin-a'"
+            .to_owned(),
+    ))
+    .await
+    .expect("first live worker for (session, plugin-a) must insert");
+
+    // 2. Second live worker, same (session, plugin-a): MUST violate
+    //    ux_session_worker_live_per_plugin.
+    let dup_live = db
+        .execute(Statement::from_string(
+            backend,
+            "INSERT INTO session_worker \
+               (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, spawned_at) \
+             SELECT gen_random_uuid(), a.id, p.id, 'mcp_session_bbbbbbbbbbbb', '172.20.0.11', \
+                    'live-sess-dup', CURRENT_TIMESTAMP \
+             FROM agent_session a CROSS JOIN plugin p \
+             WHERE a.agent_session_id = 'goose-worker-1' AND p.name = 'worker-plugin-a'"
+                .to_owned(),
+        ))
+        .await;
+    assert!(
+        dup_live.is_err(),
+        "second LIVE worker for same (agent_session, plugin) must violate ux_session_worker_live_per_plugin"
+    );
+
+    // 3. Live worker under plugin-b for the same session: OK
+    //    (different plugin → different unique-key tuple).
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO session_worker \
+           (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, spawned_at) \
+         SELECT gen_random_uuid(), a.id, p.id, 'mcp_session_cccccccccccc', '172.20.0.12', \
+                'live-sess-b', CURRENT_TIMESTAMP \
+         FROM agent_session a CROSS JOIN plugin p \
+         WHERE a.agent_session_id = 'goose-worker-1' AND p.name = 'worker-plugin-b'"
+            .to_owned(),
+    ))
+    .await
+    .expect("live worker for (session, plugin-b) must insert under distinct plugin");
+
+    // 4. Reap the plugin-a worker, then insert a fresh live one:
+    //    audit rows are exempt from the partial UNIQUE.
+    db.execute(Statement::from_string(
+        backend,
+        "UPDATE session_worker SET reaped_at = CURRENT_TIMESTAMP \
+         WHERE container_name = 'mcp_session_aaaaaaaaaaaa'"
+            .to_owned(),
+    ))
+    .await
+    .expect("reap first plugin-a worker");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO session_worker \
+           (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, spawned_at) \
+         SELECT gen_random_uuid(), a.id, p.id, 'mcp_session_dddddddddddd', '172.20.0.13', \
+                'live-sess-a2', CURRENT_TIMESTAMP \
+         FROM agent_session a CROSS JOIN plugin p \
+         WHERE a.agent_session_id = 'goose-worker-1' AND p.name = 'worker-plugin-a'"
+            .to_owned(),
+    ))
+    .await
+    .expect("fresh live worker after the first was reaped must insert (audit exemption)");
+
+    // 5. Two pre-bind rows (agent_session_id NULL) under the same
+    //    plugin: OK (exempt from partial UNIQUE).
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO session_worker \
+           (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, spawned_at) \
+         SELECT gen_random_uuid(), NULL, p.id, 'mcp_session_eeeeeeeeeeee', '172.20.0.14', \
+                '', CURRENT_TIMESTAMP \
+         FROM plugin p WHERE p.name = 'worker-plugin-a'"
+            .to_owned(),
+    ))
+    .await
+    .expect("first pre-bind worker (agent_session_id NULL) must insert");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO session_worker \
+           (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, spawned_at) \
+         SELECT gen_random_uuid(), NULL, p.id, 'mcp_session_ffffffffffff', '172.20.0.15', \
+                '', CURRENT_TIMESTAMP \
+         FROM plugin p WHERE p.name = 'worker-plugin-a'"
+            .to_owned(),
+    ))
+    .await
+    .expect("second pre-bind worker must also insert (NULL exempts from partial UNIQUE)");
+
+    // 6. Container name is globally unique: planting the same
+    //    container_name twice must hard-fail on the
+    //    ux_session_worker_container_name index.
+    let dup_name = db
+        .execute(Statement::from_string(
+            backend,
+            "INSERT INTO session_worker \
+               (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, spawned_at) \
+             SELECT gen_random_uuid(), NULL, p.id, 'mcp_session_eeeeeeeeeeee', '172.20.0.99', \
+                    '', CURRENT_TIMESTAMP \
+             FROM plugin p WHERE p.name = 'worker-plugin-b'"
+                .to_owned(),
+        ))
+        .await;
+    assert!(
+        dup_name.is_err(),
+        "duplicate container_name must violate ux_session_worker_container_name"
+    );
+
+    // Cleanup. session_worker rows go first because the plugin FK is
+    // RESTRICT — dropping the plugin row first would 23503 against
+    // the live + audit workers we just planted.
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM session_worker WHERE plugin_id IN \
+         (SELECT id FROM plugin WHERE name IN ('worker-plugin-a', 'worker-plugin-b'))"
+            .to_owned(),
+    ))
+    .await
+    .expect("session_worker cleanup");
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM plugin WHERE name IN ('worker-plugin-a', 'worker-plugin-b')".to_owned(),
+    ))
+    .await
+    .expect("plugin cleanup");
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM workspace WHERE tenant_id IN \
+         (SELECT id FROM tenant WHERE name = 'worker-tenant')"
+            .to_owned(),
+    ))
+    .await
+    .expect("workspace cleanup");
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM tenant WHERE name = 'worker-tenant'".to_owned(),
+    ))
+    .await
+    .expect("tenant cleanup");
+}
+
+/// RFE #105 round-3: deleting an `agent_session` row must CASCADE into
+/// its `session_worker` rows. This pairs with the
+/// `assert_agent_session_natural_key_unique_per_workspace` test above
+/// (which proves workspace-delete cascades into agent_session); here
+/// we cover the inner cascade so a full
+/// tenant-delete → workspace-delete → agent_session-delete →
+/// session_worker-delete chain has each edge tested in one test pass.
+///
+/// Touches no other tables: we drop the workers ourselves at the end
+/// (since the test framework can't tell ahead of time which rows came
+/// from this helper vs the previous ones).
+async fn assert_session_worker_cascade_on_agent_session_delete(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name) VALUES (gen_random_uuid(), 'cascade-tenant')".to_owned(),
+    ))
+    .await
+    .expect("seed cascade tenant");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO workspace (id, tenant_id, name) \
+         SELECT gen_random_uuid(), id, 'mcp' FROM tenant WHERE name = 'cascade-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed cascade workspace");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO agent_session (id, tenant_id, workspace_id, agent_session_id, state) \
+         SELECT gen_random_uuid(), t.id, w.id, 'goose-cascade-1', 'active' \
+         FROM tenant t JOIN workspace w ON w.tenant_id = t.id \
+         WHERE t.name = 'cascade-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed cascade agent_session");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO plugin (id, name, image, port, path, upstream_auth, env, egress) \
+         VALUES (gen_random_uuid(), 'cascade-plugin', 'botwork/p:1', 8000, '/', 'none', \
+                 '[]'::jsonb, '{\"mode\":\"none\"}'::jsonb)"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed cascade plugin");
+
+    // Plant a live worker + an already-reaped audit worker under the
+    // same session. Both should disappear when the session row is
+    // dropped.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO session_worker \
+           (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, spawned_at) \
+         SELECT gen_random_uuid(), a.id, p.id, 'mcp_session_cascade01', '172.20.0.20', \
+                'cascade-live', CURRENT_TIMESTAMP \
+         FROM agent_session a CROSS JOIN plugin p \
+         WHERE a.agent_session_id = 'goose-cascade-1' AND p.name = 'cascade-plugin'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed live cascade worker");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO session_worker \
+           (id, agent_session_id, plugin_id, container_name, container_ip, mcp_session_id, \
+            spawned_at, reaped_at) \
+         SELECT gen_random_uuid(), a.id, p.id, 'mcp_session_cascade02', '172.20.0.21', \
+                'cascade-audit', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP \
+         FROM agent_session a CROSS JOIN plugin p \
+         WHERE a.agent_session_id = 'goose-cascade-1' AND p.name = 'cascade-plugin'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed reaped (audit) cascade worker");
+
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM agent_session WHERE agent_session_id = 'goose-cascade-1'".to_owned(),
+    ))
+    .await
+    .expect("agent_session delete must cascade into session_worker");
+
+    let remaining = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT count(*)::int AS c FROM session_worker \
+             WHERE container_name IN ('mcp_session_cascade01', 'mcp_session_cascade02')"
+                .to_owned(),
+        ))
+        .await
+        .expect("count session_worker rows after cascade")
+        .expect("count returns one row");
+    let count: i32 = remaining.try_get("", "c").expect("c column");
+    assert_eq!(
+        count, 0,
+        "both live and audit session_worker rows must cascade-delete with their parent agent_session"
+    );
+
+    // Cleanup the plugin + tenant + workspace.
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM plugin WHERE name = 'cascade-plugin'".to_owned(),
+    ))
+    .await
+    .expect("cascade plugin cleanup");
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM workspace WHERE tenant_id IN \
+         (SELECT id FROM tenant WHERE name = 'cascade-tenant')"
+            .to_owned(),
+    ))
+    .await
+    .expect("cascade workspace cleanup");
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM tenant WHERE name = 'cascade-tenant'".to_owned(),
+    ))
+    .await
+    .expect("cascade tenant cleanup");
 }

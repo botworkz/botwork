@@ -25,14 +25,22 @@
 //!   composite PK. Carries the per-binding `config` blob (nullable —
 //!   nothing today populates inheritance from the plugin row).
 //!
-//! [RFE #105](https://github.com/botworkz/botwork/issues/105) adds a
-//! fifth entity:
+//! [RFE #105](https://github.com/botworkz/botwork/issues/105) adds
+//! two further entities:
 //!
 //! * [`agent_session`] — durable identity of a goose agent's session
 //!   keyed on `(tenant_id, workspace_id, agent_session_id)`. Tracks
 //!   the lifecycle (`active`, `grace`, `inactive`, `teardown_requested`,
-//!   `purged`) across container churn. Per-container metadata stays
-//!   in session-broker's in-memory state.
+//!   `purged`) across container churn. Cost- and data-bearing: rows
+//!   outlive their underlying containers and are operator-retained
+//!   as the audit/billing surface for "what did this agent do?"
+//! * [`session_worker`] — one row per plugin container that an agent
+//!   session has spawned. 1:N from `agent_session` because one
+//!   session talks to multiple plugins, each with its own container.
+//!   Per-incarnation operational state (`container_name`,
+//!   `container_ip`, `mcp_session_id`, `reaped_at`) lives here.
+//!   Round-3 of the persistence cutover (this is what makes
+//!   `/var/lib/botwork/sessions.json` deletable).
 //!
 //! Resolve hot-path (config-broker, post-cutover):
 //!
@@ -66,6 +74,7 @@
 pub mod agent_session;
 pub mod connection;
 pub mod plugin;
+pub mod session_worker;
 pub mod tenant;
 pub mod workspace;
 pub mod workspace_plugin;
