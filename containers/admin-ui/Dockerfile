@@ -33,6 +33,7 @@ WORKDIR /build
 # diverges from the pattern the other broker Dockerfiles establish —
 # keep the layer identical so the build behaviour is uniform.
 COPY admin-api/ ./admin-api/
+COPY admin-core/ ./admin-core/
 COPY admin-ui/ ./admin-ui/
 COPY bootstrap/ ./bootstrap/
 COPY config-broker/ ./config-broker/
