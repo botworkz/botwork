@@ -66,11 +66,6 @@ jobs:
           service: db-migrate
           package: botwork-migration
           binary: botwork-migration
-        - crate: bootstrap
-          service: bootstrap
-          package: botwork-bootstrap
-          binary: botwork-bootstrap
-          needs-db-migrate: true
         - crate: admin-api
           service: admin-api
           package: botwork-admin-api
