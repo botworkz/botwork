@@ -252,24 +252,77 @@ fn plugin_differs(existing: &Plugin, entry: &ValidatedPlugin) -> bool {
 }
 
 fn plugin_create_body(entry: &ValidatedPlugin) -> serde_json::Value {
-    // admin-api's POST /plugins body uses the raw plugin-entry shape
-    // (admin-core::RawPluginEntry) because the validator runs again
-    // on the API side. We round-trip our already-validated values
-    // through the raw shape: name + image + port + path +
-    // upstream_auth + env + resources + egress.
+    // admin-api's POST /plugins body uses the RAW plugin-entry shape
+    // (admin-core::RawPluginEntry), and re-runs the validator on it.
+    // We've already locally validated, but we cannot just hand the
+    // normalised output back — admin-core's validator deliberately
+    // rejects some of its own output forms as input:
+    //
+    //   * env:    validator returns `[{name, value}, ...]`; the raw
+    //             shape is a mapping `{KEY: value, ...}`.
+    //   * egress: validator returns `{"mode":"all"|"none"}` or
+    //             `{"allow":[...]}`; the raw shape expects the bare
+    //             strings `"all"` / `"none"` (with `"mode:"` reserved
+    //             for the wire-OUTPUT direction; sending it as input
+    //             produces 422 "'mode:' is reserved").
+    //
+    // Skipping this denormalisation in PR4 round 2 cost a full CI
+    // cycle: every plugin POST 422'd, botwork-import exited 6, and
+    // every dependent broker cascaded into dependency-failed. Don't.
     let mut body = json!({
         "name": entry.name,
         "image": entry.image,
         "port": entry.port,
         "path": entry.path,
         "upstream_auth": entry.upstream_auth,
-        "env": entry.env,
-        "egress": entry.egress,
+        "env": denormalise_env(&entry.env),
+        "egress": denormalise_egress(&entry.egress),
     });
     if let Some(resources) = &entry.resources {
         body["resources"] = resources.clone();
     }
     body
+}
+
+/// ValidatedPlugin.env is `[{name, value}, ...]`; the wire-input
+/// shape admin-api expects is the original mapping `{KEY: value, ...}`.
+/// Walk the validated list back into the mapping shape. Non-conformant
+/// items get filtered out — the validator already proved the list is
+/// well-formed, but defensive defaults keep apply robust against
+/// schema drift.
+fn denormalise_env(env: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some(entries) = env.as_array() {
+        for entry in entries {
+            let name = entry.get("name").and_then(|v| v.as_str());
+            let value = entry.get("value").and_then(|v| v.as_str());
+            if let (Some(name), Some(value)) = (name, value) {
+                out.insert(
+                    name.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// ValidatedPlugin.egress is `{"mode":"all"|"none"}` or
+/// `{"allow":[...]}`; the wire-input shape admin-api expects is the
+/// bare string `"all"` / `"none"`, or the mapping `{"allow":[...]}`
+/// as-is.
+///
+/// The admin-core validator EXPLICITLY rejects `{"mode": ...}` as an
+/// input (it's the wire-OUTPUT form, reserved for downstream
+/// consumers). Without this denormalisation, every plugin POST fails
+/// 422 with `"'mode:' is reserved for the wire encoding"`.
+fn denormalise_egress(egress: &serde_json::Value) -> serde_json::Value {
+    if let Some(mode) = egress.get("mode").and_then(|v| v.as_str()) {
+        if mode == "all" || mode == "none" {
+            return serde_json::Value::String(mode.to_string());
+        }
+    }
+    egress.clone()
 }
 
 fn plugin_update_body(
