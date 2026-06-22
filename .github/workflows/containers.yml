@@ -518,3 +518,86 @@ jobs:
         echo "admin body bytes: $(printf '%s' "${body}" | wc -c)"
         echo "${body}" | grep -q "botwork admin"
         echo "${body}" | grep -q "data-trunk"
+
+        # 4. — sub-resource path check. The bug this catches:
+        # if Trunk.toml drops `public_url = "/admin/"`, trunk emits
+        # `<link rel="modulepreload" href="/<hash>.js">` instead of
+        # `<link rel="modulepreload" href="/admin/<hash>.js">`. In
+        # the bare container the admin-ui server then 404s those
+        # root-relative paths, and the browser surfaces it as
+        # `NS_ERROR_CORRUPTED_CONTENT`. Through envoy (vm/space) the
+        # same path 401s on ext_authz. Either way the panel is
+        # broken in a way the existing "/admin/ returns HTML" check
+        # doesn't see.
+        #
+        # We:
+        #   a. parse the HTML for the wasm-bindgen JS loader URL
+        #      (trunk emits it as `<link rel="modulepreload"
+        #      href="...">`),
+        #   b. assert the URL starts with `/admin/` — root-relative
+        #      `/foo.js` is the specific failure mode this probe
+        #      catches,
+        #   c. curl it and assert 200 + a JS-ish content-type,
+        #   d. do the same for the `.wasm` blob (preload href).
+        js_url="$(printf '%s' "${body}" \
+          | grep -oE 'href="[^"]+\.js"' \
+          | head -1 \
+          | sed -E 's/^href="([^"]+)"$/\1/')"
+        if [[ -z "${js_url}" ]]; then
+          echo "could not find a JS bundle href in /admin/ body" >&2
+          printf '%s\n' "${body}" >&2
+          exit 1
+        fi
+        echo "js_url: ${js_url}"
+        case "${js_url}" in
+          /admin/*) ;;
+          *)
+            echo "JS bundle href ${js_url} is not /admin/-prefixed" >&2
+            echo "this means Trunk.toml lost public_url = \"/admin/\"" >&2
+            exit 1
+            ;;
+        esac
+
+        wasm_url="$(printf '%s' "${body}" \
+          | grep -oE 'href="[^"]+\.wasm"' \
+          | head -1 \
+          | sed -E 's/^href="([^"]+)"$/\1/')"
+        if [[ -z "${wasm_url}" ]]; then
+          echo "could not find a wasm preload href in /admin/ body" >&2
+          printf '%s\n' "${body}" >&2
+          exit 1
+        fi
+        echo "wasm_url: ${wasm_url}"
+        case "${wasm_url}" in
+          /admin/*) ;;
+          *)
+            echo "wasm preload href ${wasm_url} is not /admin/-prefixed" >&2
+            echo "this means Trunk.toml lost public_url = \"/admin/\"" >&2
+            exit 1
+            ;;
+        esac
+
+        # c. — JS loader must serve 200 + JS-ish content-type. We
+        # use `curl -D` to capture headers separately from the body
+        # because the JS payload is noisy in logs and we only care
+        # about the contract here.
+        hdrs="$(docker run --rm --network "${net}" curlimages/curl:8.10.1 \
+          --fail --silent --show-error --dump-header - --output /dev/null \
+          "http://admin_ui:9500${js_url}")"
+        echo "JS headers:"
+        printf '%s\n' "${hdrs}"
+        printf '%s\n' "${hdrs}" \
+          | tr -d '\r' \
+          | awk -F': ' 'tolower($1)=="content-type"{print tolower($2)}' \
+          | grep -Eq '^(application/javascript|text/javascript)'
+
+        # d. — wasm blob must serve 200 + application/wasm.
+        hdrs="$(docker run --rm --network "${net}" curlimages/curl:8.10.1 \
+          --fail --silent --show-error --dump-header - --output /dev/null \
+          "http://admin_ui:9500${wasm_url}")"
+        echo "wasm headers:"
+        printf '%s\n' "${hdrs}"
+        printf '%s\n' "${hdrs}" \
+          | tr -d '\r' \
+          | awk -F': ' 'tolower($1)=="content-type"{print tolower($2)}' \
+          | grep -q '^application/wasm$'
