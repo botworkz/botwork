@@ -81,6 +81,12 @@ plugins:
 
 struct Server {
     base: String,
+    // Exposed so tests can seed tables that admin-api itself can't
+    // (agent_session, session_worker — both are session-broker's
+    // write surface; admin-api only reads them). Tests insert
+    // straight through sea-orm rather than spinning up
+    // session-broker as an additional fixture.
+    db: Arc<DatabaseConnection>,
     _handle: JoinHandle<()>,
     _pg: testcontainers::ContainerAsync<Postgres>,
 }
@@ -165,8 +171,9 @@ async fn spawn_server_with(control_plane: Option<ControlPlaneClient>) -> Option<
     let cfg = BootstrapConfig::from_raw(raw).expect("bootstrap validate");
     apply(&db, &cfg).await.expect("bootstrap apply");
 
+    let db_arc = Arc::new(db);
     let state = AppState {
-        db: Arc::new(db),
+        db: db_arc.clone(),
         control_plane: control_plane.unwrap_or_else(ControlPlaneClient::disabled),
     };
     let app = build_router(state);
@@ -177,6 +184,7 @@ async fn spawn_server_with(control_plane: Option<ControlPlaneClient>) -> Option<
     });
     Some(Server {
         base: format!("http://{addr}"),
+        db: db_arc,
         _handle: handle,
         _pg: pg,
     })
@@ -1178,4 +1186,546 @@ async fn delete_binding_disabled_gate_succeeds_without_control_plane() {
         .await
         .expect("DELETE");
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+// ── agent_session reads ────────────────────────────────────────────
+//
+// session-broker is the writer of agent_session + session_worker; the
+// admin-api side only reads them. Tests insert rows directly via
+// sea-orm rather than spinning up session-broker as a fixture, both
+// because it's the minimum surface for the assertions admin-api makes
+// (does the route exist, does the filter narrow correctly, does
+// `?live=` walk the reaped_at predicate the right direction) and
+// because session-broker's writer is itself end-to-end-tested by
+// `session-broker/tests/agent_session_writethrough_test.rs`.
+
+/// Helper: seed `n` agent_session rows under the SAMPLE_YAML
+/// `(phlax, mcp)` triple, each in the requested state and with
+/// monotonically increasing `last_active_at`. Returns the inserted
+/// row ids in insertion order.
+async fn seed_agent_sessions(db: &DatabaseConnection, states: &[&str]) -> Vec<Uuid> {
+    use botwork_entity::{agent_session, tenant, workspace};
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
+
+    let tenant_row = tenant::Entity::find()
+        .filter(tenant::Column::Name.eq("phlax"))
+        .one(db)
+        .await
+        .expect("tenant query")
+        .expect("seeded tenant");
+    let ws_row = workspace::Entity::find()
+        .filter(workspace::Column::TenantId.eq(tenant_row.id))
+        .filter(workspace::Column::Name.eq("mcp"))
+        .one(db)
+        .await
+        .expect("workspace query")
+        .expect("seeded workspace");
+
+    let mut ids = Vec::with_capacity(states.len());
+    let base = chrono::Utc::now();
+    for (i, st) in states.iter().enumerate() {
+        let id = Uuid::new_v4();
+        // last_active_at stride is 1s so DESC ordering is unambiguous;
+        // the actual stride doesn't matter beyond "strictly increasing".
+        let last_active = base + chrono::Duration::seconds(i as i64);
+        let row = agent_session::ActiveModel {
+            id: Set(id),
+            tenant_id: Set(tenant_row.id),
+            workspace_id: Set(ws_row.id),
+            agent_session_id: Set(format!("agent-{i}")),
+            state: Set((*st).to_string()),
+            created_at: Set(last_active),
+            last_active_at: Set(last_active),
+            reactivation_count: Set(0),
+        };
+        row.insert(db).await.expect("insert agent_session");
+        ids.push(id);
+    }
+    ids
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_agent_sessions_returns_seeded_rows_sorted_by_last_active_desc() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_agent_sessions_returns_seeded_rows_sorted_by_last_active_desc");
+        return;
+    };
+    let ids = seed_agent_sessions(&server.db, &["active", "grace", "inactive"]).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/admin/api/v1/agent_sessions", server.base))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["total"], 3);
+    // Insertion order was [active, grace, inactive] with strictly-
+    // increasing last_active_at. DESC sort → inactive first, active last.
+    let returned_ids: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        returned_ids,
+        vec![
+            ids[2].to_string().as_str(),
+            ids[1].to_string().as_str(),
+            ids[0].to_string().as_str(),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_agent_sessions_filters_by_state() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_agent_sessions_filters_by_state");
+        return;
+    };
+    seed_agent_sessions(&server.db, &["active", "active", "grace", "inactive"]).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!(
+            "{}/admin/api/v1/agent_sessions?state=active",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["total"], 2);
+    for row in body["items"].as_array().unwrap() {
+        assert_eq!(row["state"], "active");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_agent_sessions_filters_by_tenant_id() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_agent_sessions_filters_by_tenant_id");
+        return;
+    };
+    seed_agent_sessions(&server.db, &["active"]).await;
+    // Real tenant_id → 1 row. Random tenant_id → 0 rows. Both should
+    // return 200 (filter mismatch is not a 404).
+    use botwork_entity::tenant;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let phlax_id = tenant::Entity::find()
+        .filter(tenant::Column::Name.eq("phlax"))
+        .one(server.db.as_ref())
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = client
+        .get(format!(
+            "{}/admin/api/v1/agent_sessions?tenant_id={phlax_id}",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["total"], 1);
+
+    let other = Uuid::new_v4();
+    let body: serde_json::Value = client
+        .get(format!(
+            "{}/admin/api/v1/agent_sessions?tenant_id={other}",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["total"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_agent_sessions_rejects_garbage_tenant_filter() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_agent_sessions_rejects_garbage_tenant_filter");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/admin/api/v1/agent_sessions?tenant_id=not-a-uuid",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_agent_session_round_trips() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED get_agent_session_round_trips");
+        return;
+    };
+    let ids = seed_agent_sessions(&server.db, &["active"]).await;
+    let id = ids[0];
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/admin/api/v1/agent_sessions/{id}", server.base))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["id"], id.to_string());
+    assert_eq!(body["state"], "active");
+    assert_eq!(body["agent_session_id"], "agent-0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_agent_session_unknown_id_is_404() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED get_agent_session_unknown_id_is_404");
+        return;
+    };
+    let id = Uuid::new_v4();
+    let resp = reqwest::Client::new()
+        .get(format!("{}/admin/api/v1/agent_sessions/{id}", server.base))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_agent_session_invalid_uuid_is_400() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED get_agent_session_invalid_uuid_is_400");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/admin/api/v1/agent_sessions/not-a-uuid",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── session_worker reads ───────────────────────────────────────────
+
+/// Helper: insert a session_worker row pinned to the supplied
+/// plugin (must be a name from SAMPLE_YAML — today `mcp-bash` or
+/// `mcp-fetch`) and the supplied agent_session (or null). Returns
+/// the inserted row id.
+///
+/// Why the plugin name is a parameter: the schema enforces
+/// `UNIQUE(agent_session_id, plugin_id) WHERE reaped_at IS NULL`
+/// — at most one *live* worker per (session, plugin) pair. Tests
+/// that seed multiple live workers under the same session must
+/// pick different plugins, or one of the inserts will trip the
+/// constraint. The two seeded plugins (mcp-bash, mcp-fetch) are
+/// enough for every test we have today.
+async fn seed_session_worker(
+    db: &DatabaseConnection,
+    agent_session_id: Option<Uuid>,
+    plugin_name: &str,
+    container_name: &str,
+    reaped: bool,
+    spawned_offset_secs: i64,
+) -> Uuid {
+    use botwork_entity::{plugin, session_worker};
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
+
+    let plugin_row = plugin::Entity::find()
+        .filter(plugin::Column::Name.eq(plugin_name))
+        .one(db)
+        .await
+        .expect("plugin query")
+        .expect("seeded plugin");
+
+    let id = Uuid::new_v4();
+    let spawned = chrono::Utc::now() + chrono::Duration::seconds(spawned_offset_secs);
+    let reaped_at = if reaped { Some(spawned) } else { None };
+    session_worker::ActiveModel {
+        id: Set(id),
+        agent_session_id: Set(agent_session_id),
+        plugin_id: Set(plugin_row.id),
+        container_name: Set(container_name.to_string()),
+        container_ip: Set("172.20.0.42".to_string()),
+        mcp_session_id: Set(String::new()),
+        spawned_at: Set(spawned),
+        reaped_at: Set(reaped_at),
+    }
+    .insert(db)
+    .await
+    .expect("insert session_worker");
+    id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_session_workers_returns_seeded_rows_sorted_by_spawned_desc() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_session_workers_returns_seeded_rows_sorted_by_spawned_desc");
+        return;
+    };
+    let session_ids = seed_agent_sessions(&server.db, &["active"]).await;
+    // a + b are both LIVE under session_ids[0] — they MUST pin different
+    // plugins or the partial UNIQUE index (agent_session_id, plugin_id)
+    // WHERE reaped_at IS NULL trips on insert. c is reaped, so it can
+    // collide with a's (session, plugin) safely.
+    let a = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-bash",
+        "mcp_session_a",
+        false,
+        0,
+    )
+    .await;
+    let b = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-fetch",
+        "mcp_session_b",
+        false,
+        1,
+    )
+    .await;
+    let c = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-bash",
+        "mcp_session_c",
+        true,
+        2,
+    )
+    .await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/admin/api/v1/session_workers", server.base))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["total"], 3);
+    // spawned_offset_secs was 0/1/2 → c is newest, a is oldest. DESC order.
+    let returned: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        returned,
+        vec![
+            c.to_string().as_str(),
+            b.to_string().as_str(),
+            a.to_string().as_str(),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_session_workers_filters_by_live_true_drops_reaped() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_session_workers_filters_by_live_true_drops_reaped");
+        return;
+    };
+    let session_ids = seed_agent_sessions(&server.db, &["active"]).await;
+    // _reaped is reaped, so it doesn't compete with `live` for the
+    // live-uniq slot — both can pin the same plugin.
+    let live = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-bash",
+        "mcp_session_live",
+        false,
+        0,
+    )
+    .await;
+    let _reaped = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-bash",
+        "mcp_session_reaped",
+        true,
+        1,
+    )
+    .await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!(
+            "{}/admin/api/v1/session_workers?live=true",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["items"][0]["id"], live.to_string());
+    assert!(body["items"][0]["reaped_at"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_session_workers_filters_by_live_false_drops_live() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_session_workers_filters_by_live_false_drops_live");
+        return;
+    };
+    let session_ids = seed_agent_sessions(&server.db, &["active"]).await;
+    // Same as the live=true sibling test: _live and reaped don't
+    // collide because reaped's reaped_at is NOT NULL, so the partial
+    // UNIQUE index doesn't see it.
+    let _live = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-bash",
+        "mcp_session_live",
+        false,
+        0,
+    )
+    .await;
+    let reaped = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-bash",
+        "mcp_session_reaped",
+        true,
+        1,
+    )
+    .await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!(
+            "{}/admin/api/v1/session_workers?live=false",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["items"][0]["id"], reaped.to_string());
+    assert!(!body["items"][0]["reaped_at"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_session_workers_filters_by_agent_session_id() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_session_workers_filters_by_agent_session_id");
+        return;
+    };
+    let session_ids = seed_agent_sessions(&server.db, &["active", "active"]).await;
+    // Different agent sessions → different (session, plugin) keys, so
+    // all three can pin the same plugin without tripping the partial
+    // UNIQUE index. orphan's agent_session_id is NULL which the index
+    // excludes entirely (`WHERE … AND agent_session_id IS NOT NULL`).
+    let a_worker = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-bash",
+        "mcp_session_a",
+        false,
+        0,
+    )
+    .await;
+    let _b_worker = seed_session_worker(
+        &server.db,
+        Some(session_ids[1]),
+        "mcp-bash",
+        "mcp_session_b",
+        false,
+        1,
+    )
+    .await;
+    let _orphan =
+        seed_session_worker(&server.db, None, "mcp-bash", "mcp_session_orphan", false, 2).await;
+    let target = session_ids[0];
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!(
+            "{}/admin/api/v1/session_workers?agent_session_id={target}",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["items"][0]["id"], a_worker.to_string());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_session_workers_rejects_garbage_agent_session_id_filter() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED list_session_workers_rejects_garbage_agent_session_id_filter");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{}/admin/api/v1/session_workers?agent_session_id=not-a-uuid",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_session_worker_round_trips() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED get_session_worker_round_trips");
+        return;
+    };
+    let session_ids = seed_agent_sessions(&server.db, &["active"]).await;
+    let id = seed_session_worker(
+        &server.db,
+        Some(session_ids[0]),
+        "mcp-bash",
+        "mcp_session_x",
+        false,
+        0,
+    )
+    .await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/admin/api/v1/session_workers/{id}", server.base))
+        .send()
+        .await
+        .expect("GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["id"], id.to_string());
+    assert_eq!(body["container_name"], "mcp_session_x");
+    assert!(body["reaped_at"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_session_worker_unknown_id_is_404() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED get_session_worker_unknown_id_is_404");
+        return;
+    };
+    let id = Uuid::new_v4();
+    let resp = reqwest::Client::new()
+        .get(format!("{}/admin/api/v1/session_workers/{id}", server.base))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

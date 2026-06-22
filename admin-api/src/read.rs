@@ -17,6 +17,11 @@
 //! * `workspaces` accepts `?tenant_id=<uuid>`,
 //! * `workspace_plugins` accepts `?workspace_id=<uuid>` and
 //!   `?plugin_id=<uuid>` (combinable).
+//! * `agent_sessions` accepts `?tenant_id=<uuid>`,
+//!   `?workspace_id=<uuid>`, and `?state=<string>` (combinable).
+//! * `session_workers` accepts `?agent_session_id=<uuid>`,
+//!   `?plugin_id=<uuid>`, and `?live=true|false` (combinable —
+//!   `live=true` filters to `reaped_at IS NULL`).
 //!
 //! tenant + plugin have no filters today: there are <10 rows of
 //! each in any realistic deployment.
@@ -24,7 +29,30 @@
 //! Composite-PK route convention: `workspace_plugin` is addressed as
 //! `/{workspace_id}/{plugin_id}` (two path segments). The plugin/
 //! tenant URLs use a single `{id}` segment so the by-id pattern is
-//! distinguishable at the router level.
+//! distinguishable at the router level. `agent_session` and
+//! `session_worker` have single-uuid PKs and follow the simple
+//! `/{id}` shape.
+//!
+//! # Why agent_session and session_worker are READ-ONLY
+//!
+//! Both tables are written by session-broker as agents spawn, register,
+//! and die. Operator-driven CRUD on them is mostly nonsensical:
+//!
+//! * **Create** — sessions and workers come into existence through the
+//!   spawn path, not through admin-api. There is no shape for "please
+//!   create a session row out of thin air".
+//! * **Update** — session-broker owns the lifecycle (state transitions
+//!   on agent_session, reaped_at on session_worker). Admin-api PUTs
+//!   would race with the writer.
+//! * **Delete** — could legitimately mean "force-terminate this live
+//!   session", but that's a control-plane / session-broker concern
+//!   (coordinate with the live container, not just yank a row). The
+//!   workspace_plugin live-state gate is the template; we'll add it
+//!   when there's a concrete UI use case. Skipping for now.
+//!
+//! So this layer exposes list + by-id only. Future-selves can add
+//! delete-with-live-gate when admin-ui needs it; this PR keeps the
+//! surface honest about what's currently safe to do through HTTP.
 
 use std::str::FromStr;
 
@@ -36,7 +64,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use botwork_entity::{plugin, tenant, workspace, workspace_plugin};
+use botwork_entity::{agent_session, plugin, session_worker, tenant, workspace, workspace_plugin};
 
 use crate::handler::{bad_request, ApiError, ApiErrorExt, AppState};
 
@@ -72,6 +100,10 @@ pub fn router() -> Router<AppState> {
             "/admin/api/v1/workspace_plugins/:workspace_id/:plugin_id",
             get(get_workspace_plugin),
         )
+        .route("/admin/api/v1/agent_sessions", get(list_agent_sessions))
+        .route("/admin/api/v1/agent_sessions/:id", get(get_agent_session))
+        .route("/admin/api/v1/session_workers", get(list_session_workers))
+        .route("/admin/api/v1/session_workers/:id", get(get_session_worker))
 }
 
 // ── tenant ─────────────────────────────────────────────────────────
@@ -208,5 +240,132 @@ async fn get_workspace_plugin(
             "workspace_plugin",
             format!("no binding for (workspace={workspace_id}, plugin={plugin_id})"),
         )?;
+    Ok(Json(row))
+}
+
+// ── agent_session ──────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct AgentSessionListQuery {
+    /// Filter to sessions belonging to a single tenant.
+    tenant_id: Option<String>,
+    /// Filter to sessions belonging to a single workspace.
+    workspace_id: Option<String>,
+    /// Filter to one lifecycle state. Wire shape matches the
+    /// agent_session::state module constants verbatim
+    /// (`active` / `grace` / `inactive` / `teardown_requested` /
+    /// `purged`). Unknown values return an empty list rather than
+    /// 400 — admin-api doesn't own the state vocabulary, the row
+    /// writer does. A typo just means "no rows match".
+    state: Option<String>,
+}
+
+async fn list_agent_sessions(
+    State(state): State<AppState>,
+    Query(params): Query<AgentSessionListQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut query = agent_session::Entity::find();
+    if let Some(raw) = params.tenant_id {
+        let tenant_id = Uuid::from_str(&raw)
+            .map_err(|err| bad_request("invalid tenant_id query param", err))?;
+        query = query.filter(agent_session::Column::TenantId.eq(tenant_id));
+    }
+    if let Some(raw) = params.workspace_id {
+        let workspace_id = Uuid::from_str(&raw)
+            .map_err(|err| bad_request("invalid workspace_id query param", err))?;
+        query = query.filter(agent_session::Column::WorkspaceId.eq(workspace_id));
+    }
+    if let Some(state_val) = params.state {
+        query = query.filter(agent_session::Column::State.eq(state_val));
+    }
+    // Order by last_active_at DESC: the operator answer to "what's
+    // happening right now?" puts the most-recently-active sessions
+    // at the top. Tiebreak on id (Uuid) so the response is
+    // deterministic when two rows share a timestamp (which they
+    // can — Postgres timestamptz has microsecond resolution, and
+    // session-broker bumps last_active_at in batches).
+    let items = query
+        .order_by_desc(agent_session::Column::LastActiveAt)
+        .order_by_asc(agent_session::Column::Id)
+        .all(state.db.as_ref())
+        .await?;
+    Ok(Json(ListResponse::from_vec(items)))
+}
+
+async fn get_agent_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid agent_session id", err))?;
+    let row = agent_session::Entity::find_by_id(id)
+        .one(state.db.as_ref())
+        .await?
+        .or_not_found("agent_session", format!("no agent_session with id {id}"))?;
+    Ok(Json(row))
+}
+
+// ── session_worker ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct SessionWorkerListQuery {
+    /// Filter to workers bound to a single agent session. Note that
+    /// `session_worker.agent_session_id` is nullable (spawn-to-first-
+    /// request window), so workers with no session yet are
+    /// unconditionally excluded by this filter — they're not
+    /// addressable by session anyway.
+    agent_session_id: Option<String>,
+    /// Filter to workers for a single plugin.
+    plugin_id: Option<String>,
+    /// `live=true`  → reaped_at IS NULL  (container is live or
+    ///                 believed-live; routing is allowed).
+    /// `live=false` → reaped_at IS NOT NULL (container is reaped;
+    ///                 row is audit-only, awaiting janitor sweep).
+    /// Omitted means "no filter on reaped_at".
+    live: Option<bool>,
+}
+
+async fn list_session_workers(
+    State(state): State<AppState>,
+    Query(params): Query<SessionWorkerListQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut query = session_worker::Entity::find();
+    if let Some(raw) = params.agent_session_id {
+        let agent_session_id = Uuid::from_str(&raw)
+            .map_err(|err| bad_request("invalid agent_session_id query param", err))?;
+        query = query.filter(session_worker::Column::AgentSessionId.eq(agent_session_id));
+    }
+    if let Some(raw) = params.plugin_id {
+        let plugin_id = Uuid::from_str(&raw)
+            .map_err(|err| bad_request("invalid plugin_id query param", err))?;
+        query = query.filter(session_worker::Column::PluginId.eq(plugin_id));
+    }
+    if let Some(live) = params.live {
+        query = if live {
+            query.filter(session_worker::Column::ReapedAt.is_null())
+        } else {
+            query.filter(session_worker::Column::ReapedAt.is_not_null())
+        };
+    }
+    // Order by spawned_at DESC: same posture as agent_sessions —
+    // most-recent activity first is the right default for an
+    // operator browsing live state. Tiebreak on id for
+    // determinism (multiple workers can spawn in the same tick).
+    let items = query
+        .order_by_desc(session_worker::Column::SpawnedAt)
+        .order_by_asc(session_worker::Column::Id)
+        .all(state.db.as_ref())
+        .await?;
+    Ok(Json(ListResponse::from_vec(items)))
+}
+
+async fn get_session_worker(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid session_worker id", err))?;
+    let row = session_worker::Entity::find_by_id(id)
+        .one(state.db.as_ref())
+        .await?
+        .or_not_found("session_worker", format!("no session_worker with id {id}"))?;
     Ok(Json(row))
 }
