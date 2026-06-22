@@ -42,7 +42,7 @@
 //! # Why this lives in `db/migration/tests/`, not a separate crate
 //!
 //! The end-to-end production-path proof for the migration container image
-//! lives in `containers.yml` (see the smoke step). This cargo test exists
+//! lives in `ci.yml` (see the smoke step). This cargo test exists
 //! for fast iteration on schema changes — it exercises the *rust* code path
 //! that the container image's CMD invokes, but skips the container build.
 
@@ -134,7 +134,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
     if !docker_available().await {
         eprintln!(
             "IGNORED migrator_up_lands_v0_schema_and_is_idempotent: \
-             docker not reachable; full proof runs in containers.yml smoke"
+             docker not reachable; full proof runs in ci.yml smoke"
         );
         return;
     }

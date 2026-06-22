@@ -1,8 +1,8 @@
 # Reusable per-crate CI workflow.
 #
-# Called from .github/workflows/containers.yml as a matrix fan-out so each
+# Called from .github/workflows/ci.yml as a matrix fan-out so each
 # botwork container crate (session-broker, config-broker, control-plane,
-# db/migration, bootstrap, admin-api, admin-ui) gets its own runner.
+# db/migration, admin-api, admin-ui) gets its own runner.
 #
 # Modelled after botworkz/mcp-extra's `_crate.yml`:
 #
@@ -10,9 +10,7 @@
 #     and the workspace `target/` across runs of this workflow. The cargo
 #     step below uses that cached state by mounting `~/.cargo` and the
 #     workspace into the per-crate `ci-tools` Docker image. `target/`
-#     stays on the host so it survives across pushes — this is the
-#     biggest win over round 1, where each runner cold-compiled the whole
-#     workspace inside earthly's buildkit instance.
+#     stays on the host so it survives across pushes.
 #
 #   * The per-crate Dockerfile is the single source of truth for what
 #     this crate needs at runtime AND what its CI toolchain needs. Both
@@ -22,10 +20,13 @@
 #
 #   * The runtime image build is pure-COPY (no cargo runs), so the bytes
 #     inside `botwork/<service>:local` are byte-identical to the binary
-#     the cargo step just tested. Round 3 will make the publish job
-#     consume the `<crate>-image` artifact uploaded here instead of
-#     rebuilding from source — the round-1 label-revision verification
-#     step in release.yml is what falls out at that point.
+#     the cargo step just tested. The image is then `docker save`d and
+#     uploaded as a `${service}-image` artifact so the `publish` job in
+#     ci.yml can `docker load` it, retag with the VERSION + latest, and
+#     push to GHCR — guaranteeing the bytes that smoke-tested here are
+#     the bytes that ship. The round-1 label-revision verification step
+#     that used to live in release.yml is structurally moot under this
+#     shape and has been removed.
 #
 # Inputs:
 #
@@ -41,8 +42,7 @@
 #                 that owns the Dockerfile.
 #   * service   — image suffix (`botwork/<service>:local`) and earthly
 #                 target name. Differs from `crate` for `db/migration`
-#                 (`db-migrate`) and for the artifact name; uniform for
-#                 the rest.
+#                 (`db-migrate`); uniform for the rest.
 #   * package   — cargo workspace package the image wraps
 #                 (`botwork-session-broker`, …). Passed to `cargo fmt/
 #                 clippy/test/build -p ${package}`.
@@ -52,13 +52,12 @@
 #                 the staging step is unambiguous.
 #   * needs-db-migrate
 #               — whether the smoke test wants `botwork/db-migrate:local`
-#                 present locally as a fixture. Today only `bootstrap`
-#                 and `admin-api` do; we build db-migrate via the
-#                 `BINARY_SOURCE=source` path on the same runner because
-#                 the per-crate matrix doesn't expose cross-job artifact
-#                 reuse. This is the one place the round-2 shape costs us
-#                 versus round 1 — fine tradeoff, the source build is
-#                 still cached by the docker layer cache.
+#                 present locally as a fixture. Today only `admin-api`
+#                 does; we build db-migrate via the `BINARY_SOURCE=source`
+#                 path on the same runner because the per-crate matrix
+#                 doesn't expose cross-job artifact reuse. Cheap enough
+#                 because the in-Dockerfile cargo cache mounts (registry,
+#                 git, target) keep the second build warm.
 
 name: Crate
 
@@ -90,8 +89,8 @@ on:
       needs-db-migrate:
         description: >-
           Build `botwork/db-migrate:local` on this runner before invoking
-          the smoke test. Set true for bootstrap/admin-api whose smokes
-          land the schema via db-migrate first.
+          the smoke test. Set true for smokes that land the schema via
+          db-migrate first.
         required: false
         type: boolean
         default: false
@@ -229,17 +228,15 @@ jobs:
           -f "${CRATE}/Dockerfile" \
           .
 
-    # ── Build db-migrate as a fixture (bootstrap / admin-api only) ──────────
-    # Their smoke tests land the schema before exercising their own
+    # ── Build db-migrate as a fixture (admin-api only today) ────────────────
+    # The admin-api smoke lands the schema before exercising its own
     # assertion path — the production sequence (db-migrate.service runs
-    # before bootstrap.service / admin-api.service on the vm). The
-    # round-1 workflow built this via `earthly +db-migrate-image` here;
-    # we use `docker buildx` with `BINARY_SOURCE=source` so the
-    # in-Dockerfile cargo cache mounts kick in. This is the only build
-    # path on the runner that re-compiles the workspace (the per-crate
-    # `cargo build` runs `-p ${PACKAGE}`); it's gated to two of seven
-    # runners and the docker layer cache absorbs the cost on subsequent
-    # pushes that don't move db/migration's source.
+    # before admin-api.service on the vm). The round-1 workflow built
+    # this via `earthly +db-migrate-image`; we use `docker buildx` with
+    # `BINARY_SOURCE=source` so the in-Dockerfile cargo cache mounts
+    # kick in. Cheap enough on a single runner; the canonical
+    # db-migrate image artifact comes from the dedicated db-migrate
+    # runner, not this fixture build.
     - name: Build db-migrate fixture image
       if: inputs.needs-db-migrate
       run: |
@@ -262,12 +259,39 @@ jobs:
         set -euo pipefail
         bash "${CRATE}/smoke.sh"
 
+    # ── Save runtime image as artifact ──────────────────────────────────────
+    # `docker save | gzip` the smoke-tested image so the publish job
+    # in ci.yml can `docker load` exactly these bytes — no rebuild, no
+    # round-trip to a registry, no possibility of label/cache drift.
+    #
+    # Artifact name keys on `service` (not `crate`) so `db-migrate-image`
+    # sits at the top of the artifact list rather than at the nested
+    # `db/migration-image` path. Publish job's `*-image` pattern picks
+    # this up on filesystem ordering.
+    #
+    # Compression is meaningful here: the distroless images compress to
+    # ~15-30 MiB (admin-ui being the largest because of the trunk bundle).
+    # Without gzip the upload + same-run download for publish would
+    # serialise ~7 × ~50 MiB.
+    - name: Save runtime image as artifact
+      run: |
+        set -euo pipefail
+        mkdir -p .ci-images
+        docker save "botwork/${SERVICE}:local" \
+          | gzip > ".ci-images/${SERVICE}.tar.gz"
+        ls -l ".ci-images/${SERVICE}.tar.gz"
+
+    - name: Upload runtime image artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.service }}-image
+        path: .ci-images/${{ inputs.service }}.tar.gz
+        if-no-files-found: error
+
     # ── Upload binary artifact ──────────────────────────────────────────────
-    # Round 3 will have `release.yml` download these, restage them under
-    # `.ci-prebuilt/<crate>/`, and re-run the prebuilt-image build to
-    # tag and push to GHCR — guaranteeing the bytes that smoke-tested
-    # here are the bytes that ship. For now this is a published
-    # artifact that downstream tooling can consume.
+    # Kept for downstream tooling that wants a bare binary (e.g. vm-side
+    # integration tests that don't want to docker-load a whole image).
+    # The publish path uses the image artifact above instead.
     - name: Upload release binary
       uses: actions/upload-artifact@v4
       with:

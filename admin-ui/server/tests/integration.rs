@@ -73,7 +73,7 @@ async fn admin_root_serves_bundle_when_trunk_has_run() {
             "IGNORED admin_root_serves_bundle_when_trunk_has_run: \
              admin-ui/wasm/dist/index.html missing — run `trunk build` in \
              admin-ui/wasm/ before `cargo test` to exercise this path \
-             locally; the full proof runs in containers.yml smoke."
+             locally; the full proof runs in ci.yml smoke."
         );
         return;
     }
@@ -108,7 +108,7 @@ async fn deep_link_falls_back_to_index() {
             "IGNORED deep_link_falls_back_to_index: \
              admin-ui/wasm/dist/index.html missing — run `trunk build` in \
              admin-ui/wasm/ before `cargo test` to exercise this path \
-             locally; the full proof runs in containers.yml smoke."
+             locally; the full proof runs in ci.yml smoke."
         );
         return;
     }

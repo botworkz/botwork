@@ -5,7 +5,7 @@
 //! seed, then drives the `AgentSessionWriter` API directly and asserts
 //! the row shape that comes back from the DB. This is the cargo-side
 //! fast-iteration test; the end-to-end container-image proof of the
-//! production write-through path lives in `containers.yml` once the
+//! production write-through path lives in `ci.yml` once the
 //! companion smoke step lands.
 //!
 //! Gated on docker the same way `db/migration/tests/migrate_smoke.rs`
@@ -153,7 +153,7 @@ async fn write_through_record_bind_agent_inserts_then_updates() {
     if !docker_available().await {
         eprintln!(
             "IGNORED write_through_record_bind_agent_inserts_then_updates: \
-             docker not reachable; full proof runs in containers.yml smoke"
+             docker not reachable; full proof runs in ci.yml smoke"
         );
         return;
     }
@@ -210,7 +210,7 @@ async fn write_through_lifecycle_active_grace_inactive_reactivate() {
     if !docker_available().await {
         eprintln!(
             "IGNORED write_through_lifecycle_active_grace_inactive_reactivate: \
-             docker not reachable; full proof runs in containers.yml smoke"
+             docker not reachable; full proof runs in ci.yml smoke"
         );
         return;
     }
@@ -289,7 +289,7 @@ async fn write_through_unknown_tenant_fails_soft() {
     if !docker_available().await {
         eprintln!(
             "IGNORED write_through_unknown_tenant_fails_soft: \
-             docker not reachable; full proof runs in containers.yml smoke"
+             docker not reachable; full proof runs in ci.yml smoke"
         );
         return;
     }

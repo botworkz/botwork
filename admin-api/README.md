@@ -143,7 +143,7 @@ runs `Migrator::up`, applies a fixture `bootstrap.yaml` (1 tenant,
 blob) via `botwork_bootstrap::apply`, binds the router on a random
 local port, and exercises every read endpoint plus the
 list-with-filter shape. End-to-end production-path proof lives in
-`.github/workflows/containers.yml` (the `admin-api` smoke step).
+`.github/workflows/ci.yml` (the `admin-api` smoke step).
 
 ## Container image
 

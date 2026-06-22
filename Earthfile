@@ -9,7 +9,7 @@ VERSION 0.8
 #
 # `GIT_SHA` is baked into the runtime image's
 # `org.opencontainers.image.revision` label. Local-dev passes an empty
-# string and gets a label-less image; release.yml + _crate.yml pass
+# string and gets a label-less image; `_crate.yml` passes
 # GITHUB_SHA.
 
 admin-api-image:

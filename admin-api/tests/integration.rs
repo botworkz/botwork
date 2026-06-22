@@ -14,7 +14,7 @@
 //! The tests are gated on docker the same way the bootstrap /
 //! migration smokes are: a clearly-labelled `IGNORED` line when
 //! docker isn't reachable keeps `cargo test` green on dev machines
-//! without docker. Full proof runs in `.github/workflows/containers.yml`.
+//! without docker. Full proof runs in `.github/workflows/ci.yml`.
 //!
 //! Fixture shape (kept in `SAMPLE_YAML` below):
 //!
@@ -207,7 +207,7 @@ async fn health_endpoint_reports_db_reachable() {
     let Some(server) = spawn_server().await else {
         eprintln!(
             "IGNORED health_endpoint_reports_db_reachable: \
-             docker not reachable; full proof runs in containers.yml smoke"
+             docker not reachable; full proof runs in ci.yml smoke"
         );
         return;
     };

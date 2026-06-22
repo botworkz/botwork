@@ -146,7 +146,8 @@ no test reads `BOTWORK_DATABASE_URL`. The integration test
 5. mutate a plugin image + a binding config, re-apply, assert the
    expected per-table update counts.
 
-End-to-end production-path proof lives in `bootstrap/smoke.sh` (invoked
-by the `bootstrap` job in `.github/workflows/containers.yml`), which
-mounts a fixture yaml into a real container, runs it, and checks the
-rows from a sibling psql.
+Post-#127 there is no bootstrap container any more; the equivalent
+end-to-end production-path proof now lives in admin-api's smoke test
+(invoked by the `admin-api` job in `.github/workflows/ci.yml`), which
+exercises the same `apply()` library function via the `botwork-tools
+bootstrap` CLI.
