@@ -94,7 +94,7 @@ the runtime stage carries only the final binary plus libgcc_s:
 ```bash
 earthly +admin-ui-image
 # or
-make -C containers admin-ui
+docker build -t botwork/admin-ui:local -f admin-ui/Dockerfile .
 ```
 
 ## Dev loop

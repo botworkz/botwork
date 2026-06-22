@@ -2,16 +2,10 @@
 #
 # Per-service container smoke test for `botwork/config-broker:local`.
 #
-# Called from .github/workflows/_container.yml after `earthly
-# +config-broker-image` has produced the local image. Lives next to
-# the Dockerfile so the per-service test surface is discoverable
-# alongside the per-service build surface; line-for-line identical
-# to the body that used to live inline in .github/workflows/containers.yml.
-#
 # Local reproduction:
 #
 #   earthly +config-broker-image
-#   bash containers/config-broker/smoke.sh
+#   bash config-broker/smoke.sh
 
 set -euo pipefail
 

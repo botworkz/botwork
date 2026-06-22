@@ -1,21 +1,17 @@
 # Build from the repository root:
 #   docker build -t botwork/bootstrap:local \
-#     -f containers/bootstrap/Dockerfile .
-
-# Pin builder to bookworm so the binary links against glibc 2.36, matching
-# the distroless base-nossl-debian12 runtime. The default rust:1.90-slim
-# tag is trixie-based (glibc 2.41) and produces binaries that fail on
-# the runtime with `GLIBC_2.39 not found`.
+#     -f bootstrap/Dockerfile .
 #
-# Symmetric with containers/db-migrate/Dockerfile and the other broker
-# images so the build behaviour is uniform across the workspace.
-FROM rust:1.90-slim-bookworm AS builder
+# Five-stage build supporting `BINARY_SOURCE=source` (default) and
+# `BINARY_SOURCE=prebuilt` (CI). See session-broker/Dockerfile for the
+# full rationale.
 
+ARG BINARY_SOURCE=source
+
+FROM rust:1.90-slim-bookworm AS rust-toolchain
+
+FROM rust-toolchain AS build-source
 WORKDIR /build
-
-# Workspace members copied wholesale: cargo workspace builds need every
-# member's manifest to resolve the lockfile, even when we only build one
-# package. Matches the pattern in the other broker Dockerfiles.
 COPY admin-api/ ./admin-api/
 COPY admin-core/ ./admin-core/
 COPY admin-ui/ ./admin-ui/
@@ -28,6 +24,7 @@ COPY launcher/ ./launcher/
 COPY tools/ ./tools/
 COPY Cargo.toml Cargo.lock ./
 
+# hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -35,7 +32,23 @@ RUN apt-get update \
 # Production-only binary. Bootstrap has no operator CLI — the binary
 # does exactly one thing: read bootstrap.yaml, upsert into postgres,
 # exit. See bootstrap/src/main.rs for the exit-code contract.
-RUN cargo build --release --package botwork-bootstrap --bin botwork-bootstrap
+RUN --mount=type=cache,id=botwork-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=botwork-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=botwork-target,target=/build/target,sharing=locked \
+    cargo build --release --locked --package botwork-bootstrap --bin botwork-bootstrap \
+    && install -D /build/target/release/botwork-bootstrap /out/botwork-bootstrap
+
+FROM scratch AS build-prebuilt
+COPY .ci-prebuilt/bootstrap/botwork-bootstrap /out/botwork-bootstrap
+
+FROM build-${BINARY_SOURCE} AS build
+
+FROM rust-toolchain AS ci-tools
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add rustfmt clippy
 
 # Runtime
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
@@ -44,14 +57,10 @@ ARG GIT_SHA=""
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.source="https://github.com/botworkz/botwork"
 
-# Rust's precompiled std links libgcc_s.so.1 as NEEDED (stack unwinder),
-# and panic = "abort" doesn't drop it because std itself was built
-# upstream with panic = "unwind". base-nossl doesn't ship libgcc_s,
-# so copy it from the builder. Identical to the other broker Dockerfiles.
-COPY --from=builder /lib/x86_64-linux-gnu/libgcc_s.so.1 \
+COPY --from=rust-toolchain /lib/x86_64-linux-gnu/libgcc_s.so.1 \
     /lib/x86_64-linux-gnu/libgcc_s.so.1
 
-COPY --from=builder /build/target/release/botwork-bootstrap \
+COPY --from=build /out/botwork-bootstrap \
     /usr/local/bin/botwork-bootstrap
 
 # No EXPOSE line: this image is a oneshot, not a server. Production

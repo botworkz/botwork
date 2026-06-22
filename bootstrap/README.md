@@ -114,7 +114,7 @@ exactly like `botwork-db-migrate.service`.
 
 ## Container image
 
-`botwork/bootstrap:local`, built from `containers/bootstrap/Dockerfile`.
+`botwork/bootstrap:local`, built from `bootstrap/Dockerfile`.
 
 Production invocation pattern:
 
@@ -146,6 +146,7 @@ no test reads `BOTWORK_DATABASE_URL`. The integration test
 5. mutate a plugin image + a binding config, re-apply, assert the
    expected per-table update counts.
 
-End-to-end production-path proof lives in `containers.yml` (the
-`bootstrap` smoke step), which mounts a fixture yaml into a real
-container, runs it, and checks the rows from a sibling psql.
+End-to-end production-path proof lives in `bootstrap/smoke.sh` (invoked
+by the `bootstrap` job in `.github/workflows/containers.yml`), which
+mounts a fixture yaml into a real container, runs it, and checks the
+rows from a sibling psql.
