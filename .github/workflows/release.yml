@@ -204,7 +204,7 @@ jobs:
         docker tag botwork/db-migrate:local "${REPO}:${VERSION}"
         docker tag botwork/db-migrate:local "${REPO}:latest"
         docker push "${REPO}:${VERSION}"
-        docker push ":latest"
+        docker push "${REPO}:latest"
 
     # ── Container: build and push admin-api ─────────────────────────────────
     # Symmetric to config-broker. admin-api is an HTTP+JSON server that
