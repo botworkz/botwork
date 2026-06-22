@@ -71,8 +71,8 @@ fn app_state_with_plugins_and_endpoints(
         // additional DB-bound handles next to
         // agent_session_writer. Test builders pass `None` the
         // same way to stay hermetic — production populates
-        // both via `run()` once the `connect_from_env()`
-        // handle is in hand.
+        // both via `run()` once the postgres handle
+        // is in hand (see lib.rs).
         session_worker_writer: None,
         db: None,
     }
@@ -131,8 +131,8 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         // additional DB-bound handles next to
         // agent_session_writer. Test builders pass `None` the
         // same way to stay hermetic — production populates
-        // both via `run()` once the `connect_from_env()`
-        // handle is in hand.
+        // both via `run()` once the postgres handle
+        // is in hand (see lib.rs).
         session_worker_writer: None,
         db: None,
     }
@@ -2029,8 +2029,8 @@ fn app_state_with_session_registry(
         // additional DB-bound handles next to
         // agent_session_writer. Test builders pass `None` the
         // same way to stay hermetic — production populates
-        // both via `run()` once the `connect_from_env()`
-        // handle is in hand.
+        // both via `run()` once the postgres handle
+        // is in hand (see lib.rs).
         session_worker_writer: None,
         db: None,
     }
