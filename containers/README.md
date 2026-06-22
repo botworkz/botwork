@@ -64,6 +64,28 @@ This produces `botwork/session-broker:local`, `botwork/config-broker:local`,
 `FROM ../botwork+<svc>-image`, so the `+<svc>-image` target names and
 `botwork/<svc>:local` tags are a stable contract.
 
+## Per-service smoke tests
+
+Each container has a sibling `smoke.sh` that asserts the image's
+production-path contract end-to-end. The same script is the body of
+the `Smoke test` step in `.github/workflows/_container.yml`, so a
+local run mirrors CI exactly:
+
+```bash
+# Build with EarthBuild (see above) or `make -C containers`, then:
+bash containers/session-broker/smoke.sh
+bash containers/config-broker/smoke.sh
+bash containers/control-plane/smoke.sh
+bash containers/db-migrate/smoke.sh
+bash containers/bootstrap/smoke.sh          # also needs db-migrate:local
+bash containers/admin-api/smoke.sh          # also needs db-migrate:local
+bash containers/admin-ui/smoke.sh
+```
+
+The bootstrap and admin-api smokes both run `db-migrate:local` first
+as a fixture (to land the schema before they exercise their own
+assertions), so the local-dev preconditions are the same as on CI.
+
 ## Produce tarballs
 
 Downstream consumers can export the locally built images as tarballs with:
