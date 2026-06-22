@@ -3,38 +3,28 @@
 //! `botwork-admin-ui-wasm` — Leptos CSR client for the operator-facing
 //! admin panel.
 //!
-//! # PR2 shape (RFE #106)
+//! # PR3 shape (RFE #106)
 //!
-//! Lays down the scaffolding that the rest of the admin UI builds on:
+//! Builds on PR2's tenant scaffold by wiring the remaining five
+//! entities end-to-end:
 //!
-//! * **Router** — `leptos_router` under `/admin/`. Five top-level
-//!   nav targets (Dashboard / Tenants / Workspaces / Plugins /
-//!   Bindings / Sessions / Workers) but only the first two are
-//!   wired to real pages this round; the rest go to "coming soon"
-//!   stubs that double as a TODO list.
-//! * **HTTP client** — [`api::Client`] wraps `fetch` and decodes the
-//!   admin-api wire envelopes (`{items, total}`, `{error, message,
-//!   dependents?}`) into typed [`api::ApiError`] / [`api::ListResponse`]
-//!   so handlers don't reach for `wasm-bindgen` directly.
-//! * **Layout chrome** — left sidebar + main content slot via
-//!   [`layout::Shell`], single source of truth for "every page
-//!   lives inside this frame."
-//! * **Tenant CRUD** — list / detail / create / delete-confirm,
-//!   exercising every wire-contract subtlety the rest of the
-//!   entities will share: the `{items, total}` envelope on list,
-//!   `if_unmodified_since` lock token on update, `409 has_dependents`
-//!   rendering on delete, the `x-botwork-admin` operator header
-//!   on every mutation.
+//! * Workspaces — full CRUD, parent-tenant filter on list, dependents
+//!   on delete (bindings + agent_sessions cascade).
+//! * Plugins — full CRUD, JSON-textarea editors for `env` / `resources`
+//!   / `egress`, dependents on delete (workspace_plugin RESTRICT).
+//! * Bindings (workspace_plugin) — full CRUD on the composite-PK
+//!   shape, live-state-gate handling on delete + update.
+//! * Sessions (agent_session) — list + by-id, filter by state.
+//! * Workers (session_worker) — list + by-id, filter by live status.
 //!
-//! Picking tenant for round 1 is deliberate: simplest schema, simplest
-//! relations, every wire-contract quirk still applies. The next 5
-//! entities will repeat the layout, which is when the abstraction
-//! shape becomes obvious — that abstraction lands in PR3, after we
-//! have one concrete instance in code to refactor toward.
+//! Sessions + workers are READ-ONLY: session-broker owns the writes
+//! and the UI surfaces only what's safe to expose through HTTP. See
+//! the `sessions` / `workers` page docstrings for the per-entity
+//! rationale.
 //!
 //! # Why CSR
 //!
-//! See `lib.rs` PR1 commit for the rationale. Unchanged here.
+//! See `lib.rs` PR1 commit for the rationale. Unchanged.
 
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -45,10 +35,9 @@ pub mod pages;
 
 /// Root component.
 ///
-/// Mounts the router. The router's [`leptos_router::components::Routes`]
-/// renders the page matching the current path under
-/// [`layout::Shell`]; the shell owns sidebar + topbar and slots the
-/// matched page into its main area.
+/// Mounts the router. Routes that exist in the route table but
+/// haven't been built yet 404 cleanly via the catch-all; nothing
+/// magic about "stub" pages — every entity is now real.
 #[component]
 pub fn App() -> impl IntoView {
     use leptos_router::components::{Route, Router, Routes};
@@ -57,53 +46,56 @@ pub fn App() -> impl IntoView {
     view! {
         <Router base="/admin">
             <layout::Shell>
-                <Routes fallback=|| view! {
-                    <pages::NotFound />
-                }>
+                <Routes fallback=|| view! { <pages::NotFound /> }>
+                    <Route path=path!("/") view=pages::Dashboard />
+
+                    // Tenants (PR2 carry-over).
+                    <Route path=path!("/tenants") view=pages::tenants::List />
+                    <Route path=path!("/tenants/new") view=pages::tenants::Create />
+                    <Route path=path!("/tenants/:id") view=pages::tenants::Detail />
+                    <Route path=path!("/tenants/:id/edit") view=pages::tenants::Edit />
+                    <Route path=path!("/tenants/:id/delete") view=pages::tenants::DeleteConfirm />
+
+                    // Workspaces.
+                    <Route path=path!("/workspaces") view=pages::workspaces::List />
+                    <Route path=path!("/workspaces/new") view=pages::workspaces::Create />
+                    <Route path=path!("/workspaces/:id") view=pages::workspaces::Detail />
+                    <Route path=path!("/workspaces/:id/edit") view=pages::workspaces::Edit />
                     <Route
-                        path=path!("/")
-                        view=pages::Dashboard
+                        path=path!("/workspaces/:id/delete")
+                        view=pages::workspaces::DeleteConfirm
+                    />
+
+                    // Plugins.
+                    <Route path=path!("/plugins") view=pages::plugins::List />
+                    <Route path=path!("/plugins/new") view=pages::plugins::Create />
+                    <Route path=path!("/plugins/:id") view=pages::plugins::Detail />
+                    <Route path=path!("/plugins/:id/edit") view=pages::plugins::Edit />
+                    <Route path=path!("/plugins/:id/delete") view=pages::plugins::DeleteConfirm />
+
+                    // Bindings (workspace_plugin, composite PK).
+                    <Route path=path!("/bindings") view=pages::bindings::List />
+                    <Route path=path!("/bindings/new") view=pages::bindings::Create />
+                    <Route
+                        path=path!("/bindings/:workspace_id/:plugin_id")
+                        view=pages::bindings::Detail
                     />
                     <Route
-                        path=path!("/tenants")
-                        view=pages::tenants::List
+                        path=path!("/bindings/:workspace_id/:plugin_id/edit")
+                        view=pages::bindings::Edit
                     />
                     <Route
-                        path=path!("/tenants/new")
-                        view=pages::tenants::Create
+                        path=path!("/bindings/:workspace_id/:plugin_id/delete")
+                        view=pages::bindings::DeleteConfirm
                     />
-                    <Route
-                        path=path!("/tenants/:id")
-                        view=pages::tenants::Detail
-                    />
-                    <Route
-                        path=path!("/tenants/:id/edit")
-                        view=pages::tenants::Edit
-                    />
-                    <Route
-                        path=path!("/tenants/:id/delete")
-                        view=pages::tenants::DeleteConfirm
-                    />
-                    <Route
-                        path=path!("/workspaces")
-                        view=pages::stub::workspaces
-                    />
-                    <Route
-                        path=path!("/plugins")
-                        view=pages::stub::plugins
-                    />
-                    <Route
-                        path=path!("/bindings")
-                        view=pages::stub::bindings
-                    />
-                    <Route
-                        path=path!("/sessions")
-                        view=pages::stub::sessions
-                    />
-                    <Route
-                        path=path!("/workers")
-                        view=pages::stub::workers
-                    />
+
+                    // Sessions (read-only).
+                    <Route path=path!("/sessions") view=pages::sessions::List />
+                    <Route path=path!("/sessions/:id") view=pages::sessions::Detail />
+
+                    // Workers (read-only).
+                    <Route path=path!("/workers") view=pages::workers::List />
+                    <Route path=path!("/workers/:id") view=pages::workers::Detail />
                 </Routes>
             </layout::Shell>
         </Router>

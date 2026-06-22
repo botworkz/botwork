@@ -3,18 +3,20 @@
 //! Page components.
 //!
 //! Top-level pages are mounted by the [`crate::App`] router and each
-//! one renders inside the layout [`crate::layout::Shell`]. v0 wires
-//! `Dashboard`, the full `tenants::*` flow, and stubbed pages for
-//! the rest of the entities (so the sidebar links go somewhere
-//! recognisable).
+//! one renders inside the layout [`crate::layout::Shell`]. PR3 wires
+//! every entity end-to-end; there are no stub pages any more.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api;
 
-pub mod stub;
+pub mod bindings;
+pub mod plugins;
+pub mod sessions;
 pub mod tenants;
+pub mod workers;
+pub mod workspaces;
 
 /// Generic loading / error states. Pulled out so every list/detail
 /// page renders failures uniformly without duplicating match arms.
@@ -31,29 +33,58 @@ pub enum Async<T> {
 }
 
 /// Render either children or a placeholder, depending on the
-/// `Async` state. Used by each list/detail page; keeps the
+/// `Async` state. Used by every list/detail page; keeps the
 /// "Loading…" / "Error: …" rendering uniform.
-///
-/// The `children` closure returns [`AnyView`] rather than a generic
-/// `IntoView` because the type inference on the latter trips on
-/// complex view trees (forms with event handlers, in particular).
-/// Callers are expected to `.into_any()` their `view!` output.
 #[component]
-pub fn AsyncView<T: Clone + Send + Sync + 'static>(
+pub fn AsyncView<T: Clone + Send + Sync + 'static, IV: IntoView + 'static>(
     /// The async signal to render against. Owned by the parent.
     state: ReadSignal<Async<T>>,
     /// Renderer for the loaded case.
-    children: Box<dyn Fn(T) -> AnyView + Send + Sync>,
+    children: Box<dyn Fn(T) -> IV + Send + Sync>,
 ) -> impl IntoView {
     view! {
         {move || match state.get() {
             Async::Loading => view! { <p class="loading">"Loading…"</p> }.into_any(),
-            Async::Loaded(v) => children(v),
+            Async::Loaded(v) => children(v).into_any(),
             Async::Failed(err) => view! {
                 <p class="error">"Error: " {err.message().to_string()}</p>
             }.into_any(),
         }}
     }
+}
+
+/// Render an admin-api `dependents` payload from a `409 has_dependents`
+/// error envelope. The wire shape is `[{kind, id, name}]` today; we
+/// keep the renderer defensive so a future admin-api version that
+/// adds fields doesn't break the UI.
+///
+/// Lifted out of `tenants.rs` so workspaces / plugins / bindings can
+/// share it — every delete-confirm page renders the same shape.
+pub fn render_dependents(deps: &serde_json::Value) -> AnyView {
+    let arr = deps.as_array().cloned().unwrap_or_default();
+    if arr.is_empty() {
+        return view! { <p class="muted">"(no dependent details returned)"</p> }.into_any();
+    }
+    view! {
+        <ul class="dependents">
+            {arr.into_iter().map(|item| {
+                let kind = item.get("kind").and_then(|v| v.as_str())
+                    .unwrap_or("?").to_string();
+                let name = item.get("name").and_then(|v| v.as_str())
+                    .unwrap_or("?").to_string();
+                let id = item.get("id").and_then(|v| v.as_str())
+                    .unwrap_or("?").to_string();
+                view! {
+                    <li>
+                        <strong>{kind}</strong>
+                        " " {name} " "
+                        <code class="muted">{id}</code>
+                    </li>
+                }
+            }).collect_view()}
+        </ul>
+    }
+    .into_any()
 }
 
 /// Catch-all 404 — rendered when the router has no match for the
@@ -71,7 +102,7 @@ pub fn NotFound() -> impl IntoView {
     }
 }
 
-/// Dashboard — health card + per-entity counts.
+/// Dashboard — entity counts.
 ///
 /// Counts are derived from the `total` field on each list endpoint's
 /// envelope, so this page issues one GET per entity at mount. Cheap
@@ -81,10 +112,45 @@ pub fn NotFound() -> impl IntoView {
 #[component]
 pub fn Dashboard() -> impl IntoView {
     let (tenants, set_tenants) = signal::<Async<usize>>(Async::Loading);
+    let (workspaces, set_workspaces) = signal::<Async<usize>>(Async::Loading);
+    let (plugins, set_plugins) = signal::<Async<usize>>(Async::Loading);
+    let (bindings, set_bindings) = signal::<Async<usize>>(Async::Loading);
+    let (sessions, set_sessions) = signal::<Async<usize>>(Async::Loading);
+    let (workers, set_workers) = signal::<Async<usize>>(Async::Loading);
 
     Effect::new(move |_| {
         spawn_local(async move {
             set_tenants.set(match api::list_tenants().await {
+                Ok(r) => Async::Loaded(r.total),
+                Err(err) => Async::Failed(err),
+            });
+        });
+        spawn_local(async move {
+            set_workspaces.set(match api::list_workspaces(None).await {
+                Ok(r) => Async::Loaded(r.total),
+                Err(err) => Async::Failed(err),
+            });
+        });
+        spawn_local(async move {
+            set_plugins.set(match api::list_plugins().await {
+                Ok(r) => Async::Loaded(r.total),
+                Err(err) => Async::Failed(err),
+            });
+        });
+        spawn_local(async move {
+            set_bindings.set(match api::list_workspace_plugins(None, None).await {
+                Ok(r) => Async::Loaded(r.total),
+                Err(err) => Async::Failed(err),
+            });
+        });
+        spawn_local(async move {
+            set_sessions.set(match api::list_agent_sessions(None, None, None).await {
+                Ok(r) => Async::Loaded(r.total),
+                Err(err) => Async::Failed(err),
+            });
+        });
+        spawn_local(async move {
+            set_workers.set(match api::list_session_workers(None, None, None).await {
                 Ok(r) => Async::Loaded(r.total),
                 Err(err) => Async::Failed(err),
             });
@@ -107,21 +173,44 @@ pub fn Dashboard() -> impl IntoView {
                     <dd>
                         <AsyncView
                             state=tenants
-                            children=Box::new(|n: usize| {
-                                view! { <span>{n}</span> }.into_any()
-                            })
+                            children=Box::new(|n| view! { <span>{n}</span> })
                         />
                     </dd>
                     <dt>"Workspaces"</dt>
-                    <dd><span class="muted">"(PR3)"</span></dd>
+                    <dd>
+                        <AsyncView
+                            state=workspaces
+                            children=Box::new(|n| view! { <span>{n}</span> })
+                        />
+                    </dd>
                     <dt>"Plugins"</dt>
-                    <dd><span class="muted">"(PR3)"</span></dd>
+                    <dd>
+                        <AsyncView
+                            state=plugins
+                            children=Box::new(|n| view! { <span>{n}</span> })
+                        />
+                    </dd>
                     <dt>"Bindings"</dt>
-                    <dd><span class="muted">"(PR3)"</span></dd>
+                    <dd>
+                        <AsyncView
+                            state=bindings
+                            children=Box::new(|n| view! { <span>{n}</span> })
+                        />
+                    </dd>
                     <dt>"Sessions"</dt>
-                    <dd><span class="muted">"(PR3)"</span></dd>
+                    <dd>
+                        <AsyncView
+                            state=sessions
+                            children=Box::new(|n| view! { <span>{n}</span> })
+                        />
+                    </dd>
                     <dt>"Workers"</dt>
-                    <dd><span class="muted">"(PR3)"</span></dd>
+                    <dd>
+                        <AsyncView
+                            state=workers
+                            children=Box::new(|n| view! { <span>{n}</span> })
+                        />
+                    </dd>
                 </dl>
             </section>
         </article>
