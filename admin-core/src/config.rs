@@ -1,6 +1,11 @@
-//! Strongly-typed view of `bootstrap.yaml` and its load + validate path.
+//! Yaml-shape parser + list-level validation for the bootstrap config.
 //!
-//! The yaml shape (post-PR2):
+//! Lifted from `botwork-bootstrap/src/config.rs` so the same shape can
+//! be parsed by `botwork-tools` (which talks to admin-api over HTTP)
+//! without depending on the bootstrap crate (which drags sea-orm and
+//! tokio multi-thread into anything that links it).
+//!
+//! The yaml shape (unchanged from the bootstrap copy):
 //!
 //! ```yaml
 //! tenants:
@@ -33,22 +38,30 @@
 //!       ports: [443]
 //! ```
 //!
-//! Top-level plugin entries carry the full set of fields that the
-//! config-broker `/resolve` wire shape exposes; the validation rules
-//! live in `botwork-admin-core::plugin_spec` (RFE #106 PR2). Per-
-//! binding `config:` lives under
-//! `tenants[].workspaces[].plugins[].config` and is validated
-//! separately by the same crate.
+//! # Scope split with [`crate::plugin_spec`]
+//!
+//! Per-entry plugin / binding rules live in [`crate::plugin_spec`] and
+//! emit a [`crate::ValidationError`]. List-level rules — duplicate
+//! tenant/workspace/plugin names, unknown plugin references from
+//! bindings — live HERE because they're the caller's tree walk.
+//! `from_raw` calls into `plugin_spec` for per-entry validation and
+//! catches list-level issues in its own pass.
+//!
+//! # Stability
+//!
+//! This is the production yaml contract. The shape is `#[serde(deny_unknown_fields)]`
+//! at every level so a typo in a field name is a parse failure, not a
+//! silently-dropped field. Same posture admin-api's write bodies use.
 
 use std::collections::HashSet;
 use std::path::Path;
 
-use botwork_admin_core::plugin_spec::{
-    validate_one, validate_workspace_plugin_config, RawPluginEntry, ValidatedPlugin,
-};
 use serde::{Deserialize, Serialize};
 
-use crate::error::BootstrapError;
+use crate::error::ValidationError;
+use crate::plugin_spec::{
+    validate_one, validate_workspace_plugin_config, RawPluginEntry, ValidatedPlugin,
+};
 
 /// Top-level shape: a list of tenants (each with its workspaces and
 /// plugin bindings) plus a flat list of globally-named plugins.
@@ -82,13 +95,21 @@ pub struct WorkspaceRaw {
 pub struct WorkspacePluginRaw {
     pub name: String,
     /// Optional per-binding config blob (YAML mapping). Validated by
-    /// `botwork_admin_core::validate_workspace_plugin_config` against
-    /// the same size cap as static env values.
+    /// [`validate_workspace_plugin_config`] against the same size cap
+    /// as static env values.
     #[serde(default)]
     pub config: Option<serde_yaml::Value>,
 }
 
-/// Fully-validated bootstrap config, ready to apply to the DB.
+/// Fully-validated bootstrap config, ready to apply.
+///
+/// What "ready to apply" means depends on the consumer:
+/// * `botwork-bootstrap` runs a sea-orm transaction that upserts each
+///   row.
+/// * `botwork-tools bootstrap` walks the tree and translates each
+///   entry into POST/PUT calls against admin-api.
+///
+/// The validated shape is the same; only the write path differs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapConfig {
     pub tenants: Vec<TenantEntry>,
@@ -113,33 +134,56 @@ pub struct WorkspacePluginEntry {
     pub config: Option<serde_json::Value>,
 }
 
+/// Errors specific to loading/parsing a bootstrap file from disk.
+///
+/// These are NOT validation errors (which use [`ValidationError`]) —
+/// they're filesystem / yaml-parse failures that exist before
+/// validation runs.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadError {
+    #[error("bootstrap config not found: {0}")]
+    NotFound(String),
+
+    #[error("failed to read bootstrap config {path}: {err}")]
+    Read {
+        path: String,
+        #[source]
+        err: std::io::Error,
+    },
+
+    #[error("failed to parse bootstrap config: {0}")]
+    Parse(#[from] serde_yaml::Error),
+
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+}
+
 impl BootstrapConfig {
     /// Read and validate a `bootstrap.yaml` from disk.
-    pub fn load(path: &Path) -> Result<Self, BootstrapError> {
+    pub fn load(path: &Path) -> Result<Self, LoadError> {
         if !path.exists() {
-            return Err(BootstrapError::ConfigNotFound(path.display().to_string()));
+            return Err(LoadError::NotFound(path.display().to_string()));
         }
-        let bytes = std::fs::read_to_string(path).map_err(|err| BootstrapError::ConfigRead {
+        let bytes = std::fs::read_to_string(path).map_err(|err| LoadError::Read {
             path: path.display().to_string(),
             err,
         })?;
-        let raw: BootstrapConfigRaw =
-            serde_yaml::from_str(&bytes).map_err(BootstrapError::ConfigParse)?;
-        Self::from_raw(raw)
+        let raw: BootstrapConfigRaw = serde_yaml::from_str(&bytes)?;
+        Ok(Self::from_raw(raw)?)
     }
 
     /// Lower a fully-parsed raw config into a fully-validated one.
-    /// Pulled out of `load` so tests can construct `BootstrapConfigRaw`
-    /// directly without going through the on-disk path.
-    pub fn from_raw(raw: BootstrapConfigRaw) -> Result<Self, BootstrapError> {
-        // Per-entry validation lives in admin-core; dup-name detection
-        // lives here (it's a list-level rule the validator doesn't own).
+    /// Pulled out of [`Self::load`] so tests can construct a
+    /// `BootstrapConfigRaw` directly without going through disk.
+    pub fn from_raw(raw: BootstrapConfigRaw) -> Result<Self, ValidationError> {
+        // Per-entry validation lives in plugin_spec; list-level
+        // duplicate / dangling-ref detection lives here.
         let mut plugins = Vec::with_capacity(raw.plugins.len());
         let mut seen_plugin: HashSet<&str> = HashSet::new();
         for entry in &raw.plugins {
-            let validated = validate_one(entry)?; // -> ValidatedPlugin via admin-core
+            let validated = validate_one(entry)?;
             if !seen_plugin.insert(entry.name.as_str()) {
-                return Err(BootstrapError::DuplicatePlugin(entry.name.clone()));
+                return Err(ValidationError::DuplicatePlugin(entry.name.clone()));
             }
             plugins.push(validated);
         }
@@ -150,10 +194,10 @@ impl BootstrapConfig {
         for tenant in &raw.tenants {
             let tenant_name = tenant.name.trim().to_string();
             if tenant_name.is_empty() {
-                return Err(BootstrapError::EmptyName("tenants[].name"));
+                return Err(ValidationError::EmptyName("tenants[].name"));
             }
             if !seen_tenant.insert(tenant.name.as_str()) {
-                return Err(BootstrapError::DuplicateTenant(tenant_name));
+                return Err(ValidationError::DuplicateTenant(tenant_name));
             }
 
             let mut workspaces = Vec::with_capacity(tenant.workspaces.len());
@@ -161,10 +205,10 @@ impl BootstrapConfig {
             for workspace in &tenant.workspaces {
                 let ws_name = workspace.name.trim().to_string();
                 if ws_name.is_empty() {
-                    return Err(BootstrapError::EmptyName("tenants[].workspaces[].name"));
+                    return Err(ValidationError::EmptyName("tenants[].workspaces[].name"));
                 }
                 if !seen_workspace.insert(workspace.name.as_str()) {
-                    return Err(BootstrapError::DuplicateWorkspace {
+                    return Err(ValidationError::DuplicateWorkspace {
                         tenant: tenant_name.clone(),
                         workspace: ws_name,
                     });
@@ -175,19 +219,19 @@ impl BootstrapConfig {
                 for binding in &workspace.plugins {
                     let binding_name = binding.name.trim().to_string();
                     if binding_name.is_empty() {
-                        return Err(BootstrapError::EmptyName(
+                        return Err(ValidationError::EmptyName(
                             "tenants[].workspaces[].plugins[].name",
                         ));
                     }
                     if !seen_binding.insert(binding.name.as_str()) {
-                        return Err(BootstrapError::DuplicateBinding {
+                        return Err(ValidationError::DuplicateBinding {
                             tenant: tenant_name.clone(),
                             workspace: ws_name.clone(),
                             plugin: binding_name,
                         });
                     }
                     if !plugin_names.contains(binding.name.as_str()) {
-                        return Err(BootstrapError::UnknownPluginRef {
+                        return Err(ValidationError::UnknownPluginRef {
                             tenant: tenant_name.clone(),
                             workspace: ws_name.clone(),
                             plugin: binding_name,
@@ -221,18 +265,15 @@ impl BootstrapConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
-    fn yaml_to_file(yaml: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(yaml.as_bytes()).unwrap();
-        f
+    fn parse(yaml: &str) -> Result<BootstrapConfig, ValidationError> {
+        let raw: BootstrapConfigRaw = serde_yaml::from_str(yaml).expect("yaml parse");
+        BootstrapConfig::from_raw(raw)
     }
 
     #[test]
     fn round_trips_minimal_well_formed_yaml() {
-        let f = yaml_to_file(
+        let cfg = parse(
             r#"
 tenants:
 - name: phlax
@@ -255,9 +296,8 @@ plugins:
     - host: example.com
       ports: [443]
 "#,
-        );
-
-        let cfg = BootstrapConfig::load(f.path()).expect("load");
+        )
+        .expect("validate");
         assert_eq!(cfg.tenants.len(), 1);
         assert_eq!(cfg.tenants[0].workspaces[0].plugins[1].name, "mcp-fetch");
         assert_eq!(
@@ -268,7 +308,6 @@ plugins:
             "https://example.com"
         );
         assert_eq!(cfg.plugins.len(), 2);
-        // Defaults filled in by admin-core::validate_one.
         let bash = cfg.plugins.iter().find(|p| p.name == "mcp-bash").unwrap();
         assert_eq!(bash.port, 8000);
         assert_eq!(bash.path, "/");
@@ -278,7 +317,7 @@ plugins:
 
     #[test]
     fn fails_on_unknown_plugin_ref() {
-        let f = yaml_to_file(
+        let err = parse(
             r#"
 tenants:
 - name: phlax
@@ -292,15 +331,14 @@ plugins:
   image: ghcr.io/example/mcp-bash:1.0
   egress: none
 "#,
-        );
-
-        let err = BootstrapConfig::load(f.path()).unwrap_err();
-        assert!(matches!(err, BootstrapError::UnknownPluginRef { .. }));
+        )
+        .unwrap_err();
+        assert!(matches!(err, ValidationError::UnknownPluginRef { .. }));
     }
 
     #[test]
     fn fails_on_duplicate_workspace_in_tenant() {
-        let f = yaml_to_file(
+        let err = parse(
             r#"
 tenants:
 - name: phlax
@@ -310,16 +348,14 @@ tenants:
 
 plugins: []
 "#,
-        );
-
-        let err = BootstrapConfig::load(f.path()).unwrap_err();
-        assert!(matches!(err, BootstrapError::DuplicateWorkspace { .. }));
+        )
+        .unwrap_err();
+        assert!(matches!(err, ValidationError::DuplicateWorkspace { .. }));
     }
 
     #[test]
     fn allows_default_workspace_across_distinct_tenants() {
-        // Two tenants, both with a `mcp` workspace.
-        let f = yaml_to_file(
+        parse(
             r#"
 tenants:
 - name: phlax
@@ -331,36 +367,22 @@ tenants:
 
 plugins: []
 "#,
-        );
-
-        BootstrapConfig::load(f.path()).expect("validate");
-    }
-
-    #[test]
-    fn rejects_unknown_top_level_field() {
-        let f = yaml_to_file(
-            r#"
-tenants: []
-plugins: []
-tennents: []   # typo
-"#,
-        );
-        let err = BootstrapConfig::load(f.path()).unwrap_err();
-        assert!(matches!(err, BootstrapError::ConfigParse(_)));
+        )
+        .expect("validate");
     }
 
     #[test]
     fn fails_on_missing_egress_in_plugin() {
-        let f = yaml_to_file(
+        let err = parse(
             r#"
 tenants: []
 plugins:
 - name: mcp-bash
   image: ghcr.io/example/mcp-bash:1.0
 "#,
-        );
-        let err = BootstrapConfig::load(f.path()).unwrap_err();
-        assert!(matches!(err, BootstrapError::PluginInvalid { .. }));
+        )
+        .unwrap_err();
+        assert!(matches!(err, ValidationError::PluginInvalid { .. }));
     }
 
     #[test]
@@ -383,14 +405,13 @@ plugins:
   egress: none
 "#
         );
-        let f = yaml_to_file(&yaml);
-        let err = BootstrapConfig::load(f.path()).unwrap_err();
-        assert!(matches!(err, BootstrapError::BindingInvalid { .. }));
+        let err = parse(&yaml).unwrap_err();
+        assert!(matches!(err, ValidationError::BindingInvalid { .. }));
     }
 
     #[test]
     fn fails_on_duplicate_plugin_name() {
-        let f = yaml_to_file(
+        let err = parse(
             r#"
 tenants: []
 plugins:
@@ -401,8 +422,45 @@ plugins:
   image: ghcr.io/example/mcp-bash:2.0
   egress: all
 "#,
-        );
-        let err = BootstrapConfig::load(f.path()).unwrap_err();
-        assert!(matches!(err, BootstrapError::DuplicatePlugin(_)));
+        )
+        .unwrap_err();
+        assert!(matches!(err, ValidationError::DuplicatePlugin(_)));
+    }
+
+    #[test]
+    fn fails_on_duplicate_tenant_name() {
+        let err = parse(
+            r#"
+tenants:
+- name: phlax
+- name: phlax
+
+plugins: []
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ValidationError::DuplicateTenant(_)));
+    }
+
+    #[test]
+    fn fails_on_duplicate_binding_within_workspace() {
+        let err = parse(
+            r#"
+tenants:
+- name: phlax
+  workspaces:
+  - name: mcp
+    plugins:
+    - name: mcp-bash
+    - name: mcp-bash
+
+plugins:
+- name: mcp-bash
+  image: ghcr.io/example/mcp-bash:1.0
+  egress: none
+"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ValidationError::DuplicateBinding { .. }));
     }
 }

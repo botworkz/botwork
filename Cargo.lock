@@ -485,7 +485,6 @@ dependencies = [
  "chrono",
  "sea-orm",
  "sea-orm-migration",
- "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
@@ -641,10 +640,16 @@ dependencies = [
 name = "botwork-tools"
 version = "0.0.0"
 dependencies = [
+ "botwork-admin-core",
+ "chrono",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -3113,7 +3118,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",

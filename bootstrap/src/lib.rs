@@ -5,17 +5,20 @@
 //! `botwork-db-migrate.service` (which lands the schema) and
 //! `botwork-config-broker.service` (which reads from the DB).
 //!
-//! The yaml shape carries the full plugin spec (image, port, path,
-//! upstream_auth, env, resources, egress) as RFE #101 PR2; per-entry
-//! validation rules live in `botwork-admin-core` (RFE #106 PR2)
-//! shared with `botwork-admin-api`. List-level rules (duplicate
-//! names, unknown plugin refs in bindings) live here.
+//! The yaml shape, the per-entry validators, and the list-level
+//! tree validation all live in `botwork-admin-core`. This crate
+//! is just the sea-orm writer that walks a validated tree and
+//! upserts rows.
 //!
 //! # Lifetime
 //!
-//! Bootstrap is **deliberately throwaway**. When admin-api lands the
-//! whole crate goes away (one config file, one shape, no
-//! subcommands, no clever reconciliation — only upserts).
+//! Bootstrap is **deliberately throwaway**. RFE #106 PR4 ships
+//! `botwork-tools bootstrap` as the replacement: same yaml,
+//! HTTP-POSTed through admin-api instead of sea-orm-written
+//! directly. The vm-side and space-side cutovers happen as
+//! follow-up PRs. This crate stays in the workspace through the
+//! cutover so its tests remain available; it goes away once the
+//! systemd unit moves over.
 //!
 //! # Idempotency
 //!
@@ -32,20 +35,18 @@
 //! unit restarts at every boot, and we want "we re-ran bootstrap"
 //! to never be a behaviour change.
 
-pub mod config;
 pub mod error;
 pub mod runner;
 
-pub use config::{
-    BootstrapConfig, BootstrapConfigRaw, TenantEntry, WorkspaceEntry, WorkspacePluginEntry,
-};
 pub use error::BootstrapError;
 
-// Re-export the validator types so existing downstream callers
-// (`botwork-admin-api`'s integration test uses these via
-// `botwork_bootstrap::{BootstrapConfig, BootstrapConfigRaw}`) get the
-// same surface they had before the admin-core extraction. New code
-// should depend on `botwork-admin-core` directly.
-pub use botwork_admin_core::plugin_spec::{RawPluginEntry, ValidatedPlugin};
+// Re-export from admin-core so existing consumers
+// (`botwork-admin-api`, `botwork-config-broker`, `botwork-session-broker`
+// integration tests) keep their `use botwork_bootstrap::{...}` paths
+// working through the cutover.
+pub use botwork_admin_core::{
+    BootstrapConfig, BootstrapConfigRaw, RawPluginEntry, TenantEntry, ValidatedPlugin,
+    WorkspaceEntry, WorkspacePluginEntry,
+};
 
 pub use runner::apply;

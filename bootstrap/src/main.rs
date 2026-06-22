@@ -20,7 +20,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use botwork_bootstrap::{apply, BootstrapConfig, BootstrapError};
+use botwork_admin_core::BootstrapConfig;
+use botwork_bootstrap::{apply, BootstrapError};
 use botwork_entity::connection::{connect_from_env, ConnectError, DATABASE_URL_ENV};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -46,13 +47,22 @@ async fn main() -> ExitCode {
 
     let config = match BootstrapConfig::load(&config_path) {
         Ok(cfg) => cfg,
-        Err(err @ BootstrapError::ConfigNotFound(_) | err @ BootstrapError::ConfigRead { .. }) => {
-            error!("{PREFIX} config read failed: {err}");
-            return ExitCode::from(4);
-        }
         Err(err) => {
-            error!("{PREFIX} config validation failed: {err}");
-            return ExitCode::from(5);
+            // BootstrapConfig::load returns admin-core's LoadError; lift
+            // into BootstrapError so the exit-code switch (file IO →
+            // exit 4 vs. validation → exit 5) keeps working through the
+            // admin-core extraction.
+            let err: BootstrapError = err.into();
+            match err {
+                BootstrapError::ConfigNotFound(_) | BootstrapError::ConfigRead { .. } => {
+                    error!("{PREFIX} config read failed: {err}");
+                    return ExitCode::from(4);
+                }
+                _ => {
+                    error!("{PREFIX} config validation failed: {err}");
+                    return ExitCode::from(5);
+                }
+            }
         }
     };
 
