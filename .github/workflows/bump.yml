@@ -1,0 +1,75 @@
+# VERSION bump after a Release is published.
+#
+# Triggered by `release: [published]` so it only fires for real releases
+# (not drafts, not pre-releases unless promoted). Increments the released
+# version's minor, appends `-dev`, commits the new VERSION to main.
+#
+# Lives in its own workflow file (split from the old `release.yml`)
+# because:
+#
+#   * `ci.yml` stays event-clean (`push`, `pull_request`,
+#     `workflow_dispatch` only). Adding `release: [published]` there
+#     would fire every container matrix job + release-binaries job on a
+#     release event too, only to be skipped — noisy in the dashboard.
+#
+#   * The bump logic is tiny and unrelated to the publish path. Two
+#     files is clearer than one workflow with two distinct trigger
+#     contracts.
+#
+# Loop: `bump` pushes a new `-dev` VERSION to main → that push triggers
+# `ci.yml` → `ci.yml`'s `publish` job's VERSION gate sees the `-dev`
+# suffix → publish is a no-op. The matrix + release-binaries still run
+# (preserves CI surface on -dev pushes).
+
+name: VERSION bump
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # commit and push VERSION bump to main
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: main
+        # Use the default GITHUB_TOKEN; the resulting push triggers CI
+        # but the new VERSION will end in "-dev" so ci.yml's publish
+        # guard treats it as a no-op — no infinite loop.
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    # ── Derive released version from the tag (strip leading "v") ─────────────
+    - name: Compute next minor dev version
+      id: bump
+      run: |
+        set -euo pipefail
+        tag="${{ github.event.release.tag_name }}"
+        # Strip leading "v"
+        version="${tag#v}"
+        # Strip any pre-release/build-metadata suffix (e.g. "-rc1") so
+        # that only the core MAJOR.MINOR.PATCH components remain for
+        # arithmetic.
+        version="${version%%-*}"
+        IFS='.' read -r major minor _patch <<< "${version}"
+        next_minor=$(( minor + 1 ))
+        next_version="${major}.${next_minor}.0-dev"
+        echo "next_version=${next_version}" >> "$GITHUB_OUTPUT"
+        echo "Released: ${version} → next dev: ${next_version}"
+
+    # ── Write bumped VERSION and push to main ────────────────────────────────
+    - name: Bump VERSION and commit
+      run: |
+        set -euo pipefail
+        echo "${{ steps.bump.outputs.next_version }}" > VERSION
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add VERSION
+        git commit -m "chore: bump VERSION to ${{ steps.bump.outputs.next_version }} [skip ci]"
+        git push origin main

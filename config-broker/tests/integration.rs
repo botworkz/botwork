@@ -158,7 +158,7 @@ async fn resolves_known_plugin_returns_full_descriptor() {
     let Some(server) = spawn_server(SAMPLE_YAML).await else {
         eprintln!(
             "IGNORED resolves_known_plugin_returns_full_descriptor: \
-             docker not reachable; full proof runs in containers.yml smoke"
+             docker not reachable; full proof runs in ci.yml smoke"
         );
         return;
     };

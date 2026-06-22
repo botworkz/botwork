@@ -1,0 +1,279 @@
+# Top-level CI orchestrator.
+#
+# Three job groups, all in this one workflow so artifacts uploaded by
+# any of them are reachable from the others via the same workflow run id:
+#
+#   1. `containers` — matrix fan-out over the per-crate reusable workflow
+#      `_crate.yml`. Each crate that ships a runtime image gets its own
+#      runner (rust-cache warm, cargo runs in the ci-tools container,
+#      runtime image built BINARY_SOURCE=prebuilt, smoke test, image +
+#      binary uploaded as artifacts).
+#
+#   2. `release-binaries` — builds the launcher + tools release binaries
+#      that ride into the GitHub Release. Same rust-cache key as
+#      `rust.yml` is fine; separate job because release-profile builds
+#      live under a different `target/` subdirectory.
+#
+#   3. `publish` — runs on `push` to main (or workflow_dispatch) with a
+#      clean (non-`-dev`) VERSION. `needs: [containers, release-binaries]`,
+#      then `download-artifact` → `docker load` → retag :VERSION + :latest
+#      → `docker push` for the images, and `download-artifact` →
+#      action-gh-release for the binaries. No cargo. No earthly. No
+#      `--no-cache`. The bytes pushed to GHCR are the bytes CI smoke-
+#      tested.
+#
+# Workspace-only crates (admin-core, db/entity, launcher, tools,
+# admin-ui/wasm) stay covered by the workspace-wide `rust.yml`; the
+# explicit wasm32 build for `botwork-admin-ui-wasm` lives there too.
+#
+# The bump-VERSION-after-release job has split into its own
+# `bump.yml` (triggered by `release: [published]`) so this workflow's
+# event surface stays clean (`push`, `pull_request`, `workflow_dispatch`).
+# bump.yml writes a new `-dev` VERSION to main; that triggers this
+# workflow's `publish` job, which short-circuits on the `-dev` suffix —
+# completing the version loop.
+#
+# See botworkz/botwork#129 for the round-3 motivation (round 1 = #122/
+# #123, round 2 = #125/#126; round 3 retires release.yml entirely).
+
+name: CI
+
+on:
+  push:
+    branches: [main, botwork-import]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Prevent two pushes to the same ref from racing each other through the
+# publish path. The publish job is gated on `branch == 'main'` so the
+# race only meaningfully exists there, but the policy is cheap to apply
+# uniformly. Matches mcp-extra's `ci.yml`.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  containers:
+    # One job per crate. `fail-fast: false` so a regression in one
+    # smoke (e.g. control-plane changed its log line) doesn't mask a
+    # genuinely independent failure in another crate — the parallel
+    # split is only useful if every leaf gets to fail on its own merits.
+    name: ${{ matrix.service }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # `crate` is the workspace-relative directory that owns the
+        # Dockerfile + smoke.sh; `service` is the image suffix
+        # (`botwork/<service>:local`) and the Earthfile target name.
+        # `package`/`binary` are the cargo names. For the simple cases
+        # the four collapse, but we declare them explicitly so the
+        # divergences for `db/migration` (image is `db-migrate`,
+        # binary is `botwork-migration`) and `admin-ui` (image covers
+        # both server and wasm crates, the package is the server)
+        # are visible here rather than buried in `_crate.yml`.
+        #
+        # `needs-db-migrate` flags any smokes that land the schema
+        # via db-migrate before exercising their own assertion path;
+        # the per-crate runner builds db-migrate from source as a
+        # fixture in that case.
+        include:
+        - crate: session-broker
+          service: session-broker
+          package: botwork-session-broker
+          binary: botwork-session-broker
+        - crate: config-broker
+          service: config-broker
+          package: botwork-config-broker
+          binary: botwork-config-broker
+        - crate: control-plane
+          service: control-plane
+          package: botwork-control-plane
+          binary: botwork-control-plane
+        - crate: db/migration
+          service: db-migrate
+          package: botwork-migration
+          binary: botwork-migration
+        - crate: admin-api
+          service: admin-api
+          package: botwork-admin-api
+          binary: botwork-admin-api
+          needs-db-migrate: true
+        - crate: admin-ui
+          service: admin-ui
+          package: botwork-admin-ui-server
+          binary: botwork-admin-ui-server
+    uses: ./.github/workflows/_crate.yml
+    with:
+      crate: ${{ matrix.crate }}
+      service: ${{ matrix.service }}
+      package: ${{ matrix.package }}
+      binary: ${{ matrix.binary }}
+      needs-db-migrate: ${{ matrix.needs-db-migrate || false }}
+
+  release-binaries:
+    # `botwork-launcher` and `botwork-tools` ride into the GitHub Release
+    # as binary assets. Today they are recompiled inside `release.yml`'s
+    # publish job on every release push; this PR moves the build into CI
+    # so the binaries attached to the Release are the same bytes that the
+    # `cargo test` here exercised.
+    #
+    # Separate job from `rust.yml` rather than inline because:
+    #
+    #   * `rust.yml` runs `cargo test --workspace --all-targets` in dev
+    #     profile; this is release profile. Different `target/` subdirs,
+    #     cleaner to keep them apart so dev-profile builds don't
+    #     invalidate release-profile artifacts.
+    #
+    #   * `publish` does `needs: [containers, release-binaries]` —
+    #     both have to live in the same workflow file for `needs:` to
+    #     reach `release-binaries`.
+    name: release-binaries
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Build launcher + tools (release)
+      run: |
+        set -euo pipefail
+        cargo build --release --locked -p botwork-launcher -p botwork-tools
+
+    - name: Upload release binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-binaries
+        path: |
+          target/release/botwork-launcher
+          target/release/botwork-tools
+        if-no-files-found: error
+
+  publish:
+    # Runs only on `push` to main (or manual workflow_dispatch). On
+    # pull_request this job is skipped entirely (the matrix + release-
+    # binaries still run, so PR feedback covers everything except the
+    # publish push).
+    #
+    # `needs:` ensures every container's smoke passed and the release
+    # binaries are present on disk before we even read VERSION. The
+    # internal `is_release` gate then short-circuits the actual GHCR
+    # push and gh-release publication when VERSION ends in `-dev`.
+    #
+    # The label-revision verification step that used to live here
+    # (`refusing to push a release container whose provenance does not
+    # match the triggering commit`) has been removed because it is
+    # structurally moot under this shape — `docker load` of the artifact
+    # produced by the same workflow run reads back exactly the bytes
+    # that were smoke-tested. The `org.opencontainers.image.revision`
+    # label is still baked in by `_crate.yml`'s
+    # `--build-arg GIT_SHA=${GITHUB_SHA}`; we just don't re-verify it
+    # because we never rebuild.
+    name: publish
+    needs: [containers, release-binaries]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create tags and releases, upload assets
+      packages: write   # push images to GHCR
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # ── Read and validate the VERSION file ──────────────────────────────────
+    - name: Read VERSION
+      id: version
+      run: |
+        set -euo pipefail
+        raw="$(tr -d '[:space:]' < VERSION)"
+        echo "version=${raw}" >> "$GITHUB_OUTPUT"
+        # Exit cleanly (skip publish) when the version contains a hyphen
+        # (i.e. any pre-release/dev suffix such as "-dev", "-beta1", "-rc2").
+        # Only a bare "MAJOR.MINOR.PATCH" triggers a publish so that automated
+        # bump commits never cause a double-release.
+        if [[ "${raw}" == *-* ]]; then
+          echo "is_release=false" >> "$GITHUB_OUTPUT"
+          echo "VERSION=${raw} contains a pre-release suffix — skipping publish."
+        else
+          echo "is_release=true" >> "$GITHUB_OUTPUT"
+          echo "VERSION=${raw} is a clean semver — proceeding with publish."
+        fi
+
+    # ── Log in to GHCR ──────────────────────────────────────────────────────
+    - name: Log in to GHCR
+      if: steps.version.outputs.is_release == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    # ── Download the image artifacts uploaded by the matrix above ───────────
+    # `download-artifact@v4` with `pattern: '*-image'` creates one
+    # subdirectory per matched artifact under `.ci-images/`, so the
+    # layout is `.ci-images/<service>-image/<service>.tar.gz`.
+    - name: Download image artifacts
+      if: steps.version.outputs.is_release == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        pattern: '*-image'
+        path: .ci-images
+
+    # ── docker load → retag → docker push, one image at a time ──────────────
+    # We discover services from the filesystem so the matrix in
+    # `containers` stays the single source of truth — adding a service
+    # to the matrix is the only edit needed; this step picks it up
+    # automatically.
+    - name: docker load, retag, push
+      if: steps.version.outputs.is_release == 'true'
+      run: |
+        set -euo pipefail
+        VERSION="${{ steps.version.outputs.version }}"
+        REPO_PREFIX="ghcr.io/botworkz/botwork"
+
+        for dir in .ci-images/*-image; do
+          svc="${dir##*/}"
+          svc="${svc%-image}"
+          tarball="${dir}/${svc}.tar.gz"
+          if [ ! -f "${tarball}" ]; then
+            echo "ERROR: expected ${tarball} (one .tar.gz per artifact)" >&2
+            ls -la "${dir}" >&2 || true
+            exit 1
+          fi
+
+          echo "::group::publish ${svc}"
+          docker load -i "${tarball}"
+
+          repo="${REPO_PREFIX}/${svc}"
+          docker tag "botwork/${svc}:local" "${repo}:${VERSION}"
+          docker tag "botwork/${svc}:local" "${repo}:latest"
+          docker push "${repo}:${VERSION}"
+          docker push "${repo}:latest"
+          echo "::endgroup::"
+        done
+
+    # ── Binaries: ride the same-run release-binaries artifact ───────────────
+    - name: Download release binaries
+      if: steps.version.outputs.is_release == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: release-binaries
+        path: .ci-binaries
+
+    # ── GitHub Release: create + upload assets ──────────────────────────────
+    # `softprops/action-gh-release` creates the tag and release in one
+    # step. If the tag already exists the action fails with a clear
+    # error, preventing silent overwrites.
+    - name: Create GitHub Release
+      if: steps.version.outputs.is_release == 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: v${{ steps.version.outputs.version }}
+        fail_on_unmatched_files: true
+        files: |
+          .ci-binaries/botwork-launcher
+          .ci-binaries/botwork-tools

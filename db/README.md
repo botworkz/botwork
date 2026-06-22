@@ -267,7 +267,7 @@ the env var happens to be set in the runner's environment.
   `IGNORED` line when docker isn't reachable, so `cargo test` stays
   green on dev machines without docker. The end-to-end production-path
   proof lives in `db/migration/smoke.sh` (invoked by the `db-migrate`
-  job in `.github/workflows/containers.yml`), which is gated on
+  job in `.github/workflows/ci.yml`), which is gated on
   docker being present.
 
 ## Container image

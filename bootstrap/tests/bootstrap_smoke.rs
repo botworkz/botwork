@@ -141,7 +141,7 @@ async fn bootstrap_inserts_idempotently_then_resolves() {
     if !docker_available().await {
         eprintln!(
             "IGNORED bootstrap_inserts_idempotently_then_resolves: \
-             docker not reachable; full proof runs in containers.yml smoke"
+             docker not reachable; full proof runs in ci.yml smoke"
         );
         return;
     }
