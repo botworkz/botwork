@@ -1,76 +1,162 @@
-//! Cold-start recovery sync.
+//! Cold-start recovery sync — reads from postgres.
 //!
 //! control-plane's `SessionStore` is in-memory; on every restart it
 //! starts empty. Without a sync, every restart drops every live
 //! session from the (future) xDS feeder's view, and SOTW xDS treats
-//! "absent from snapshot" as "removed" -- so the egress envoy would
+//! "absent from snapshot" as "removed" — so the egress envoy would
 //! tear down all live routes the moment control-plane restarted.
 //!
-//! Recovery sync closes that gap by polling session-broker's
+//! Pre-RFE-#105-round-3 we closed that gap by polling session-broker's
 //! `GET /control-plane/sessions` admin endpoint at startup and bulk-
-//! seeding the store. session-broker is the source of truth for the
-//! live transport set; control-plane just rebuilds against it.
+//! seeding the store. That coupled control-plane's boot to session-
+//! broker's reachability, which is the cycle that took down
+//! botspace-01 on 2026-06-21 and motivated the round-3 cutover.
+//!
+//! With round-3, every fact session-broker used to expose over that
+//! endpoint now lives in postgres (`agent_session` keyed on
+//! `(tenant_id, workspace_id, agent_session_id)`; `session_worker`
+//! keyed on `container_name`; per-plugin `egress` blob on `plugin`).
+//! control-plane reads it directly from the same DB every other
+//! consumer uses. No more session-broker round trip; no more
+//! after-edge in the systemd graph; recovery converges as soon as
+//! postgres is up.
+//!
+//! ## Wire mapping
+//!
+//! The JOIN we run mirrors the projection session-broker's old
+//! `/control-plane/sessions` endpoint did over `transport_sessions`,
+//! one row per fully-formed live session:
+//!
+//! ```sql
+//! SELECT
+//!     sw.mcp_session_id  AS session_id,
+//!     sw.container_ip    AS container_ip,
+//!     t.name             AS tenant,
+//!     w.name             AS workspace,
+//!     p.name             AS plugin,
+//!     p.egress           AS egress_policy
+//! FROM   session_worker sw
+//! JOIN   agent_session  a  ON sw.agent_session_id = a.id
+//! JOIN   workspace      w  ON a.workspace_id      = w.id
+//! JOIN   tenant         t  ON a.tenant_id         = t.id
+//! JOIN   plugin         p  ON sw.plugin_id        = p.id
+//! WHERE  sw.reaped_at IS NULL                    -- live container
+//!   AND  sw.agent_session_id IS NOT NULL         -- past first-bind
+//!   AND  sw.mcp_session_id  <> ''                -- past initialize
+//!   AND  a.state IN ('active', 'grace')          -- live or grace
+//! ```
+//!
+//! The four "alive" gates are deliberately conservative:
+//!
+//! * `reaped_at IS NULL` — the row is for a container session-broker
+//!   still believes is live. Reaped rows are audit-only; xDS pushing
+//!   a policy for an absent container would silently 5xx on first
+//!   request (no upstream).
+//! * `agent_session_id IS NOT NULL` — the goose agent has bound
+//!   (which means session-broker has populated the FK). Pre-bind
+//!   workers carry the spawn-time INSERT but have no
+//!   `(tenant, workspace)` linkage we can resolve via the JOIN.
+//! * `mcp_session_id != ''` — the upstream's `initialize` response
+//!   has landed. The empty string default exists for the
+//!   spawn-to-initialize-response window; routing a session whose
+//!   mcp-session-id we don't know yet would 404 at envoy.
+//! * `a.state IN ('active', 'grace')` — `inactive`, `teardown_requested`,
+//!   `purged` rows are not addressable by an inbound request; their
+//!   container has been torn down (or is about to be) and the row
+//!   only exists for audit/janitor purposes.
+//!
+//! The first three predicates are session-broker's writer contract
+//! made queryable; the fourth is what makes this the DB-side
+//! equivalent of "walk transport_sessions" — transport_sessions only
+//! ever held active/grace rows because session-broker reaped its
+//! own map on teardown.
 //!
 //! ## Failure semantics
 //!
-//! The two cases that matter:
+//! Three cases:
 //!
-//! * `200 []` -- a legitimate cold start with no live sessions.
+//! * empty result set — legitimate cold start with no live sessions.
 //!   Recovery proceeds; `SessionStore` stays empty; control-plane
 //!   binds and starts serving. Fresh-deploy boot must work.
-//! * `200 [N records]` -- recovered N sessions; store populated;
-//!   control-plane binds.
-//! * Anything else (transport failure, non-2xx, bad envelope, bad
-//!   record) -- we *don't know* the live state, and starting with the
-//!   wrong view would silently break the xDS feeder. The retry loop
-//!   below tries [`MAX_ATTEMPTS`] times with linear backoff before
-//!   giving up; the binary then `exit(1)`s and systemd's
-//!   `Restart=always` keeps retrying from scratch.
+//! * N rows — recovered N sessions; store populated; control-plane
+//!   binds.
+//! * `sea_orm::DbErr` from the SELECT — we *don't know* the live
+//!   state, and starting with the wrong view would silently break
+//!   the xDS feeder. The retry loop tries [`MAX_ATTEMPTS`] times
+//!   with linear backoff before giving up; the binary then exits 1
+//!   and systemd's `Restart=always` keeps retrying from scratch.
+//!
+//! The retry loop is preserved (vs. failing on first error) because
+//! postgres can legitimately be in a transient state at boot — the
+//! `botwork-postgres.service` unit's container can take a few
+//! seconds to come up, and we don't want a 1-second `pg_isready`
+//! window to make control-plane exit and re-enter the systemd
+//! restart loop.
 //!
 //! ## Sequencing
 //!
-//! Recovery requires session-broker to be reachable. The supported
-//! systemd ordering puts `botwork-control-plane.service` AFTER
-//! `botwork-session-broker.service` (and `Wants=`/`After=`, not
-//! `Requires=`, in either direction -- a hard mutual dependency would
-//! deadlock on first boot).
+//! Recovery requires postgres to be reachable. The supported systemd
+//! ordering puts `botwork-control-plane.service` AFTER
+//! `botwork-db-migrate.service` (transitively `After=`
+//! `botwork-postgres.service` + `botwork-db-init.service`). Same
+//! posture config-broker, admin-api, and session-broker use.
 //!
-//! session-broker's in-process control-plane hard gate (botwork #82)
-//! is what actually enforces "no unpoliced traffic ever serves" -- the
-//! systemd order is just a sequencing convenience. session-broker
-//! itself tolerates control-plane being temporarily unreachable at
-//! boot: the gate fires per-spawn, so a cold-start window where
-//! control-plane is still syncing produces 503s on new spawns but does
-//! not break the already-running ones.
+//! Crucially the `After=botwork-session-broker.service` edge from
+//! the pre-round-3 unit can now be **dropped**: control-plane no
+//! longer needs session-broker reachable to make recovery progress.
+//! The companion vm PR drops that edge along with the
+//! `control_plane_recovery_sync_completed` goss probe (which greps
+//! a log line that no longer fires).
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
+use serde::Deserialize;
+use thiserror::Error;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::session_broker::{fetch_sessions, SessionBrokerError};
-use crate::sessions::SessionStore;
+use botwork_entity::{agent_session, plugin, session_worker, tenant, workspace};
+
+use crate::sessions::{SessionRecord, SessionStore};
 
 const PREFIX: &str = "[control-plane:recovery]";
 
 /// How many fetch attempts before recovery gives up and the binary
 /// exits non-zero. 30 × ~5s spacing = ~150s headroom for a slow
-/// session-broker cold start; longer than that and systemd's restart
-/// loop is the right place to retry, not us.
+/// postgres cold start; longer than that and systemd's restart loop
+/// is the right place to retry, not us.
 pub const MAX_ATTEMPTS: u32 = 30;
 
 /// Pause between attempts. Linear (not exponential): the dominant
-/// failure mode at boot is "session-broker hasn't bound yet," which
+/// failure mode at boot is "postgres hasn't bound yet," which
 /// resolves in seconds; we don't want to back off into minutes for a
 /// transient issue, and we'd rather give up and let systemd retry
 /// than block startup indefinitely.
 pub const ATTEMPT_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Per-attempt request timeout. Generous so a slow loopback HTTP path
-/// (e.g. session-broker mid-startup) isn't mistaken for a real
-/// failure.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// All ways the DB recovery path can surface a failure. Wrapped so
+/// the binary's startup path can pattern-match if it ever wants
+/// finer-grained handling (today it just logs the message and
+/// exits 1).
+#[derive(Debug, Error)]
+pub enum RecoveryError {
+    /// The JOIN itself failed — DB unreachable, schema drift, etc.
+    /// Always retried until [`MAX_ATTEMPTS`] is exhausted; control-
+    /// plane refuses to bind if recovery never succeeds.
+    #[error("db error during recovery JOIN: {0}")]
+    Db(#[from] sea_orm::DbErr),
+    /// A recovered row was structurally wrong (the canonical example
+    /// is a non-IPv4 string in `session_worker.container_ip`).
+    /// session-broker validates this on the way in, so production
+    /// rows can't trip it; the variant exists so a future schema
+    /// change has somewhere clean to surface.
+    #[error("recovered row failed validation: {0}")]
+    BadRow(String),
+}
 
 /// Run the recovery loop. Returns once the store has been seeded
 /// (possibly with zero records); errors out only after
@@ -81,16 +167,9 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// immediately after this returns) sees the seeded state.
 pub async fn run_with_retries(
     store: Arc<SessionStore>,
-    endpoint: &str,
-) -> Result<usize, SessionBrokerError> {
-    run_with_retries_config(
-        store,
-        endpoint,
-        MAX_ATTEMPTS,
-        ATTEMPT_INTERVAL,
-        REQUEST_TIMEOUT,
-    )
-    .await
+    db: &DatabaseConnection,
+) -> Result<usize, RecoveryError> {
+    run_with_retries_config(store, db, MAX_ATTEMPTS, ATTEMPT_INTERVAL).await
 }
 
 /// Test-visible variant with knobs exposed. Keeps `run_with_retries`
@@ -98,20 +177,19 @@ pub async fn run_with_retries(
 /// the single source of production behaviour.
 pub async fn run_with_retries_config(
     store: Arc<SessionStore>,
-    endpoint: &str,
+    db: &DatabaseConnection,
     max_attempts: u32,
     interval: Duration,
-    request_timeout: Duration,
-) -> Result<usize, SessionBrokerError> {
-    info!("{PREFIX} starting recovery sync against {endpoint} (max_attempts={max_attempts})");
+) -> Result<usize, RecoveryError> {
+    info!("{PREFIX} starting DB recovery sync (max_attempts={max_attempts})");
 
-    let mut last_err: Option<SessionBrokerError> = None;
+    let mut last_err: Option<RecoveryError> = None;
     for attempt in 1..=max_attempts {
-        match fetch_sessions(endpoint, request_timeout).await {
+        match fetch_live_sessions(db).await {
             Ok(records) => {
                 let count = seed_store(&store, records).await;
                 info!(
-                    "{PREFIX} recovered {count} session(s) from session-broker on attempt {attempt}/{max_attempts}"
+                    "{PREFIX} recovered {count} session(s) from DB on attempt {attempt}/{max_attempts}"
                 );
                 return Ok(count);
             }
@@ -129,20 +207,74 @@ pub async fn run_with_retries_config(
     }
 
     Err(last_err.unwrap_or_else(|| {
-        SessionBrokerError::Transport("recovery exhausted with no recorded error".to_string())
+        RecoveryError::Db(sea_orm::DbErr::Custom(
+            "recovery exhausted with no recorded error".to_string(),
+        ))
     }))
+}
+
+/// Pull the rows the JOIN above describes and project each one into a
+/// [`SessionRecord`]. Public for tests; the production path goes
+/// through [`run_with_retries`] which adds the retry/backoff envelope.
+pub async fn fetch_live_sessions(
+    db: &DatabaseConnection,
+) -> Result<Vec<SessionRecord>, RecoveryError> {
+    // Project the JOIN through SeaORM's `select_only().column(...)` so
+    // the result type is a small, deserialise-friendly struct rather
+    // than five entity models we'd then have to thread together.
+    // `FromQueryResult` decodes column-by-column off whatever the
+    // driver returns.
+    //
+    // The JOIN order goes session_worker → agent_session → workspace →
+    // tenant (left-to-right by FK direction), with a sibling JOIN to
+    // plugin off session_worker. The four WHERE predicates are spelled
+    // out in the module docs.
+    let rows: Vec<SessionRow> = session_worker::Entity::find()
+        .select_only()
+        .column_as(session_worker::Column::McpSessionId, "session_id")
+        .column_as(session_worker::Column::ContainerIp, "container_ip")
+        .column_as(tenant::Column::Name, "tenant")
+        .column_as(workspace::Column::Name, "workspace")
+        .column_as(plugin::Column::Name, "plugin")
+        .column_as(plugin::Column::Egress, "egress_policy")
+        .join(
+            JoinType::InnerJoin,
+            session_worker::Relation::AgentSession.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            agent_session::Relation::Workspace.def(),
+        )
+        .join(JoinType::InnerJoin, agent_session::Relation::Tenant.def())
+        .join(JoinType::InnerJoin, session_worker::Relation::Plugin.def())
+        .filter(session_worker::Column::ReapedAt.is_null())
+        .filter(session_worker::Column::AgentSessionId.is_not_null())
+        .filter(session_worker::Column::McpSessionId.ne(""))
+        .filter(agent_session::Column::State.is_in(vec![
+            agent_session::state::ACTIVE,
+            agent_session::state::GRACE,
+        ]))
+        .into_model::<SessionRow>()
+        .all(db)
+        .await?;
+
+    let mut records = Vec::with_capacity(rows.len());
+    for row in rows {
+        records.push(row.into_session_record()?);
+    }
+    Ok(records)
 }
 
 /// Bulk-insert recovered records into the store.
 ///
-/// Uses `SessionStore::insert` -- the strict, ergonomic-per-spawn
+/// Uses `SessionStore::insert` — the strict, ergonomic-per-spawn
 /// path. In recovery we *expect* the store to be empty, so duplicate
 /// errors here would be a bug (probably someone calling
 /// `run_with_retries` twice on the same store, or seeding while the
 /// HTTP server is already accepting POSTs). We log + skip dupes
 /// rather than abort so a transient "control-plane started early"
 /// double-call doesn't bring down the binary.
-async fn seed_store(store: &SessionStore, records: Vec<crate::sessions::SessionRecord>) -> usize {
+async fn seed_store(store: &SessionStore, records: Vec<SessionRecord>) -> usize {
     let mut inserted = 0usize;
     for record in records {
         let id = record.session_id.clone();
@@ -156,176 +288,84 @@ async fn seed_store(store: &SessionStore, records: Vec<crate::sessions::SessionR
     inserted
 }
 
+/// Untyped projection of the JOIN above. `egress_policy` is `jsonb`
+/// in postgres which sqlx decodes as [`serde_json::Value`]; everything
+/// else is `text`. `container_ip` is parsed into `Ipv4Addr` in
+/// [`SessionRow::into_session_record`] so a bad row surfaces as a
+/// distinct error variant rather than blowing up at insert time.
+#[derive(Debug, sea_orm::FromQueryResult, Deserialize)]
+struct SessionRow {
+    session_id: String,
+    container_ip: String,
+    tenant: String,
+    workspace: String,
+    plugin: String,
+    egress_policy: serde_json::Value,
+}
+
+impl SessionRow {
+    fn into_session_record(self) -> Result<SessionRecord, RecoveryError> {
+        let container_ip = self.container_ip.parse().map_err(|_| {
+            RecoveryError::BadRow(format!(
+                "session_worker.container_ip {:?} is not IPv4 for mcp_session_id {:?}",
+                self.container_ip, self.session_id
+            ))
+        })?;
+        Ok(SessionRecord {
+            session_id: self.session_id,
+            container_ip,
+            tenant: self.tenant,
+            workspace: self.workspace,
+            plugin: self.plugin,
+            egress_policy: self.egress_policy,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sessions::SessionRecord;
 
-    use std::convert::Infallible;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    use http_body_util::Full;
-    use hyper::body::{Bytes, Incoming};
-    use hyper::server::conn::http1 as server_http1;
-    use hyper::service::service_fn;
-    use hyper::{Request, Response, StatusCode};
-    use hyper_util::rt::TokioIo;
-    use tokio::net::TcpListener;
-    use tokio::task::JoinHandle;
-
-    /// Mini server whose response per-attempt can vary.  Body N is
-    /// served on the Nth request; once exhausted, the last body is
-    /// served repeatedly so a test that only schedules MAX_ATTEMPTS
-    /// retries can stop without exact-count tracking.
-    async fn spawn_sequenced(bodies: Vec<(StatusCode, &'static str)>) -> (String, JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let counter = Arc::new(AtomicUsize::new(0));
-        let bodies = Arc::new(bodies);
-        let handle = tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    return;
-                };
-                let counter = counter.clone();
-                let bodies = bodies.clone();
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let _ = server_http1::Builder::new()
-                        .serve_connection(
-                            io,
-                            service_fn(move |_req: Request<Incoming>| {
-                                let counter = counter.clone();
-                                let bodies = bodies.clone();
-                                async move {
-                                    let idx = counter.fetch_add(1, Ordering::SeqCst);
-                                    let pick = bodies.get(idx).unwrap_or_else(|| {
-                                        bodies.last().expect("at least one body")
-                                    });
-                                    let response: Response<Full<Bytes>> = Response::builder()
-                                        .status(pick.0)
-                                        .header("content-type", "application/json")
-                                        .body(Full::new(Bytes::from(pick.1)))
-                                        .expect("build response");
-                                    Ok::<_, Infallible>(response)
-                                }
-                            }),
-                        )
-                        .await;
-                });
-            }
-        });
-        (format!("http://{addr}"), handle)
-    }
-
-    #[tokio::test]
-    async fn first_attempt_succeeds_with_empty_array() {
-        let (endpoint, _h) = spawn_sequenced(vec![(StatusCode::OK, r#"{"sessions":[]}"#)]).await;
-        let store = Arc::new(SessionStore::new());
-        let count = run_with_retries_config(
-            store.clone(),
-            &endpoint,
-            3,
-            Duration::from_millis(10),
-            Duration::from_secs(1),
-        )
-        .await
-        .expect("ok");
-        assert_eq!(count, 0);
-        assert!(store.is_empty().await);
-    }
-
-    #[tokio::test]
-    async fn first_attempt_succeeds_with_records() {
-        let (endpoint, _h) = spawn_sequenced(vec![(
-            StatusCode::OK,
-            r#"{"sessions":[
-                {"session_id":"mcp_session_a","container_ip":"172.20.0.5","tenant":"phlax","workspace":"mcp","plugin":"fetch","egress_policy":null},
-                {"session_id":"mcp_session_b","container_ip":"172.20.0.6","tenant":"phlax","workspace":"mcp","plugin":"git","egress_policy":{"mode":"allow_all"}}
-            ]}"#,
-        )])
-        .await;
-        let store = Arc::new(SessionStore::new());
-        let count = run_with_retries_config(
-            store.clone(),
-            &endpoint,
-            3,
-            Duration::from_millis(10),
-            Duration::from_secs(1),
-        )
-        .await
-        .expect("ok");
-        assert_eq!(count, 2);
-        assert_eq!(store.len().await, 2);
-        let listed = store.list().await;
-        assert_eq!(listed[0].session_id, "mcp_session_a");
-        assert_eq!(listed[1].plugin, "git");
-    }
-
-    #[tokio::test]
-    async fn retries_then_succeeds() {
-        // Two 503s, then a 200. The retry loop must outlast the
-        // transient failures and pick up the eventual good response.
-        let (endpoint, _h) = spawn_sequenced(vec![
-            (StatusCode::SERVICE_UNAVAILABLE, r#"{"error":"warming"}"#),
-            (StatusCode::SERVICE_UNAVAILABLE, r#"{"error":"warming"}"#),
-            (StatusCode::OK, r#"{"sessions":[]}"#),
-        ])
-        .await;
-        let store = Arc::new(SessionStore::new());
-        let count = run_with_retries_config(
-            store.clone(),
-            &endpoint,
-            5,
-            Duration::from_millis(10),
-            Duration::from_secs(1),
-        )
-        .await
-        .expect("eventual ok");
-        assert_eq!(count, 0);
-    }
-
-    #[tokio::test]
-    async fn gives_up_after_max_attempts() {
-        // Permanent 500 -- recovery must surface the final error
-        // rather than block forever.
-        let (endpoint, _h) = spawn_sequenced(vec![(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            r#"{"error":"boom"}"#,
-        )])
-        .await;
-        let store = Arc::new(SessionStore::new());
-        let err = run_with_retries_config(
-            store.clone(),
-            &endpoint,
-            3,
-            Duration::from_millis(10),
-            Duration::from_secs(1),
-        )
-        .await
-        .expect_err("must give up");
-        match err {
-            SessionBrokerError::BadStatus { status, .. } => assert_eq!(status, 500),
-            other => panic!("expected BadStatus, got {other:?}"),
+    /// Construct a SessionRow with deliberately-fixed defaults so the
+    /// projection tests are tightly readable. Mirrors the row shape
+    /// the production JOIN returns; tests assert the
+    /// `into_session_record` projection.
+    fn row(id: &str, ip: &str, plugin: &str) -> SessionRow {
+        SessionRow {
+            session_id: id.to_string(),
+            container_ip: ip.to_string(),
+            tenant: "phlax".to_string(),
+            workspace: "mcp".to_string(),
+            plugin: plugin.to_string(),
+            egress_policy: serde_json::json!({}),
         }
-        assert!(store.is_empty().await);
     }
 
     #[tokio::test]
-    async fn gives_up_on_unreachable_endpoint() {
-        // Port 1 is reserved for tcpmux which nobody runs.
-        let store = Arc::new(SessionStore::new());
-        let err = run_with_retries_config(
-            store.clone(),
-            "http://127.0.0.1:1",
-            3,
-            Duration::from_millis(10),
-            Duration::from_millis(100),
-        )
-        .await
-        .expect_err("must give up");
-        assert!(matches!(err, SessionBrokerError::Transport(_)), "{err:?}");
+    async fn session_row_projects_into_session_record() {
+        let row = row("mcp_session_a", "172.20.0.5", "fetch");
+        let record = row.into_session_record().expect("good row");
+        assert_eq!(record.session_id, "mcp_session_a");
+        assert_eq!(
+            record.container_ip,
+            "172.20.0.5".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert_eq!(record.plugin, "fetch");
+        assert!(record.egress_policy.is_object());
+    }
+
+    #[tokio::test]
+    async fn session_row_with_bad_ip_returns_bad_row() {
+        let row = row("mcp_session_a", "not-an-ip", "fetch");
+        let err = row.into_session_record().expect_err("must error");
+        match err {
+            RecoveryError::BadRow(msg) => {
+                assert!(msg.contains("not-an-ip"), "{msg}");
+                assert!(msg.contains("mcp_session_a"), "{msg}");
+            }
+            other => panic!("expected BadRow, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -363,7 +403,6 @@ mod tests {
             },
         ];
         let inserted = seed_store(&store, records).await;
-        // The new id was inserted; the colliding one was logged-and-skipped.
         assert_eq!(inserted, 1);
         assert_eq!(store.len().await, 2);
     }

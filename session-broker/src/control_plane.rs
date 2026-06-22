@@ -37,11 +37,12 @@
 //!   being announced to control-plane.
 //! * `delete_session` failure on container exit is logged and ignored.
 //!   The container is already gone (the launcher's exit listener is the
-//!   trigger); a drifted record is reconciled by the future
-//!   recovery-sync flow (control-plane polls session-broker `/sessions`
-//!   on cold start). Blocking exit cleanup on control-plane reachability
-//!   would punish the steady-state cleanup path for a transient outage
-//!   the system will heal on its own.
+//!   trigger); a drifted record is reconciled by control-plane's
+//!   cold-start recovery flow, which post-RFE-#105-round-3 reads the
+//!   `session_worker` + `agent_session` tables directly from postgres.
+//!   Blocking exit cleanup on control-plane reachability would punish
+//!   the steady-state cleanup path for a transient outage the system
+//!   will heal on its own.
 
 use std::time::Duration;
 

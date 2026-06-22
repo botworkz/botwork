@@ -534,6 +534,10 @@ version = "0.0.0"
 dependencies = [
  "async-stream",
  "axum 0.7.9",
+ "botwork-bootstrap",
+ "botwork-entity",
+ "botwork-migration",
+ "chrono",
  "envoy-proto",
  "futures-core",
  "http",
@@ -544,8 +548,14 @@ dependencies = [
  "prost-types 0.13.5",
  "regex",
  "reqwest",
+ "sea-orm",
+ "sea-orm-migration",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -553,6 +563,7 @@ dependencies = [
  "tower 0.4.13",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

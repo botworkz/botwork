@@ -9,9 +9,12 @@
 //!    deployment cycle benefits from a release that runs both stores
 //!    in lockstep so we can compare them before flipping the read
 //!    side over.
-//! 2. control-plane still reads `GET /control-plane/sessions` from
-//!    the broker; that endpoint reads from `sessions.json` in this
-//!    PR (round 3 swaps it for a DB read).
+//! 2. (historic) control-plane used to read `GET /control-plane/sessions`
+//!    from the broker for its cold-start recovery sync; the round-3
+//!    follow-up moved that read straight to postgres (`session_worker`
+//!    JOIN `agent_session`) and the admin endpoint is gone. The
+//!    write-through path documented in this file is still what
+//!    populates the rows control-plane now reads.
 //!
 //! ## Failure model
 //!

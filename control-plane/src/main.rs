@@ -6,6 +6,7 @@ use botwork_control_plane::{
     build_router, run_recovery_with_retries, AdsServer, AppState, SessionStore, ACK_DISABLED_ENV,
     DEFAULT_ACK_WAIT,
 };
+use botwork_entity::connection::{connect_from_env, ConnectError, DATABASE_URL_ENV};
 use tokio::net::TcpListener;
 use tonic::transport::Server as TonicServer;
 use tracing::{error, info, warn};
@@ -33,17 +34,6 @@ fn xds_bind_from_env() -> String {
     // stack (tonic h2 vs axum h1), different bind. Same trust
     // boundary (botwork-internal only).
     std::env::var("BOTWORK_CONTROL_PLANE_XDS_BIND").unwrap_or_else(|_| "0.0.0.0:9301".to_string())
-}
-
-fn session_broker_endpoint_from_env() -> String {
-    // session-broker's admin server: same alias session-broker registers
-    // on `botwork-internal` (`session_broker`), port 9002 (set by
-    // `BOTWORK_SESSION_BROKER_ADMIN_ADDR` in session-broker's lib.rs).
-    // Override via env when running control-plane out of the canonical
-    // docker network -- e.g. local iteration where session-broker is on
-    // a loopback port.
-    std::env::var("BOTWORK_SESSION_BROKER_ENDPOINT")
-        .unwrap_or_else(|_| "http://session_broker:9002".to_string())
 }
 
 fn ack_disabled_from_env() -> bool {
@@ -91,13 +81,18 @@ fn ack_wait_from_env() -> Duration {
 
 fn recovery_disabled_from_env() -> bool {
     // Operator escape hatch. The default is "fail to start if recovery
-    // cannot reach session-broker after MAX_ATTEMPTS"; this flag
-    // restores the previous "start with an empty store no matter what"
-    // behaviour. Intended for break-glass scenarios where session-broker
-    // is unrecoverable and control-plane needs to come up empty so new
+    // cannot reach postgres after MAX_ATTEMPTS"; this flag restores
+    // the previous "start with an empty store no matter what"
+    // behaviour. Intended for break-glass scenarios where the DB is
+    // unrecoverable and control-plane needs to come up empty so new
     // spawns can be reconciled by hand. Not part of the supported
     // posture; setting this is an explicit decision to start with an
     // unknown live state.
+    //
+    // Name kept verbatim from the pre-round-3 implementation (was
+    // documented as "session-broker unreachable"); the underlying
+    // semantics are the same — "I accept the consequences of starting
+    // empty" — and operator runbooks already grep for it.
     matches!(
         std::env::var("BOTWORK_CONTROL_PLANE_DISABLE_RECOVERY")
             .as_deref()
@@ -113,6 +108,33 @@ async fn main() {
         .with_env_filter(filter)
         .with_target(false)
         .init();
+
+    // RFE #105 round-3 follow-up: connect to postgres up front. Both
+    // recovery (further down) and the future janitor surface need
+    // the same handle, and a missing/unparseable URL is a hard
+    // misconfig — fail fast with the exit-code convention the other
+    // DB-aware consumers (config-broker, admin-api, session-broker)
+    // already use.
+    //
+    // No env-leakage worry: control-plane is a production binary,
+    // BOTWORK_DATABASE_URL is always set by the systemd unit's
+    // EnvironmentFile=/var/lib/botwork-db/secret.env (rendered by
+    // botwork-db-init.service at first boot).
+    let db = match connect_from_env().await {
+        Ok(db) => Arc::new(db),
+        Err(ConnectError::MissingUrl) => {
+            error!(
+                "{PREFIX} {DATABASE_URL_ENV} is not set; recovery now reads from postgres \
+                 directly — add EnvironmentFile=/var/lib/botwork-db/secret.env to the \
+                 botwork-control-plane.service unit"
+            );
+            std::process::exit(2);
+        }
+        Err(ConnectError::Db(err)) => {
+            error!("{PREFIX} failed to connect to postgres: {err}");
+            std::process::exit(3);
+        }
+    };
 
     // Build the store first; recovery seeds INTO it before the HTTP
     // and xDS servers start accepting requests. AppState holds the
@@ -142,9 +164,7 @@ async fn main() {
              starting with empty store"
         );
     } else {
-        let endpoint = session_broker_endpoint_from_env();
-        info!("{PREFIX} session-broker endpoint: {endpoint}");
-        match run_recovery_with_retries(store.clone(), &endpoint).await {
+        match run_recovery_with_retries(store.clone(), db.as_ref()).await {
             Ok(count) => {
                 info!("{PREFIX} cold-start recovery complete: {count} session(s) seeded");
             }
@@ -214,5 +234,10 @@ async fn main() {
             }
         }
     }
+    // Drop the DB handle explicitly so any pool drain happens before
+    // the process exits 1. Cosmetic — process exit closes connections
+    // either way — but greppable if a future debug shows a pool
+    // leak.
+    drop(db);
     std::process::exit(1);
 }
