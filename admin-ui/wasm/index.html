@@ -20,6 +20,20 @@
   <title>botwork admin</title>
 
   <!--
+    Inline data: favicon. The browser ALWAYS requests /favicon.ico
+    on a page load, even with no <link rel="icon"> hint, and the
+    ingress envoy treats /favicon.ico as MCP traffic (catch-all
+    route → ext_authz → 401). Surfacing that 401 in the network
+    panel is operator-confusing noise; a zero-byte data URL
+    satisfies the browser without making a network request.
+    The day admin-ui gets a real icon, swap this for a
+    `<link data-trunk rel="icon" href="favicon.png">` and trunk
+    will fingerprint + emit it under /admin/ like every other
+    asset.
+  -->
+  <link rel="icon" href="data:," />
+
+  <!--
     Trunk replaces the <link data-trunk rel="rust"> tag with the
     compiled WASM + JS loader. `data-wasm-opt="z"` enables
     wasm-opt level z on release builds (smallest size); dev

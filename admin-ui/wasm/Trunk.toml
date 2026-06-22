@@ -12,6 +12,31 @@
 target = "index.html"
 dist = "dist"
 
+# `public_url` is the URL prefix trunk stamps into every reference in
+# the rendered `index.html` — the wasm-bindgen JS loader, the `.wasm`
+# preload, any `data-trunk` CSS/font/asset. Default is `/`, which would
+# emit `/botwork-admin-ui-wasm-<hash>.js` etc.
+#
+# We must set it to `/admin/` because:
+#
+#   * the ingress envoy only routes `/admin/*` (UI bundle) and
+#     `/admin/api/*` (JSON) to the admin clusters. Everything else
+#     falls through to the catch-all MCP route → ext_authz → 401.
+#     With `public_url = "/"`, the browser successfully loads
+#     `/admin/` (the HTML shell), then parses it and requests
+#     `/botwork-admin-ui-wasm-<hash>.js` — which 401s, surfacing as
+#     `NS_ERROR_CORRUPTED_CONTENT` in Firefox / `ERR_HTTP_RESPONSE_
+#     CODE_FAILURE` in Chrome.
+#   * the admin-ui server itself only registers `/admin/*rest` for
+#     bundle assets, so even on the same origin a root-relative
+#     `/foo.js` would 404 here.
+#
+# In the local dev loop (`trunk serve`) trunk serves the bundle at
+# `/admin/...` from its own listener, the proxy below forwards
+# `/admin/api/...` to the local admin-api, and the loop matches
+# production exactly.
+public_url = "/admin/"
+
 [serve]
 # Listen on loopback only — dev convenience, never exposed to the LAN.
 address = "127.0.0.1"
@@ -19,9 +44,10 @@ port = 8080
 
 # Proxy /admin/api/v1/* to a locally-running admin-api binary so the
 # dev loop is "cargo run -p botwork-admin-api in one terminal, trunk
-# serve in another, open http://127.0.0.1:8080/." No CORS, no docker.
-# In production the bundle is served from /admin/ on the same origin
-# as the API by the ingress envoy, so the fetch paths are unchanged.
+# serve in another, open http://127.0.0.1:8080/admin/." No CORS, no
+# docker. In production the bundle is served from /admin/ on the same
+# origin as the API by the ingress envoy, so the fetch paths are
+# unchanged.
 [[proxy]]
 backend = "http://127.0.0.1:9400/admin/api/v1/"
 rewrite = "/admin/api/v1/"
