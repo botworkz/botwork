@@ -197,6 +197,14 @@ pub async fn handle_container_exit(
 
     state.session_registry.record_teardown(container_name).await;
 
+    // RFE #105 round-3 PR2: mark the session_worker row reaped. The
+    // record_reap path is no-op-if-already-reaped (the teardown_session
+    // path and the docker-exit path can both converge on the same
+    // container), so concurrent invocation is safe.
+    if let Some(writer) = state.session_worker_writer.as_ref() {
+        writer.record_reap(container_name).await;
+    }
+
     // Best-effort: container is already gone, but the launcher still needs to
     // unmount the staging directory.  Fire and forget to not block the response.
     let launcher_path = state.launcher_socket_path.clone();

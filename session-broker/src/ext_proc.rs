@@ -529,6 +529,13 @@ async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
     {
         writer.record_inactive(&tenant, &workspace, &agent_id).await;
     }
+    // RFE #105 round-3 PR2: mark the session_worker row as reaped.
+    // Container is gone, row stays for audit/billing until the
+    // janitor sweeps it. Lookup is by container_name (globally
+    // unique); we don't need the agent_session linkage here.
+    if let Some(writer) = state.session_worker_writer.as_ref() {
+        writer.record_reap(&teardown.container_name).await;
+    }
 }
 
 /// Cancels any pending grace timer and removes the liveness entry for
@@ -832,6 +839,12 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
     });
     let registry = Arc::clone(&state.session_registry);
     let agent_session_writer = state.agent_session_writer.clone();
+    // RFE #105 round-3 PR2: per the failure-model in
+    // session_worker.rs, mark the worker row reaped on the
+    // background teardown task — same shape as the agent_session
+    // inactive transition above.
+    let session_worker_writer = state.session_worker_writer.clone();
+    let container_name_for_reap = container_name.clone();
     let launcher_path = state.launcher_socket_path.clone();
     tokio::spawn(async move {
         registry.record_teardown(&container_name).await;
@@ -840,6 +853,9 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
             (agent_session_writer, agent_session_identity)
         {
             writer.record_inactive(&tenant, &workspace, &agent_id).await;
+        }
+        if let Some(writer) = session_worker_writer {
+            writer.record_reap(&container_name_for_reap).await;
         }
     });
 }
@@ -861,6 +877,20 @@ async fn spawn_new_container(
     let container_name = format!("mcp_session_{token}");
     let staging_path = staging_path(tenant_name, &token);
     let start = Instant::now();
+    // RFE #105 round-3 PR2: stamp the three identity labels on every
+    // spawned container. session-broker is the only writer; the
+    // launcher's wire validator (#115) enforces the `io.botworkz.*`
+    // namespace + value-shape rules. The agent_session_id is
+    // intentionally NOT here — it arrives one round-trip later on
+    // the first non-init JSON-RPC call, and `docker` doesn't allow
+    // labels to be added to a running container. The DB-side
+    // `session_worker.agent_session_id` column carries that linkage
+    // instead.
+    let labels: Vec<(String, String)> = vec![
+        ("io.botworkz.tenant".to_string(), tenant_name.to_string()),
+        ("io.botworkz.workspace".to_string(), workspace.to_string()),
+        ("io.botworkz.plugin".to_string(), plugin_name.to_string()),
+    ];
     let launch_outcome = launch_session(
         &state.launcher_socket_path,
         &container_name,
@@ -868,6 +898,7 @@ async fn spawn_new_container(
         &staging_path,
         env,
         &descriptor.resources,
+        &labels,
     )
     .await?;
     let container_ip = launch_outcome.container_ip.clone();
@@ -920,6 +951,25 @@ async fn spawn_new_container(
         ));
         teardown_unannounced_container(state, &container_name, &staging_path).await;
         return Err(LauncherError::ControlPlane(err));
+    }
+
+    // RFE #105 round-3 PR2: INSERT session_worker row now that
+    // control-plane has 2xx'd the container. The row carries the
+    // plugin + container_name + container_ip; agent_session_id is
+    // NULL (the agent identity arrives one round-trip later on the
+    // first non-init JSON-RPC call) and mcp_session_id is the empty
+    // string (we backfill once response_headers observes it).
+    //
+    // Per the failure model in session_worker.rs::record_spawn,
+    // INSERT failure logs a warn and carries on — the container is
+    // up + control-plane knows about it; routing the user's first
+    // request is more important than the audit row landing. On the
+    // next cold-start recovery the missing row leads to immediate
+    // reap (the agreed posture for "live container with no DB row").
+    if let Some(writer) = state.session_worker_writer.as_ref() {
+        writer
+            .record_spawn(plugin_name, &container_name, &container_ip)
+            .await;
     }
 
     log_info(&format!(
@@ -1611,6 +1661,39 @@ impl ExternalProcessorService {
                             )
                             .await;
                     }
+                    // RFE #105 round-3 PR2: backfill the
+                    // session_worker.agent_session_id linkage now
+                    // that the agent_session row exists. We need the
+                    // PK uuid, so resolve it via the shared DB handle
+                    // — the writer surface only takes names. Failure
+                    // here is `warn!` + carry on (the row stays with
+                    // agent_session_id NULL until either the next
+                    // bind retry or cold-start recovery cleans up).
+                    if let (Some(writer), Some(db)) =
+                        (state.session_worker_writer.as_ref(), state.db.as_ref())
+                    {
+                        // Identity slugs → PKs via the AgentSessionWriter
+                        // cache surface (cheap, in-memory after first
+                        // lookup).
+                        if let Some(agent_writer) = state.agent_session_writer.as_ref() {
+                            if let Some(agent_session_pk) = agent_writer
+                                .resolve_pk(&transport.tenant_name, &transport.workspace, &agent_id)
+                                .await
+                            {
+                                writer
+                                    .record_agent_binding(
+                                        &transport.container_name,
+                                        agent_session_pk,
+                                    )
+                                    .await;
+                            }
+                        }
+                        // Suppress the unused warning on `db` — kept
+                        // on AppState for a future direct-SELECT
+                        // recovery path that bypasses the writer's
+                        // caches.
+                        let _ = db;
+                    }
                 }
             }
         }
@@ -1689,6 +1772,17 @@ impl ExternalProcessorService {
             .session_registry
             .record_mcp_session_id(&pending.container_name, &mcp_session_id)
             .await;
+        // RFE #105 round-3 PR2: backfill the session_worker row's
+        // mcp_session_id now that the upstream's initialize response
+        // has surfaced it. The row was INSERTed at spawn with the
+        // empty default; this UPDATE makes it queryable by the
+        // recovery path (which joins live docker containers to
+        // session_worker rows by container_name).
+        if let Some(writer) = state.session_worker_writer.as_ref() {
+            writer
+                .record_mcp_session_id(&pending.container_name, &mcp_session_id)
+                .await;
+        }
         liveness_bump(state, &mcp_session_id).await;
         stream.liveness_session_id = Some(mcp_session_id);
 
@@ -1824,6 +1918,14 @@ mod tests {
             // sets this via `run()`; tests pass `None` so they don't
             // need to stand up a testcontainers postgres.
             agent_session_writer: None,
+            // RFE #105 round-3 PR2: the cutover wires two
+            // additional DB-bound handles next to
+            // agent_session_writer. Test builders pass `None`
+            // the same way to stay hermetic — production
+            // populates both via `run()` once the
+            // `connect_from_env()` handle is in hand.
+            session_worker_writer: None,
+            db: None,
         }
     }
 

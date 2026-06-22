@@ -26,6 +26,14 @@ fn make_state(registry: Arc<SessionRegistry>) -> AppState {
         // container-exit path and don't care about the DB; passing
         // `None` keeps the test setup hermetic.
         agent_session_writer: None,
+        // RFE #105 round-3 PR2: the cutover wires two
+        // additional DB-bound handles next to
+        // agent_session_writer. Test builders pass `None` the
+        // same way to stay hermetic — production populates
+        // both via `run()` once the postgres handle
+        // is in hand (see lib.rs).
+        session_worker_writer: None,
+        db: None,
     }
 }
 
