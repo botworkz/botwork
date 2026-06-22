@@ -21,16 +21,27 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
+use chrono::Utc;
+
 use crate::config_broker::{self, EnvEntry, PluginDescriptor, UpstreamAuth, CONFIG_ENV_NAME};
 use crate::control_plane::{self, PostSessionRequest};
+use crate::docker::is_container_running;
 use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_ready, LauncherError};
 use crate::secrets;
-use crate::session_registry::{is_container_running, utc_now};
 use crate::{
     log_info, redact_token, AppState, PendingInit, SessionLiveness, TransportState,
     COLD_START_TIMEOUT, DEFAULT_DISCONNECT_GRACE_SECS, LIVENESS_TTL, TENANT_RE,
     TENANT_WORKSPACE_PLUGIN_PATH_RE, TOMBSTONE_TTL, WORKSPACE_RE,
 };
+
+/// `chrono::Utc::now()` formatted to the `%Y-%m-%dT%H:%M:%SZ` wire
+/// shape used across every session-broker log line that surfaces a
+/// timestamp. Pre-round-3 this lived in `session_registry.rs`; the
+/// session-registry cleanup PR moved it down here next to the only
+/// remaining caller.
+fn utc_now() -> String {
+    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
 
 static TENANT_PATTERN: OnceLock<Regex> = OnceLock::new();
 static WORKSPACE_PATTERN: OnceLock<Regex> = OnceLock::new();
@@ -520,10 +531,6 @@ async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
         let mut sessions = state.transport_sessions.lock().await;
         sessions.remove(&teardown.mcp_session_id);
     }
-    state
-        .session_registry
-        .record_teardown(&teardown.container_name)
-        .await;
     if let (Some(writer), Some((tenant, workspace, agent_id))) =
         (state.agent_session_writer.as_ref(), agent_session_identity)
     {
@@ -712,25 +719,9 @@ async fn reap_session(state: &AppState, mcp_session_id: &str) {
             staging_path: staging_path(&t.tenant_name, &t.staging_token),
         })
     };
-    // Fallback: scan registry (startup-reconciliation path).
-    let teardown = match teardown {
-        Some(t) => Some(t),
-        None => {
-            let reg = state.session_registry.read().await;
-            reg.sessions.values().find_map(|entry| {
-                if entry.mcp_session_id.as_deref() == Some(mcp_session_id) {
-                    Some(TeardownInfo {
-                        mcp_session_id: mcp_session_id.to_string(),
-                        container_name: entry.container.clone(),
-                        staging_path: entry.staging_path.clone(),
-                    })
-                } else {
-                    None
-                }
-            })
-        }
-    };
-
+    // Round-3 cutover: the registry-fallback scan is gone with
+    // sessions.json. If the in-memory transport entry is absent
+    // here, the session is already torn down — nothing to do.
     if let Some(teardown) = teardown {
         teardown_session(state, &teardown).await;
     } else {
@@ -745,18 +736,21 @@ async fn reap_session(state: &AppState, mcp_session_id: &str) {
 /// the grace period are reaped; sessions that do reconnect have the timer
 /// cancelled by the normal [`liveness_bump`] path.
 pub async fn seed_startup_liveness(state: &AppState) {
-    let reg_data = state.session_registry.read().await;
-    for entry in reg_data.sessions.values() {
-        let Some(ref mcp_session_id) = entry.mcp_session_id else {
-            continue;
-        };
+    // Round-3 cutover: walks the recovered `transport_sessions` map
+    // (populated by `recovery::recover_live_workers`) and arms a
+    // grace timer for each. Pre-cutover this drew from
+    // sessions.json; same shape, different feed.
+    let sessions = state.transport_sessions.lock().await;
+    let mcp_session_ids: Vec<String> = sessions.keys().cloned().collect();
+    drop(sessions);
+    for mcp_session_id in mcp_session_ids {
         let liveness = Arc::new(SessionLiveness::default());
         state
             .stream_liveness
             .lock()
             .await
             .insert(mcp_session_id.clone(), Arc::clone(&liveness));
-        schedule_grace_timer(state.clone(), mcp_session_id.clone(), liveness).await;
+        schedule_grace_timer(state.clone(), mcp_session_id, liveness).await;
     }
 }
 
@@ -837,7 +831,6 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
             agent_id.clone(),
         )
     });
-    let registry = Arc::clone(&state.session_registry);
     let agent_session_writer = state.agent_session_writer.clone();
     // RFE #105 round-3 PR2: per the failure-model in
     // session_worker.rs, mark the worker row reaped on the
@@ -847,7 +840,6 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
     let container_name_for_reap = container_name.clone();
     let launcher_path = state.launcher_socket_path.clone();
     tokio::spawn(async move {
-        registry.record_teardown(&container_name).await;
         call_teardown(&launcher_path, &container_name, &staging_path).await;
         if let (Some(writer), Some((tenant, workspace, agent_id))) =
             (agent_session_writer, agent_session_identity)
@@ -1504,18 +1496,6 @@ impl ExternalProcessorService {
                 }
             };
 
-            state
-                .session_registry
-                .record_spawn(
-                    &pending.container_name,
-                    &staging_path(&pending.tenant_name, &pending.staging_token),
-                    &pending.tenant_name,
-                    &pending.workspace,
-                    &pending.descriptor.image,
-                    &pending.created_at,
-                )
-                .await;
-
             {
                 let mut pending_init = state.pending_init.lock().await;
                 pending_init.insert(stream.stream_id.clone(), pending.clone());
@@ -1632,7 +1612,6 @@ impl ExternalProcessorService {
                 )
                 .await;
                 if result.is_ok() {
-                    let bound_at = utc_now();
                     transport.agent_id = Some(agent_id.clone());
                     {
                         let mut sessions = state.transport_sessions.lock().await;
@@ -1644,14 +1623,9 @@ impl ExternalProcessorService {
                             }
                         }
                     }
-                    state
-                        .session_registry
-                        .record_agent_bound(&transport.container_name, &agent_id, &bound_at)
-                        .await;
-                    // RFE #105 PR2: mirror the bind into postgres. The
-                    // JSON registry above stays authoritative for
-                    // recovery in PR2; the DB writer is shadow until
-                    // round-3 deletes the JSON path.
+                    // RFE #105 PR2: mirror the bind into postgres.
+                    // Round-3 deleted the JSON registry; this is now the
+                    // only durable record of the bind.
                     if let Some(writer) = state.agent_session_writer.as_ref() {
                         writer
                             .record_bind_agent(
@@ -1768,10 +1742,6 @@ impl ExternalProcessorService {
                 },
             );
         }
-        state
-            .session_registry
-            .record_mcp_session_id(&pending.container_name, &mcp_session_id)
-            .await;
         // RFE #105 round-3 PR2: backfill the session_worker row's
         // mcp_session_id now that the upstream's initialize response
         // has surfaced it. The row was INSERTed at spawn with the
@@ -1890,7 +1860,6 @@ pub async fn serve_grpc(state: AppState, addr: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_registry::SessionRegistry;
     use crate::test_support::{start_log_capture, take_log_capture};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock};
@@ -1903,7 +1872,6 @@ mod tests {
         // argument is consulted by the routing-of-known-sessions tests in
         // this file. Kept on the signature to minimise call-site churn.
         AppState {
-            session_registry: Arc::new(SessionRegistry::new("/tmp/ext-proc-unit-sessions.json")),
             transport_sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_init: Arc::new(Mutex::new(HashMap::new())),
             launcher_socket_path: "/tmp/ext-proc-unit-launcher.sock".to_string(),

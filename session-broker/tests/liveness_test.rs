@@ -5,7 +5,8 @@
 //! - Grace timer arms when count hits 0
 //! - Reconnect within grace cancels the timer
 //! - Unknown-session POST does not create a liveness entry
-//! - `seed_startup_liveness` seeds entries from the on-disk registry
+//! - `seed_startup_liveness` seeds entries from `transport_sessions`
+//!   (post-RFE-#105 round-3; pre-cutover this was from sessions.json)
 //! - `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` env-knob is honoured
 
 use std::collections::HashMap;
@@ -16,12 +17,10 @@ use botwork_session_broker::config_broker::UpstreamAuth;
 use botwork_session_broker::ext_proc::{
     seed_startup_liveness, ExternalProcessorService, PerStreamState,
 };
-use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
 use botwork_session_broker::test_support::{liveness_drop, start_log_capture, take_log_capture};
 use botwork_session_broker::{AppState, TransportState};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use envoy_proto::envoy::service::ext_proc::v3::HttpHeaders;
-use tempfile::tempdir;
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -45,14 +44,7 @@ fn make_headers(values: &[(&str, &str)]) -> HttpHeaders {
 }
 
 fn make_state() -> AppState {
-    make_state_with_registry(Arc::new(SessionRegistry::new(
-        "/tmp/botwork-liveness-test-sessions.json",
-    )))
-}
-
-fn make_state_with_registry(registry: Arc<SessionRegistry>) -> AppState {
     AppState {
-        session_registry: registry,
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path: "/tmp/missing-launcher.sock".to_string(),
@@ -62,17 +54,12 @@ fn make_state_with_registry(registry: Arc<SessionRegistry>) -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
-        // RFE #105 PR2: agent_session write-through is plumbed via
-        // `run()` in production. Liveness tests drive the grace
-        // state machine without touching the DB; passing `None`
-        // keeps them hermetic.
+        // RFE #105 PR2 / round-3: production wires three DB-bound
+        // handles via `run()`. Liveness tests drive the grace state
+        // machine against an in-memory `transport_sessions` map only,
+        // so `None` keeps the setup hermetic — no testcontainers
+        // postgres required.
         agent_session_writer: None,
-        // RFE #105 round-3 PR2: the cutover wires two
-        // additional DB-bound handles next to
-        // agent_session_writer. Test builders pass `None` the
-        // same way to stay hermetic — production populates
-        // both via `run()` once the postgres handle
-        // is in hand (see lib.rs).
         session_worker_writer: None,
         db: None,
     }
@@ -416,56 +403,23 @@ async fn reconnect_within_grace_cancels_timer() {
 }
 
 // ---------------------------------------------------------------------------
-// seed_startup_liveness: registry sessions get grace entries
+// seed_startup_liveness: every transport_sessions entry gets a liveness row
 // ---------------------------------------------------------------------------
+//
+// Pre-RFE-#105 round-3 this read from the on-disk session registry. After the
+// cutover the recovery path seeds `transport_sessions` from the DB + docker
+// inspect, and `seed_startup_liveness` walks that map instead. Same property
+// either way: every keyed Mcp-Session-Id gets a grace-timer-armed entry with
+// open_streams=0.
 
 #[tokio::test]
-async fn seed_startup_liveness_seeds_entries_from_registry() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("sessions.json");
-    let registry = Arc::new(SessionRegistry::new(path.to_str().unwrap()));
+async fn seed_startup_liveness_seeds_entries_from_transport_sessions() {
+    let state = make_state();
 
-    registry
-        .record_spawn(
-            "mcp_session_seed1",
-            "/staging/seed1",
-            "tenant1",
-            "mcp",
-            "botwork/plugin:local",
-            &utc_now(),
-        )
-        .await;
-    registry
-        .record_mcp_session_id("mcp_session_seed1", "sid-seed-1")
-        .await;
+    // Plant two recovered transports.
+    insert_transport(&state, "sid-seed-1", "mcp_session_seed1").await;
+    insert_transport(&state, "sid-seed-2", "mcp_session_seed2").await;
 
-    registry
-        .record_spawn(
-            "mcp_session_seed2",
-            "/staging/seed2",
-            "tenant1",
-            "mcp",
-            "botwork/plugin:local",
-            &utc_now(),
-        )
-        .await;
-    registry
-        .record_mcp_session_id("mcp_session_seed2", "sid-seed-2")
-        .await;
-
-    // A container that has no mcp_session_id yet should NOT get an entry.
-    registry
-        .record_spawn(
-            "mcp_session_seed3",
-            "/staging/seed3",
-            "tenant1",
-            "mcp",
-            "botwork/plugin:local",
-            &utc_now(),
-        )
-        .await;
-
-    let state = make_state_with_registry(Arc::clone(&registry));
     seed_startup_liveness(&state).await;
 
     // Give the spawned grace-timer tasks a moment to store their handles.
@@ -479,10 +433,6 @@ async fn seed_startup_liveness_seeds_entries_from_registry() {
     assert!(
         map.contains_key("sid-seed-2"),
         "sid-seed-2 should have a liveness entry"
-    );
-    assert!(
-        !map.contains_key("sid-seed-3"),
-        "container without mcp_session_id should not have entry"
     );
     assert_eq!(map.len(), 2, "exactly two entries expected");
 

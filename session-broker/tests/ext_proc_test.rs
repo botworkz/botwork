@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use botwork_session_broker::config_broker::{
     EnvEntry, PluginDescriptor, PluginResources, UpstreamAuth,
@@ -9,7 +8,6 @@ use botwork_session_broker::config_broker::{
 use botwork_session_broker::ext_proc::{
     upstream_header_mutation, ExternalProcessorService, PerStreamState, TeardownInfo,
 };
-use botwork_session_broker::session_registry::SessionRegistry;
 use botwork_session_broker::test_support::{start_log_capture, take_log_capture};
 use botwork_session_broker::{AppState, PendingInit, TransportState};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
@@ -20,12 +18,6 @@ use tempfile::tempdir;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::Mutex;
-
-fn session_registry_path() -> &'static str {
-    static PATH: OnceLock<String> = OnceLock::new();
-    PATH.get_or_init(|| "/tmp/botwork-session-broker-ext-proc-tests-sessions.json".to_string())
-        .as_str()
-}
 
 /// Routing-of-known-sessions builder: pre-existing tests pass a launcher
 /// socket path (and sometimes an auth URL); after the cutover the builder no
@@ -54,7 +46,6 @@ fn app_state_with_plugins_and_endpoints(
     config_broker_endpoint: String,
 ) -> AppState {
     AppState {
-        session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
@@ -64,15 +55,12 @@ fn app_state_with_plugins_and_endpoints(
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
-        // RFE #105 PR2: DB write-through is production-only; tests
-        // pass `None` so they stay hermetic.
+        // RFE #105 PR2 / round-3: production wires three DB-bound
+        // handles via `run()`. ext_proc tests drive the gRPC
+        // surface against in-memory `transport_sessions` only, so
+        // `None` keeps the setup hermetic — no testcontainers
+        // postgres required.
         agent_session_writer: None,
-        // RFE #105 round-3 PR2: the cutover wires two
-        // additional DB-bound handles next to
-        // agent_session_writer. Test builders pass `None` the
-        // same way to stay hermetic — production populates
-        // both via `run()` once the postgres handle
-        // is in hand (see lib.rs).
         session_worker_writer: None,
         db: None,
     }
@@ -114,7 +102,6 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
     // unreachable" — we point the endpoint at a closed port and let any
     // spawn attempt collapse to a 502.
     AppState {
-        session_registry: Arc::new(SessionRegistry::new(session_registry_path())),
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
@@ -124,15 +111,12 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
-        // RFE #105 PR2: DB write-through is production-only; tests
-        // pass `None` so they stay hermetic.
+        // RFE #105 PR2 / round-3: production wires three DB-bound
+        // handles via `run()`. ext_proc tests drive the gRPC
+        // surface against in-memory `transport_sessions` only, so
+        // `None` keeps the setup hermetic — no testcontainers
+        // postgres required.
         agent_session_writer: None,
-        // RFE #105 round-3 PR2: the cutover wires two
-        // additional DB-bound handles next to
-        // agent_session_writer. Test builders pass `None` the
-        // same way to stay hermetic — production populates
-        // both via `run()` once the postgres handle
-        // is in hand (see lib.rs).
         session_worker_writer: None,
         db: None,
     }
@@ -2007,35 +1991,6 @@ fn extract_header_value(request: &str, header_name: &str) -> Option<String> {
     })
 }
 
-fn app_state_with_session_registry(
-    launcher_socket_path: String,
-    registry: Arc<SessionRegistry>,
-) -> AppState {
-    AppState {
-        session_registry: registry,
-        transport_sessions: Arc::new(Mutex::new(HashMap::new())),
-        pending_init: Arc::new(Mutex::new(HashMap::new())),
-        launcher_socket_path,
-        auth_broker_url: "http://127.0.0.1:1".to_string(),
-        config_broker_endpoint: "http://127.0.0.1:1".to_string(),
-        control_plane_endpoint: "http://127.0.0.1:1".to_string(),
-        tombstones: Arc::new(Mutex::new(HashMap::new())),
-        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
-        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
-        // RFE #105 PR2: DB write-through is production-only; tests
-        // pass `None` so they stay hermetic.
-        agent_session_writer: None,
-        // RFE #105 round-3 PR2: the cutover wires two
-        // additional DB-bound handles next to
-        // agent_session_writer. Test builders pass `None` the
-        // same way to stay hermetic — production populates
-        // both via `run()` once the postgres handle
-        // is in hand (see lib.rs).
-        session_worker_writer: None,
-        db: None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // DELETE teardown tests
 // ---------------------------------------------------------------------------
@@ -2133,20 +2088,13 @@ async fn response_headers_delete_teardown_drops_session_and_calls_launcher() {
     )
     .await;
 
-    let registry_path = temp_dir.path().join("sessions.json");
-    let registry = Arc::new(SessionRegistry::new(registry_path.to_str().unwrap()));
-    registry
-        .record_spawn(
-            "mcp_session_abc",
-            "/var/lib/botwork/tenants/tenant1/staging/abcdef",
-            "tenant1",
-            "mcp",
-            "botwork/plugin-a:local",
-            "2026-01-01T00:00:00Z",
-        )
-        .await;
-
-    let state = app_state_with_session_registry(path_to_string(&socket_path), registry);
+    // Pre-RFE-#105 round-3 this test seeded a `SessionRegistry` row
+    // here and asserted on its removal at the end. After the
+    // cutover the registry is gone — the equivalent property is
+    // "the transport_sessions entry is removed AND the launcher was
+    // called with the right payload", which is what the remaining
+    // assertions below pin.
+    let state = app_state_with_plugins(path_to_string(&socket_path));
     insert_transport(
         &state,
         "sess-1",
@@ -2200,13 +2148,6 @@ async fn response_headers_delete_teardown_drops_session_and_calls_launcher() {
         .await
         .get("sess-1")
         .is_none());
-
-    // session_registry entry removed
-    let reg_data = state.session_registry.read().await;
-    assert!(
-        !reg_data.sessions.contains_key("mcp_session_abc"),
-        "registry should not contain mcp_session_abc after teardown"
-    );
 
     // response still continues normally
     assert!(matches!(
@@ -2453,31 +2394,6 @@ async fn different_workspaces_same_tenant_and_agent_get_distinct_agent_dirs() {
         dir1, dir2,
         "agent_dirs with different workspaces must differ"
     );
-}
-
-#[tokio::test]
-async fn session_entry_serialization_includes_tenant_and_workspace() {
-    use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("sessions.json");
-    let registry = SessionRegistry::new(path.to_str().unwrap());
-
-    registry
-        .record_spawn(
-            "mcp_session_aabbccddeeff",
-            "/staging/x",
-            "acme",
-            "dev",
-            "botwork/mcp-echo:local",
-            &utc_now(),
-        )
-        .await;
-
-    let content = std::fs::read_to_string(&path).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-    let entry = &json["sessions"]["mcp_session_aabbccddeeff"];
-    assert_eq!(entry["tenant"], "acme");
-    assert_eq!(entry["workspace"], "dev");
 }
 
 #[allow(dead_code)]

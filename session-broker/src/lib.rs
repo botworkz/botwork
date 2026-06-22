@@ -2,12 +2,12 @@ pub mod admin;
 pub mod agent_session;
 pub mod config_broker;
 pub mod control_plane;
+pub mod docker;
 pub mod exit_listener;
 pub mod ext_proc;
 pub mod launcher;
 pub mod recovery;
 pub mod secrets;
-pub mod session_registry;
 pub mod session_worker;
 pub mod sweeper;
 
@@ -20,7 +20,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::config_broker::{PluginDescriptor, UpstreamAuth};
-use crate::session_registry::SessionRegistry;
 
 pub const PREFIX: &str = "[session-broker]";
 pub const SESSION_PORT: u16 = 8000;
@@ -189,7 +188,6 @@ impl fmt::Debug for PendingInit {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub session_registry: Arc<SessionRegistry>,
     pub transport_sessions: Arc<Mutex<HashMap<String, TransportState>>>,
     pub pending_init: Arc<Mutex<HashMap<String, PendingInit>>>,
     pub launcher_socket_path: String,
@@ -274,16 +272,22 @@ pub async fn run() -> Result<(), String> {
         .with_target(false)
         .try_init();
 
-    let session_registry_path = std::env::var("BOTWORK_SESSION_REGISTRY_PATH")
+    // Round-3 cutover (RFE #105 PR2 followup): sessions.json is no
+    // longer the source of truth, and after this PR there is no
+    // `SessionRegistry` shape at all. If the file exists from a prior
+    // installation, dump its contents to the journal once (so an
+    // operator can audit it against `docker ps`) and unlink it. The
+    // `recover_live_workers` path below rebuilds in-memory state
+    // from the DB + docker labels.
+    //
+    // `BOTWORK_SESSION_REGISTRY_PATH` is still honoured as an
+    // operator escape hatch — pointing at a non-default path lets
+    // ops drive the one-time migration on an unusual layout — but
+    // there is no longer a runtime read or write against the path
+    // beyond this initial sweep.
+    let legacy_registry_path = std::env::var("BOTWORK_SESSION_REGISTRY_PATH")
         .unwrap_or_else(|_| "/var/lib/botwork/sessions.json".to_string());
-
-    let session_registry = Arc::new(SessionRegistry::new(&session_registry_path));
-    // Round-3 cutover: sessions.json is no longer the source of truth.
-    // If the file exists from a prior installation, dump its content
-    // to the journal once (so an operator can audit it against
-    // `docker ps`) and unlink it. The new `recover_live_workers`
-    // path below rebuilds in-memory state from the DB + docker labels.
-    crate::recovery::migrate_legacy_sessions_json(&session_registry_path);
+    crate::recovery::migrate_legacy_sessions_json(&legacy_registry_path);
 
     // RFE #105 PR2: connect to postgres and build the agent_session
     // write-through handle. Same env contract as config-broker /
@@ -333,7 +337,6 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "/run/botwork/broker.sock".to_string());
 
     let state = AppState {
-        session_registry,
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path,
