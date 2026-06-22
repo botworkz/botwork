@@ -21,7 +21,8 @@ use botwork_entity::{plugin, tenant, workspace, workspace_plugin};
 
 use botwork_admin_core::plugin_spec::ValidatedPlugin;
 
-use crate::config::BootstrapConfig;
+use botwork_admin_core::BootstrapConfig;
+
 use crate::error::BootstrapError;
 
 /// Per-table mutation counts so the production binary can emit a

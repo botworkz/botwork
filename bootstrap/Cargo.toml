@@ -16,6 +16,9 @@ name = "botwork-bootstrap"
 path = "src/main.rs"
 
 [dependencies]
+# admin-core owns the bootstrap-config shape + validators since RFE
+# #106 bootstrap-retirement; bootstrap depends on it for everything
+# except the sea-orm writer in runner.rs.
 botwork-admin-core = { path = "../admin-core" }
 botwork-entity = { path = "../db/entity" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -27,7 +30,6 @@ sea-orm = { version = "1.1.20", default-features = false, features = [
     "with-chrono",
     "with-json",
 ] }
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "2"

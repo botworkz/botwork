@@ -5,11 +5,12 @@
 //! variant in `src/main.rs`). Keep the variant set small and stable;
 //! the exit-code mapping is part of the systemd contract.
 //!
-//! Per-entry validation rules live in `botwork-admin-core` and emit a
-//! `ValidationError`; that crate's variants (EmptyName /
-//! PluginInvalid / BindingInvalid) are lifted into this enum 1:1 by
-//! the `From<ValidationError>` impl below so the `?` operator works
-//! through the shared validator from both this crate and admin-api.
+//! All shape / per-entry / list-level validation lives in
+//! `botwork-admin-core` (which also fronts admin-api and
+//! `botwork-tools bootstrap`). This file owns the bootstrap-specific
+//! errors only: file IO, sea-orm DB failures, and the lift from
+//! `ValidationError` into this enum's flat variants so the exit-code
+//! switch in `main.rs` keeps discriminating cleanly.
 
 use botwork_admin_core::ValidationError;
 use thiserror::Error;
@@ -78,33 +79,61 @@ pub enum BootstrapError {
     #[error("plugin '{plugin}': {detail}")]
     PluginInvalid { plugin: String, detail: String },
 
-    /// Per-binding `config:` blob failed validation (non-mapping,
-    /// oversized, etc.). `context` is e.g.
-    /// `tenant 'phlax' workspace 'mcp' plugin 'mcp-fetch'` so the
-    /// operator can find it.
+    /// Per-binding `config:` blob failed validation. Same shape as
+    /// `PluginInvalid` but for `tenants[].workspaces[].plugins[].config`.
     #[error("{context}: {detail}")]
     BindingInvalid { context: String, detail: String },
 
-    // -- Runtime-side errors ----------------------------------------------
-    #[error("connection failed: {0}")]
-    Connect(#[from] botwork_entity::ConnectError),
-
-    /// Generic DB error from SeaORM. We don't try to discriminate further
-    /// in v0; the wrapping `journalctl` line already names the operation.
-    #[error("database error: {0}")]
+    // -- DB-side errors ---------------------------------------------------
+    #[error(transparent)]
     Db(#[from] sea_orm::DbErr),
 }
 
 impl From<ValidationError> for BootstrapError {
     fn from(err: ValidationError) -> Self {
         match err {
-            ValidationError::EmptyName(path) => BootstrapError::EmptyName(path),
+            ValidationError::EmptyName(path) => Self::EmptyName(path),
             ValidationError::PluginInvalid { plugin, detail } => {
-                BootstrapError::PluginInvalid { plugin, detail }
+                Self::PluginInvalid { plugin, detail }
             }
             ValidationError::BindingInvalid { context, detail } => {
-                BootstrapError::BindingInvalid { context, detail }
+                Self::BindingInvalid { context, detail }
             }
+            ValidationError::DuplicatePlugin(name) => Self::DuplicatePlugin(name),
+            ValidationError::DuplicateTenant(name) => Self::DuplicateTenant(name),
+            ValidationError::DuplicateWorkspace { tenant, workspace } => {
+                Self::DuplicateWorkspace { tenant, workspace }
+            }
+            ValidationError::DuplicateBinding {
+                tenant,
+                workspace,
+                plugin,
+            } => Self::DuplicateBinding {
+                tenant,
+                workspace,
+                plugin,
+            },
+            ValidationError::UnknownPluginRef {
+                tenant,
+                workspace,
+                plugin,
+            } => Self::UnknownPluginRef {
+                tenant,
+                workspace,
+                plugin,
+            },
+        }
+    }
+}
+
+impl From<botwork_admin_core::config::LoadError> for BootstrapError {
+    fn from(err: botwork_admin_core::config::LoadError) -> Self {
+        use botwork_admin_core::config::LoadError as L;
+        match err {
+            L::NotFound(p) => Self::ConfigNotFound(p),
+            L::Read { path, err } => Self::ConfigRead { path, err },
+            L::Parse(e) => Self::ConfigParse(e),
+            L::Validation(v) => v.into(),
         }
     }
 }
