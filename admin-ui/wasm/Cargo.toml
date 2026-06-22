@@ -17,10 +17,16 @@ crate-type = ["cdylib", "rlib"]
 # cross-project upgrades happening in that repo.
 leptos = { version = "0.8", features = ["csr"] }
 
+# Client-side routing under /admin/. We use leptos_router rather than
+# rolling our own URL→component map so deep links work (the server
+# falls back any unknown /admin/* path to index.html, and the SPA
+# router takes over from there).
+leptos_router = "0.8"
+
 # WASM / JS interop. `web-sys` features stay minimal in v0; we only
-# need `Window` for the `fetch` call against the admin-api health
-# endpoint and `console` for `console_error_panic_hook`. Add more
-# as new components require them.
+# need `Window` for the `fetch` calls against admin-api and `console`
+# for `console_error_panic_hook`. Add more as new components require
+# them.
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
