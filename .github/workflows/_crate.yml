@@ -1,0 +1,295 @@
+# Reusable per-crate CI workflow.
+#
+# Called from .github/workflows/containers.yml as a matrix fan-out so each
+# botwork container crate (session-broker, config-broker, control-plane,
+# db/migration, bootstrap, admin-api, admin-ui) gets its own runner.
+#
+# Modelled after botworkz/mcp-extra's `_crate.yml`:
+#
+#   * `Swatinem/rust-cache@v2` warms `~/.cargo/registry`, `~/.cargo/git`,
+#     and the workspace `target/` across runs of this workflow. The cargo
+#     step below uses that cached state by mounting `~/.cargo` and the
+#     workspace into the per-crate `ci-tools` Docker image. `target/`
+#     stays on the host so it survives across pushes — this is the
+#     biggest win over round 1, where each runner cold-compiled the whole
+#     workspace inside earthly's buildkit instance.
+#
+#   * The per-crate Dockerfile is the single source of truth for what
+#     this crate needs at runtime AND what its CI toolchain needs. Both
+#     come from the same file: the `ci-tools` stage adds rustfmt/clippy
+#     and any per-crate apt deps the tests need, the runtime stage takes
+#     a prebuilt binary via `--build-arg BINARY_SOURCE=prebuilt`.
+#
+#   * The runtime image build is pure-COPY (no cargo runs), so the bytes
+#     inside `botwork/<service>:local` are byte-identical to the binary
+#     the cargo step just tested. Round 3 will make the publish job
+#     consume the `<crate>-image` artifact uploaded here instead of
+#     rebuilding from source — the round-1 label-revision verification
+#     step in release.yml is what falls out at that point.
+#
+# Inputs:
+#
+#   * crate     — workspace-relative path to the crate dir that hosts
+#                 the Dockerfile and smoke.sh. Drives:
+#                   - `${crate}/Dockerfile` (hadolint + docker build)
+#                   - `${crate}/smoke.sh`   (smoke test)
+#                   - `.ci-prebuilt/${crate}/` (BINARY_SOURCE=prebuilt
+#                     handoff path)
+#                 For the simple crates this is the crate name on the
+#                 workspace tree; for `db/migration` and `admin-ui`
+#                 (where the image covers two crates) it's the directory
+#                 that owns the Dockerfile.
+#   * service   — image suffix (`botwork/<service>:local`) and earthly
+#                 target name. Differs from `crate` for `db/migration`
+#                 (`db-migrate`) and for the artifact name; uniform for
+#                 the rest.
+#   * package   — cargo workspace package the image wraps
+#                 (`botwork-session-broker`, …). Passed to `cargo fmt/
+#                 clippy/test/build -p ${package}`.
+#   * binary    — name of the executable cargo produces under
+#                 `target/release/`. Usually identical to `package`
+#                 (single-bin crates); declared explicitly anyway so
+#                 the staging step is unambiguous.
+#   * needs-db-migrate
+#               — whether the smoke test wants `botwork/db-migrate:local`
+#                 present locally as a fixture. Today only `bootstrap`
+#                 and `admin-api` do; we build db-migrate via the
+#                 `BINARY_SOURCE=source` path on the same runner because
+#                 the per-crate matrix doesn't expose cross-job artifact
+#                 reuse. This is the one place the round-2 shape costs us
+#                 versus round 1 — fine tradeoff, the source build is
+#                 still cached by the docker layer cache.
+
+name: Crate
+
+on:
+  workflow_call:
+    inputs:
+      crate:
+        description: >-
+          Workspace-relative crate directory that owns the Dockerfile and
+          smoke.sh (e.g. session-broker, db/migration, admin-ui).
+        required: true
+        type: string
+      service:
+        description: >-
+          Image suffix (`botwork/<service>:local`) and earthly target name.
+        required: true
+        type: string
+      package:
+        description: >-
+          Cargo workspace package this image wraps (e.g. botwork-admin-api).
+        required: true
+        type: string
+      binary:
+        description: >-
+          Name of the binary cargo produces under `target/release/`.
+          Usually identical to `package`.
+        required: true
+        type: string
+      needs-db-migrate:
+        description: >-
+          Build `botwork/db-migrate:local` on this runner before invoking
+          the smoke test. Set true for bootstrap/admin-api whose smokes
+          land the schema via db-migrate first.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  crate:
+    name: ${{ inputs.service }}
+    runs-on: ubuntu-latest
+    env:
+      SERVICE: ${{ inputs.service }}
+      CRATE: ${{ inputs.crate }}
+      PACKAGE: ${{ inputs.package }}
+      BINARY: ${{ inputs.binary }}
+    steps:
+    - uses: actions/checkout@v4
+
+    # ── Cross-run cargo cache ───────────────────────────────────────────────
+    # `Swatinem/rust-cache@v2` keys on `Cargo.lock` + the host rust
+    # toolchain, restores `~/.cargo/registry`, `~/.cargo/git`, and
+    # `target/`. The cargo step below mounts those into the per-crate
+    # ci-tools image so the warm host caches feed an in-container build.
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: . -> target
+
+    - uses: docker/setup-buildx-action@v3
+
+    # ── Build the per-crate ci-tools image ──────────────────────────────────
+    # `--target ci-tools` plucks the toolchain stage out of the same
+    # Dockerfile that produces the runtime image. Adding a test-time apt
+    # dep or an extra rustup component is therefore a one-place change
+    # in the crate's Dockerfile, not a workflow edit here.
+    - name: Build containerized CI toolchain
+      run: |
+        set -euo pipefail
+        docker buildx build \
+          --platform linux/amd64 \
+          --load \
+          --target ci-tools \
+          -t "botwork/${SERVICE}:ci-tools" \
+          -f "${CRATE}/Dockerfile" \
+          .
+
+    # ── Build/test/build the crate, host-side target dir ────────────────────
+    # The docker invocation mirrors mcp-extra's `_crate.yml`: mount the
+    # workspace at /work, the host cargo home at /cargo-home, and tell
+    # cargo to write build artifacts to /work/target so they land back on
+    # the host where rust-cache will persist them for the next run.
+    #
+    # Special-case for admin-ui: trunk must populate
+    # `admin-ui/wasm/dist/` before the server's cargo build (the server
+    # crate inlines that directory via `include_dir!`). The trunk step
+    # runs inside the same container so the wasm32 target and the
+    # trunk binary are guaranteed present.
+    - name: cargo fmt, clippy, test, build (in container)
+      run: |
+        set -euo pipefail
+        mkdir -p "${HOME}/.cargo" "${RUNNER_TEMP}/container-home"
+        trunk_prefix=""
+        if [ "${SERVICE}" = "admin-ui" ]; then
+          # Trunk needs to land the wasm bundle into admin-ui/wasm/dist/
+          # before the server crate is compiled. Run it under the same
+          # cargo home so the wasm crate's deps are populated in the
+          # host's `~/.cargo/registry` cache.
+          trunk_prefix='(cd admin-ui/wasm && trunk build --release) && '
+        fi
+        docker run --rm \
+          --platform linux/amd64 \
+          --user "$(id -u):$(id -g)" \
+          -e HOME=/tmp/home \
+          -e CARGO_HOME=/cargo-home \
+          -e RUSTUP_HOME=/usr/local/rustup \
+          -e CARGO_TARGET_DIR=/work/target \
+          -v "${HOME}/.cargo:/cargo-home" \
+          -v "${RUNNER_TEMP}/container-home:/tmp/home" \
+          -v "${GITHUB_WORKSPACE}:/work" \
+          -w /work \
+          "botwork/${SERVICE}:ci-tools" \
+          sh -elc "
+            export PATH=/usr/local/cargo/bin:\$PATH
+            ${trunk_prefix}cargo fmt -p ${PACKAGE} -- --check
+            cargo clippy -p ${PACKAGE} --all-targets --locked -- -D warnings
+            cargo test -p ${PACKAGE} --locked
+            cargo build -p ${PACKAGE} --release --locked
+          "
+
+    # ── Per-crate hadolint ──────────────────────────────────────────────────
+    # Lint the same Dockerfile we just built `ci-tools` from. A failure
+    # here surfaces on the same runner that was about to publish the
+    # image artifact, not on some separate `lint` job.
+    - name: Install hadolint
+      run: |
+        set -euo pipefail
+        HADOLINT_VERSION=v2.12.0
+        sudo curl -fsSL -o /usr/local/bin/hadolint \
+          "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+        sudo chmod +x /usr/local/bin/hadolint
+        hadolint --version
+
+    - name: Lint Dockerfile
+      run: |
+        set -euo pipefail
+        hadolint --failure-threshold error "${CRATE}/Dockerfile"
+
+    # ── Stage prebuilt binary for the runtime image ─────────────────────────
+    # `.ci-prebuilt/${CRATE}/${BINARY}` is the path the `build-prebuilt`
+    # stage of the per-crate Dockerfile COPYs from. Mirrors the layout
+    # of the workspace so the `db/migration` case sits at
+    # `.ci-prebuilt/db/migration/botwork-migration` and the simple cases
+    # at `.ci-prebuilt/session-broker/botwork-session-broker` etc.
+    - name: Stage prebuilt binary for Docker image
+      run: |
+        set -euo pipefail
+        mkdir -p ".ci-prebuilt/${CRATE}"
+        cp "target/release/${BINARY}" ".ci-prebuilt/${CRATE}/${BINARY}"
+
+    # ── Build the runtime image from the prebuilt binary ────────────────────
+    # `BINARY_SOURCE=prebuilt` skips the in-image cargo build entirely
+    # and just COPYs the staged binary. The runtime image is therefore
+    # byte-identical regardless of which BINARY_SOURCE branch produced
+    # it; CI uses prebuilt because the binary was already built (and
+    # tested) on the host.
+    - name: Build ${{ inputs.service }} image
+      run: |
+        set -euo pipefail
+        docker buildx build \
+          --platform linux/amd64 \
+          --load \
+          -t "botwork/${SERVICE}:local" \
+          --build-arg BINARY_SOURCE=prebuilt \
+          --build-arg "GIT_SHA=${GITHUB_SHA}" \
+          -f "${CRATE}/Dockerfile" \
+          .
+
+    # ── Build db-migrate as a fixture (bootstrap / admin-api only) ──────────
+    # Their smoke tests land the schema before exercising their own
+    # assertion path — the production sequence (db-migrate.service runs
+    # before bootstrap.service / admin-api.service on the vm). The
+    # round-1 workflow built this via `earthly +db-migrate-image` here;
+    # we use `docker buildx` with `BINARY_SOURCE=source` so the
+    # in-Dockerfile cargo cache mounts kick in. This is the only build
+    # path on the runner that re-compiles the workspace (the per-crate
+    # `cargo build` runs `-p ${PACKAGE}`); it's gated to two of seven
+    # runners and the docker layer cache absorbs the cost on subsequent
+    # pushes that don't move db/migration's source.
+    - name: Build db-migrate fixture image
+      if: inputs.needs-db-migrate
+      run: |
+        set -euo pipefail
+        docker buildx build \
+          --platform linux/amd64 \
+          --load \
+          -t botwork/db-migrate:local \
+          --build-arg BINARY_SOURCE=source \
+          --build-arg "GIT_SHA=${GITHUB_SHA}" \
+          -f db/migration/Dockerfile \
+          .
+
+    # ── Per-crate smoke test ────────────────────────────────────────────────
+    # Bodies live in `${crate}/smoke.sh`. No service-specific logic in
+    # this workflow; if a smoke needs a sidecar postgres / a curl client
+    # / a network alias, the script owns it.
+    - name: Smoke test ${{ inputs.service }}
+      run: |
+        set -euo pipefail
+        bash "${CRATE}/smoke.sh"
+
+    # ── Upload binary artifact ──────────────────────────────────────────────
+    # Round 3 will have `release.yml` download these, restage them under
+    # `.ci-prebuilt/<crate>/`, and re-run the prebuilt-image build to
+    # tag and push to GHCR — guaranteeing the bytes that smoke-tested
+    # here are the bytes that ship. For now this is a published
+    # artifact that downstream tooling can consume.
+    - name: Upload release binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.crate == 'db/migration' && 'db-migration' || inputs.crate }}-binary
+        path: target/release/${{ inputs.binary }}
+        if-no-files-found: error
+
+    # ── Job summary ─────────────────────────────────────────────────────────
+    # The matrix dashboard only shows `service`; surface crate/package/
+    # binary in the per-job summary so a triager isn't guessing which
+    # workspace member a failure points at.
+    - name: Summarise
+      if: always()
+      run: |
+        {
+          echo "### Crate: ${SERVICE}"
+          echo
+          echo "| Field   | Value |"
+          echo "|---------|-------|"
+          echo "| crate   | \`${CRATE}\` |"
+          echo "| service | \`${SERVICE}\` |"
+          echo "| package | \`${PACKAGE}\` |"
+          echo "| binary  | \`${BINARY}\` |"
+          echo "| image   | \`botwork/${SERVICE}:local\` |"
+        } >> "${GITHUB_STEP_SUMMARY}"

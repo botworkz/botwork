@@ -1,27 +1,15 @@
+# Allow only what the per-crate Dockerfiles need at build context.
+# The build context is repo-root for every image (each Dockerfile
+# COPYs the workspace members it needs); each crate's own Dockerfile
+# and smoke.sh live alongside the crate it builds.
+#
+# `.ci-prebuilt/` is the staging directory the CI runner populates
+# with the binary it built on the host (`BINARY_SOURCE=prebuilt`
+# branch of every Dockerfile). It's empty in local-dev — local builds
+# default to `BINARY_SOURCE=source` and ignore the directory.
 *
-!containers/
-containers/*
-!containers/session-broker/
-containers/session-broker/*
-!containers/session-broker/Dockerfile
-!containers/config-broker/
-containers/config-broker/*
-!containers/config-broker/Dockerfile
-!containers/control-plane/
-containers/control-plane/*
-!containers/control-plane/Dockerfile
-!containers/db-migrate/
-containers/db-migrate/*
-!containers/db-migrate/Dockerfile
-!containers/bootstrap/
-containers/bootstrap/*
-!containers/bootstrap/Dockerfile
-!containers/admin-api/
-containers/admin-api/*
-!containers/admin-api/Dockerfile
-!containers/admin-ui/
-containers/admin-ui/*
-!containers/admin-ui/Dockerfile
+!.ci-prebuilt/
+!.ci-prebuilt/**
 !admin-api/
 !admin-api/**
 !admin-core/
@@ -29,11 +17,11 @@ containers/admin-ui/*
 !admin-ui/
 !admin-ui/**
 # The trunk-emitted bundle is *generated* by `trunk build --release`
-# inside the container builder stage, so any host-side `dist/` is
-# stale at best and lockfile-poisoning at worst. Strip it from the
-# build context, but keep the `.gitkeep` placeholder so the empty
-# directory is created (include_dir! refuses a missing path; trunk
-# itself prefers to populate an existing dir).
+# inside the container builder stage (or by CI's host-side trunk run),
+# so any host-side `dist/` is stale at best and lockfile-poisoning at
+# worst. Strip it from the build context, but keep the `.gitkeep`
+# placeholder so the empty directory is created (include_dir! refuses
+# a missing path; trunk itself prefers to populate an existing dir).
 admin-ui/wasm/dist/*
 !admin-ui/wasm/dist/.gitkeep
 !bootstrap/

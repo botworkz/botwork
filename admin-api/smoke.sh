@@ -2,17 +2,11 @@
 #
 # Per-service container smoke test for `botwork/admin-api:local`.
 #
-# Called from .github/workflows/_container.yml after `earthly
-# +admin-api-image` has produced the local image. Lives next to
-# the Dockerfile so the per-service test surface is discoverable
-# alongside the per-service build surface; line-for-line identical
-# to the body that used to live inline in .github/workflows/containers.yml.
-#
 # Local reproduction (db-migrate image must also be present locally):
 #
 #   earthly +db-migrate-image
 #   earthly +admin-api-image
-#   bash containers/admin-api/smoke.sh
+#   bash admin-api/smoke.sh
 
 set -euo pipefail
 

@@ -266,12 +266,13 @@ the env var happens to be set in the runner's environment.
   The test gates on docker availability and prints a structured
   `IGNORED` line when docker isn't reachable, so `cargo test` stays
   green on dev machines without docker. The end-to-end production-path
-  proof lives in `containers.yml` (the `db-migrate` smoke step), which
-  is gated on docker being present.
+  proof lives in `db/migration/smoke.sh` (invoked by the `db-migrate`
+  job in `.github/workflows/containers.yml`), which is gated on
+  docker being present.
 
 ## Container image
 
-`botwork/db-migrate:local`, built from `containers/db-migrate/Dockerfile`.
+`botwork/db-migrate:local`, built from `db/migration/Dockerfile`.
 
 Production invocation pattern:
 

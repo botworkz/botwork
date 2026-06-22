@@ -35,7 +35,7 @@ Plus the unchanged infrastructure from PR1:
 
 * the container image (`botwork/admin-api:local`, distroless,
   uid 1100, same posture as config-broker);
-* the `Earthfile` + `Makefile` + release workflow entries that build
+* the `Earthfile` + release workflow entries that build
   and push it alongside the other broker images;
 * an end-to-end CI smoke that spins postgres + db-migrate + admin-api
   on a throwaway docker network and curls `/admin/api/v1/health` from
@@ -147,8 +147,8 @@ list-with-filter shape. End-to-end production-path proof lives in
 
 ## Container image
 
-`botwork/admin-api:local`, built from `containers/admin-api/Dockerfile`.
+`botwork/admin-api:local`, built from `admin-api/Dockerfile`.
 
 Distroless `base-nossl-debian12:nonroot` runtime, same posture as
 config-broker / control-plane. Built by `earthly +admin-api-image`
-from the repo root (and by `make -C containers admin-api`).
+from the repo root (or by `docker build -f admin-api/Dockerfile .`).

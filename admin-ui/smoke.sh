@@ -2,16 +2,10 @@
 #
 # Per-service container smoke test for `botwork/admin-ui:local`.
 #
-# Called from .github/workflows/_container.yml after `earthly
-# +admin-ui-image` has produced the local image. Lives next to
-# the Dockerfile so the per-service test surface is discoverable
-# alongside the per-service build surface; line-for-line identical
-# to the body that used to live inline in .github/workflows/containers.yml.
-#
 # Local reproduction:
 #
 #   earthly +admin-ui-image
-#   bash containers/admin-ui/smoke.sh
+#   bash admin-ui/smoke.sh
 
 set -euo pipefail
 

@@ -2,16 +2,10 @@
 #
 # Per-service container smoke test for `botwork/control-plane:local`.
 #
-# Called from .github/workflows/_container.yml after `earthly
-# +control-plane-image` has produced the local image. Lives next to
-# the Dockerfile so the per-service test surface is discoverable
-# alongside the per-service build surface; line-for-line identical
-# to the body that used to live inline in .github/workflows/containers.yml.
-#
 # Local reproduction:
 #
 #   earthly +control-plane-image
-#   bash containers/control-plane/smoke.sh
+#   bash control-plane/smoke.sh
 
 set -euo pipefail
 

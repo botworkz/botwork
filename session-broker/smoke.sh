@@ -2,16 +2,16 @@
 #
 # Per-service container smoke test for `botwork/session-broker:local`.
 #
-# Called from .github/workflows/_container.yml after `earthly
-# +session-broker-image` has produced the local image. Lives next to
-# the Dockerfile so the per-service test surface is discoverable
-# alongside the per-service build surface; line-for-line identical
-# to the body that used to live inline in .github/workflows/containers.yml.
+# Called from .github/workflows/_crate.yml after the per-crate runner
+# has produced the image (CI path: BINARY_SOURCE=prebuilt, binary
+# built on the host; local: BINARY_SOURCE=source, cargo runs inside
+# the image). Either way the assertion below is the same — it only
+# observes the running container.
 #
 # Local reproduction:
 #
 #   earthly +session-broker-image
-#   bash containers/session-broker/smoke.sh
+#   bash session-broker/smoke.sh
 
 set -euo pipefail
 

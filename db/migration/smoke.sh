@@ -2,16 +2,10 @@
 #
 # Per-service container smoke test for `botwork/db-migrate:local`.
 #
-# Called from .github/workflows/_container.yml after `earthly
-# +db-migrate-image` has produced the local image. Lives next to
-# the Dockerfile so the per-service test surface is discoverable
-# alongside the per-service build surface; line-for-line identical
-# to the body that used to live inline in .github/workflows/containers.yml.
-#
 # Local reproduction:
 #
 #   earthly +db-migrate-image
-#   bash containers/db-migrate/smoke.sh
+#   bash db/migration/smoke.sh
 
 set -euo pipefail
 
