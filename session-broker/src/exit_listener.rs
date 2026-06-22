@@ -195,8 +195,6 @@ pub async fn handle_container_exit(
     // reapers don't race each other.
     liveness_remove(state, &mcp_session_id).await;
 
-    state.session_registry.record_teardown(container_name).await;
-
     // RFE #105 round-3 PR2: mark the session_worker row reaped. The
     // record_reap path is no-op-if-already-reaped (the teardown_session
     // path and the docker-exit path can both converge on the same

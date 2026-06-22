@@ -4,14 +4,11 @@ use std::time::{Duration, Instant};
 
 use botwork_session_broker::config_broker::UpstreamAuth;
 use botwork_session_broker::exit_listener::handle_container_exit;
-use botwork_session_broker::session_registry::{utc_now, SessionRegistry};
 use botwork_session_broker::{AppState, TransportState};
-use tempfile::tempdir;
 use tokio::sync::Mutex;
 
-fn make_state(registry: Arc<SessionRegistry>) -> AppState {
+fn make_state() -> AppState {
     AppState {
-        session_registry: registry,
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
         launcher_socket_path: "/tmp/missing-launcher.sock".to_string(),
@@ -21,17 +18,12 @@ fn make_state(registry: Arc<SessionRegistry>) -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
-        // RFE #105 PR2: agent_session write-through is plumbed in
-        // production via `run()`. These tests exercise only the
-        // container-exit path and don't care about the DB; passing
-        // `None` keeps the test setup hermetic.
+        // RFE #105 PR2 / round-3: production wires three DB-bound
+        // handles via `run()`. The container-exit path only touches
+        // the in-memory `transport_sessions` map, so passing `None`
+        // keeps the setup hermetic — no testcontainers postgres
+        // required.
         agent_session_writer: None,
-        // RFE #105 round-3 PR2: the cutover wires two
-        // additional DB-bound handles next to
-        // agent_session_writer. Test builders pass `None` the
-        // same way to stay hermetic — production populates
-        // both via `run()` once the postgres handle
-        // is in hand (see lib.rs).
         session_worker_writer: None,
         db: None,
     }
@@ -68,25 +60,7 @@ async fn insert_transport(state: &AppState, mcp_session_id: &str, transport: Tra
 
 #[tokio::test]
 async fn container_exit_drops_transport_session() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("sessions.json");
-    let registry = Arc::new(SessionRegistry::new(path.to_str().unwrap()));
-
-    registry
-        .record_spawn(
-            "mcp_session_aabbccddeeff",
-            "/staging/aabbccddeeff",
-            "tenant1",
-            "mcp",
-            "botwork/mcp-echo:local",
-            &utc_now(),
-        )
-        .await;
-    registry
-        .record_mcp_session_id("mcp_session_aabbccddeeff", "sess-abc123")
-        .await;
-
-    let state = make_state(Arc::clone(&registry));
+    let state = make_state();
     insert_transport(
         &state,
         "sess-abc123",
@@ -100,7 +74,6 @@ async fn container_exit_drops_transport_session() {
 
     assert_eq!(response.status(), 200);
 
-    // Transport session must be gone
     assert!(
         !state
             .transport_sessions
@@ -117,10 +90,7 @@ async fn container_exit_drops_transport_session() {
 
 #[tokio::test]
 async fn container_exit_unknown_container_returns_404() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("sessions.json");
-    let registry = Arc::new(SessionRegistry::new(path.to_str().unwrap()));
-    let state = make_state(registry);
+    let state = make_state();
 
     let response = handle_container_exit(&state, "mcp_session_nonexistent", "die", Some(1))
         .await
@@ -135,24 +105,7 @@ async fn container_exit_unknown_container_returns_404() {
 
 #[tokio::test]
 async fn container_exit_idempotent() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("sessions.json");
-    let registry = Arc::new(SessionRegistry::new(path.to_str().unwrap()));
-    registry
-        .record_spawn(
-            "mcp_session_112233445566",
-            "/staging/112233445566",
-            "tenant1",
-            "mcp",
-            "botwork/mcp-echo:local",
-            &utc_now(),
-        )
-        .await;
-    registry
-        .record_mcp_session_id("mcp_session_112233445566", "sess-idem")
-        .await;
-
-    let state = make_state(Arc::clone(&registry));
+    let state = make_state();
     insert_transport(
         &state,
         "sess-idem",
@@ -160,13 +113,11 @@ async fn container_exit_idempotent() {
     )
     .await;
 
-    // First call succeeds
     let r1 = handle_container_exit(&state, "mcp_session_112233445566", "destroy", None)
         .await
         .unwrap();
     assert_eq!(r1.status(), 200);
 
-    // Second call is 404 (entry already removed)
     let r2 = handle_container_exit(&state, "mcp_session_112233445566", "destroy", None)
         .await
         .unwrap();
@@ -179,24 +130,7 @@ async fn container_exit_idempotent() {
 
 #[tokio::test]
 async fn container_exit_tombstones_session() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("sessions.json");
-    let registry = Arc::new(SessionRegistry::new(path.to_str().unwrap()));
-    registry
-        .record_spawn(
-            "mcp_session_ffeeddccbbaa",
-            "/staging/ffeeddccbbaa",
-            "tenant1",
-            "mcp",
-            "botwork/mcp-echo:local",
-            &utc_now(),
-        )
-        .await;
-    registry
-        .record_mcp_session_id("mcp_session_ffeeddccbbaa", "sess-tomb")
-        .await;
-
-    let state = make_state(Arc::clone(&registry));
+    let state = make_state();
     insert_transport(
         &state,
         "sess-tomb",
@@ -208,7 +142,6 @@ async fn container_exit_tombstones_session() {
         .await
         .unwrap();
 
-    // Tombstone must be present and not yet expired
     let tombstones = state.tombstones.lock().await;
     let expires_at = tombstones.get("sess-tomb").copied();
     drop(tombstones);
@@ -223,29 +156,23 @@ async fn container_exit_tombstones_session() {
 }
 
 // ---------------------------------------------------------------------------
-// handle_container_exit: session_registry row is removed
+// handle_container_exit: spawned teardown task runs to completion
 // ---------------------------------------------------------------------------
+//
+// Pre-RFE-#105 round-3 this test asserted that the session_registry row was
+// removed by the spawned teardown task. After the cutover the registry is
+// gone — the equivalent property is "the spawned task ran without panicking
+// and the transport_sessions entry is gone by the time
+// handle_container_exit returns". The first half is exercised implicitly by
+// the lack of a panic propagating into this test; the second is the
+// assertion below. Kept as a separate test (rather than folded into
+// `container_exit_drops_transport_session`) so the sleep-and-recheck shape
+// stays grep-able for future operators debugging an async-teardown
+// regression.
 
 #[tokio::test]
-async fn container_exit_removes_registry_row() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("sessions.json");
-    let registry = Arc::new(SessionRegistry::new(path.to_str().unwrap()));
-    registry
-        .record_spawn(
-            "mcp_session_cafebabe0000",
-            "/staging/cafebabe0000",
-            "tenant1",
-            "mcp",
-            "botwork/mcp-echo:local",
-            &utc_now(),
-        )
-        .await;
-    registry
-        .record_mcp_session_id("mcp_session_cafebabe0000", "sess-reg-gone")
-        .await;
-
-    let state = make_state(Arc::clone(&registry));
+async fn container_exit_removes_routing_state() {
+    let state = make_state();
     insert_transport(
         &state,
         "sess-reg-gone",
@@ -257,12 +184,14 @@ async fn container_exit_removes_registry_row() {
         .await
         .unwrap();
 
-    // Give the spawned teardown task a chance to run
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let data = registry.read().await;
     assert!(
-        !data.sessions.contains_key("mcp_session_cafebabe0000"),
-        "session registry row should be removed"
+        !state
+            .transport_sessions
+            .lock()
+            .await
+            .contains_key("sess-reg-gone"),
+        "transport session row should be removed"
     );
 }

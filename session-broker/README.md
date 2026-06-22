@@ -337,6 +337,12 @@ spawn fails with a 5xx so operators can fix vault state explicitly.
 - `BOTWORK_CONTROL_PLANE_ENDPOINT` (default `http://control_plane:9300`).
 - `BOTWORK_BROKER_SOCKET_PATH` (default `/run/botwork/broker.sock`).
 - `BOTWORK_SESSION_REGISTRY_PATH` (default `/var/lib/botwork/sessions.json`).
+  Pre-RFE-#105 round-3 this pinned the on-disk session registry. After
+  the cutover the broker reads/writes routing state via the
+  `session_worker` postgres table; the env var survives only as a
+  one-time migration hint — on startup, if a file exists at this
+  path, its contents are dumped to the log for operator audit and
+  the file is unlinked.
 - `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` (default `30`).
 - `BOTWORK_BROKER_SWEEPER_INTERVAL_SECS` (default `60`). Interval at which the
   background TTL sweepers wake to prune expired entries from the `tombstones`
