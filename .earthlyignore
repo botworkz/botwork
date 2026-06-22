@@ -24,6 +24,11 @@
 # a missing path; trunk itself prefers to populate an existing dir).
 admin-ui/wasm/dist/*
 !admin-ui/wasm/dist/.gitkeep
+# bootstrap/ is no longer in any image (RFE #106 PR4 round 3 retired
+# its Dockerfile + Earthfile target). But it's still a workspace
+# member (test-only seed helper used by 3 integration tests), so the
+# sibling Dockerfiles' `cargo metadata` / `cargo build --workspace`
+# steps still need its manifest on disk in the build context.
 !bootstrap/
 !bootstrap/**
 !session-broker/

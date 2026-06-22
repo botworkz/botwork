@@ -60,14 +60,6 @@ db-migrate-image:
         .
     SAVE IMAGE botwork/db-migrate:local
 
-bootstrap-image:
-    ARG GIT_SHA=""
-    FROM DOCKERFILE --platform=linux/amd64 \
-        -f bootstrap/Dockerfile \
-        --build-arg GIT_SHA=${GIT_SHA} \
-        .
-    SAVE IMAGE botwork/bootstrap:local
-
 images:
     BUILD +admin-api-image
     BUILD +admin-ui-image
@@ -75,4 +67,3 @@ images:
     BUILD +config-broker-image
     BUILD +control-plane-image
     BUILD +db-migrate-image
-    BUILD +bootstrap-image

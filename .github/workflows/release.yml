@@ -4,7 +4,8 @@
 #   1. A developer sets the root VERSION file to a clean semver (e.g. "1.2.0"),
 #      removes the "-dev" suffix, and merges to main.
 #   2. Job A (publish) detects the clean version, builds and pushes the
-#      session-broker, config-broker, control-plane, db-migrate, and bootstrap
+#      session-broker, config-broker, control-plane, db-migrate, admin-api,
+#      and admin-ui
 #      containers to GHCR, builds release binaries for botwork-launcher and
 #      botwork-tools, and creates a GitHub Release v<VERSION> with those
 #      binaries attached.
@@ -203,38 +204,7 @@ jobs:
         docker tag botwork/db-migrate:local "${REPO}:${VERSION}"
         docker tag botwork/db-migrate:local "${REPO}:latest"
         docker push "${REPO}:${VERSION}"
-        docker push "${REPO}:latest"
-
-    # ── Container: build and push bootstrap ─────────────────────────────────
-    # Symmetric to db-migrate (also a oneshot). Same build/verify/tag/push
-    # contract so vm-side shasset can pin this image alongside the others.
-    # The systemd unit botwork-bootstrap.service runs this between
-    # botwork-db-migrate.service (schema landed) and
-    # botwork-config-broker.service (will read from the DB post-cutover).
-    - name: Build and push bootstrap container
-      if: steps.version.outputs.is_release == 'true'
-      run: |
-        set -euo pipefail
-        VERSION="${{ steps.version.outputs.version }}"
-        REPO="ghcr.io/botworkz/botwork/bootstrap"
-        # Platform is pinned in Earthfile via FROM DOCKERFILE --platform=linux/amd64.
-        earthly --no-cache --build-arg GIT_SHA="${GITHUB_SHA}" +bootstrap-image
-        expected="${GITHUB_SHA}"
-        actual="$(docker image inspect botwork/bootstrap:local \
-          --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
-        if [[ "${actual}" != "${expected}" ]]; then
-          echo "ERROR: built image has revision label '${actual}' but" \
-               "workflow was triggered by commit '${expected}'." >&2
-          echo "Refusing to push a release container whose provenance does not match the triggering commit." >&2
-          echo "Also dumping all labels on the built image for diagnosis:" >&2
-          docker image inspect botwork/bootstrap:local --format '{{ json .Config.Labels }}' >&2
-          exit 1
-        fi
-        echo "verified: image revision label matches GITHUB_SHA (${expected})"
-        docker tag botwork/bootstrap:local "${REPO}:${VERSION}"
-        docker tag botwork/bootstrap:local "${REPO}:latest"
-        docker push "${REPO}:${VERSION}"
-        docker push "${REPO}:latest"
+        docker push ":latest"
 
     # ── Container: build and push admin-api ─────────────────────────────────
     # Symmetric to config-broker. admin-api is an HTTP+JSON server that

@@ -3,22 +3,25 @@ name = "botwork-bootstrap"
 version = "0.0.0"
 edition = "2021"
 
+# Test-only sea-orm seed helper.
+#
+# Historically this crate also produced a `botwork-bootstrap` binary
+# + a `botwork/bootstrap:local` container that ran as a systemd
+# oneshot at boot. That production codepath was retired in RFE #106
+# PR4 (botwork#118 + the vm-side cutover) in favour of
+# `botwork-tools bootstrap` calling admin-api. The container,
+# Earthfile target, and CI plumbing are gone; this crate now only
+# survives as a fast in-process seed helper for the three integration
+# tests under `admin-api/`, `config-broker/`, and `session-broker/`
+# (going through admin-api in those would cost ~3x setup for no
+# additional signal).
 [lib]
 name = "botwork_bootstrap"
 path = "src/lib.rs"
 
-# Production oneshot. Container CMD is this binary; the systemd unit
-# botwork-bootstrap.service runs after botwork-db-migrate and before
-# botwork-config-broker. Idempotent: re-runs at every boot, no-op when
-# bootstrap.yaml hasn't changed.
-[[bin]]
-name = "botwork-bootstrap"
-path = "src/main.rs"
-
 [dependencies]
-# admin-core owns the bootstrap-config shape + validators since RFE
-# #106 bootstrap-retirement; bootstrap depends on it for everything
-# except the sea-orm writer in runner.rs.
+# admin-core owns the bootstrap-config shape + validators; this
+# crate is just the sea-orm writer that walks a validated tree.
 botwork-admin-core = { path = "../admin-core" }
 botwork-entity = { path = "../db/entity" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -31,11 +34,8 @@ sea-orm = { version = "1.1.20", default-features = false, features = [
     "with-json",
 ] }
 serde_json = "1"
-serde_yaml = "0.9"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
@@ -46,6 +46,9 @@ testcontainers = "0.27.3"
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 botwork-migration = { path = "../db/migration" }
 tempfile = "3"
+# Re-declared here for the test_smoke harness; everywhere else in
+# this crate uses chrono::Utc from the main [dependencies] above.
+serde_yaml = "0.9"
 sea-orm = { version = "1.1.20", default-features = false, features = [
     "macros",
     "runtime-tokio-rustls",
@@ -58,3 +61,4 @@ sea-orm-migration = { version = "1.1.20", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",
 ] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
