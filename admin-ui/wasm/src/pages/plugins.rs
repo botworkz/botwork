@@ -230,14 +230,21 @@ impl PluginForm {
         self.upstream_auth.set(p.upstream_auth.clone());
         self.env.set(pretty(&p.env));
         self.resources
-            .set(p.resources.as_ref().map(pretty).unwrap_or_else(String::new));
+            .set(p.resources.as_ref().map(pretty).unwrap_or_default());
         self.egress.set(pretty(&p.egress));
     }
 
-    /// Build a PluginCreate body. None-fields are omitted from the
-    /// wire payload; admin-api fills validator defaults for absent
-    /// fields. Empty strings count as None.
-    fn to_create(&self) -> Result<api::PluginCreate, String> {
+    /// Build a PluginCreate body from the current form state.
+    /// None-fields are omitted from the wire payload; admin-api fills
+    /// validator defaults for absent fields. Empty strings count as
+    /// None.
+    ///
+    /// Takes `self` by value to satisfy clippy::wrong_self_convention
+    /// (a `to_*` method on a `Copy` struct should consume self
+    /// rather than borrow). The implementation only `get_untracked`s
+    /// the signal handles, which is the same Copy operation either
+    /// way; the by-value signature is purely a convention nudge.
+    fn to_create(self) -> Result<api::PluginCreate, String> {
         let name = self.name.get_untracked().trim().to_string();
         if name.is_empty() {
             return Err("name must not be blank".to_string());
@@ -261,7 +268,7 @@ impl PluginForm {
         })
     }
 
-    fn to_update(&self, lock: String) -> Result<api::PluginUpdate, String> {
+    fn to_update(self, lock: String) -> Result<api::PluginUpdate, String> {
         let c = self.to_create()?;
         Ok(api::PluginUpdate {
             name: c.name,
