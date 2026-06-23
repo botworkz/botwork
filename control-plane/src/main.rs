@@ -109,33 +109,6 @@ async fn main() {
         .with_target(false)
         .init();
 
-    // RFE #105 round-3 follow-up: connect to postgres up front. Both
-    // recovery (further down) and the future janitor surface need
-    // the same handle, and a missing/unparseable URL is a hard
-    // misconfig — fail fast with the exit-code convention the other
-    // DB-aware consumers (config-broker, admin-api, session-broker)
-    // already use.
-    //
-    // No env-leakage worry: control-plane is a production binary,
-    // BOTWORK_DATABASE_URL is always set by the systemd unit's
-    // EnvironmentFile=/var/lib/botwork-db/secret.env (rendered by
-    // botwork-db-init.service at first boot).
-    let db = match connect_from_env().await {
-        Ok(db) => Arc::new(db),
-        Err(ConnectError::MissingUrl) => {
-            error!(
-                "{PREFIX} {DATABASE_URL_ENV} is not set; recovery now reads from postgres \
-                 directly — add EnvironmentFile=/var/lib/botwork-db/secret.env to the \
-                 botwork-control-plane.service unit"
-            );
-            std::process::exit(2);
-        }
-        Err(ConnectError::Db(err)) => {
-            error!("{PREFIX} failed to connect to postgres: {err}");
-            std::process::exit(3);
-        }
-    };
-
     // Build the store first; recovery seeds INTO it before the HTTP
     // and xDS servers start accepting requests. AppState holds the
     // same `Arc<SessionStore>` so handlers and the xDS feeder see the
@@ -158,12 +131,39 @@ async fn main() {
     };
     info!("{PREFIX} session store initialised (empty)");
 
-    if recovery_disabled_from_env() {
+    // RFE #105 round-3 follow-up: connect to postgres + run recovery.
+    // BOTWORK_DATABASE_URL is required in production (rendered by
+    // botwork-db-init.service into /var/lib/botwork-db/secret.env
+    // and surfaced to this unit via EnvironmentFile=). The
+    // BOTWORK_CONTROL_PLANE_DISABLE_RECOVERY break-glass keeps its
+    // pre-round-3 semantics ("I accept the consequences of starting
+    // empty") — when set, we never touch postgres, which is what the
+    // per-service container CI smoke (`control-plane/smoke.sh`)
+    // relies on: there is no postgres sidecar in that step, the
+    // smoke only proves the binary boots and binds both ports.
+    let db = if recovery_disabled_from_env() {
         warn!(
-            "{PREFIX} BOTWORK_CONTROL_PLANE_DISABLE_RECOVERY=1 -- skipping cold-start recovery sync; \
-             starting with empty store"
+            "{PREFIX} BOTWORK_CONTROL_PLANE_DISABLE_RECOVERY=1 -- skipping cold-start recovery \
+             sync AND postgres connect; starting with empty store"
         );
+        None
     } else {
+        let db = match connect_from_env().await {
+            Ok(db) => Arc::new(db),
+            Err(ConnectError::MissingUrl) => {
+                error!(
+                    "{PREFIX} {DATABASE_URL_ENV} is not set; recovery now reads from postgres \
+                     directly — add EnvironmentFile=/var/lib/botwork-db/secret.env to the \
+                     botwork-control-plane.service unit, or set \
+                     BOTWORK_CONTROL_PLANE_DISABLE_RECOVERY=1 to skip recovery (break-glass)"
+                );
+                std::process::exit(2);
+            }
+            Err(ConnectError::Db(err)) => {
+                error!("{PREFIX} failed to connect to postgres: {err}");
+                std::process::exit(3);
+            }
+        };
         match run_recovery_with_retries(store.clone(), db.as_ref()).await {
             Ok(count) => {
                 info!("{PREFIX} cold-start recovery complete: {count} session(s) seeded");
@@ -179,7 +179,8 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-    }
+        Some(db)
+    };
 
     let http_bind = http_bind_from_env();
     let app = build_router(state);
