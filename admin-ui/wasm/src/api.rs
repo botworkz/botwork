@@ -164,6 +164,8 @@ impl ErrorEnvelope {
     }
 }
 
+// ── tenant ──────────────────────────────────────────────────────────
+
 /// Tenant model — mirror of `botwork_entity::tenant::Model`.
 ///
 /// Hand-rolled (no shared types crate yet) because the wasm crate
@@ -223,12 +225,346 @@ pub async fn update_tenant(id: &str, body: &TenantUpdate) -> Result<Tenant, ApiE
 /// `409 has_dependents` (with the dependent list) when the tenant
 /// owns workspaces.
 pub async fn delete_tenant(id: &str) -> Result<(), ApiError> {
-    let url = format!("{API_BASE}/tenants/{id}");
-    // DELETE has no body, but we still route through `send_json` for
-    // the operator-header + error-envelope handling. The `()` payload
-    // serialises to `null`, which admin-api treats as "no body".
-    let _: serde_json::Value = send_json::<(), serde_json::Value>("DELETE", &url, None).await?;
-    Ok(())
+    send_no_content(&format!("{API_BASE}/tenants/{id}")).await
+}
+
+// ── workspace ──────────────────────────────────────────────────────
+
+/// Workspace model — mirror of `botwork_entity::workspace::Model`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Workspace {
+    pub id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceCreate {
+    pub tenant_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceUpdate {
+    pub name: String,
+    pub if_unmodified_since: String,
+}
+
+/// List workspaces, optionally filtered by parent tenant.
+pub async fn list_workspaces(tenant_id: Option<&str>) -> Result<ListResponse<Workspace>, ApiError> {
+    let url = match tenant_id {
+        Some(tid) => format!("{API_BASE}/workspaces?tenant_id={tid}"),
+        None => format!("{API_BASE}/workspaces"),
+    };
+    get_json(&url).await
+}
+
+pub async fn get_workspace(id: &str) -> Result<Workspace, ApiError> {
+    get_json(&format!("{API_BASE}/workspaces/{id}")).await
+}
+
+pub async fn create_workspace(body: &WorkspaceCreate) -> Result<Workspace, ApiError> {
+    send_json("POST", &format!("{API_BASE}/workspaces"), Some(body)).await
+}
+
+pub async fn update_workspace(id: &str, body: &WorkspaceUpdate) -> Result<Workspace, ApiError> {
+    send_json("PUT", &format!("{API_BASE}/workspaces/{id}"), Some(body)).await
+}
+
+/// Workspace delete CASCADEs to bindings + agent_sessions; if the
+/// live-state gate against control-plane is reachable, also
+/// terminates any live sessions before committing. Failure modes:
+/// `503 unavailable` (control-plane unreachable mid-cascade) — the
+/// DB is rolled back, UI should retry.
+pub async fn delete_workspace(id: &str) -> Result<(), ApiError> {
+    send_no_content(&format!("{API_BASE}/workspaces/{id}")).await
+}
+
+// ── plugin ─────────────────────────────────────────────────────────
+
+/// Plugin model — mirror of `botwork_entity::plugin::Model`.
+///
+/// `env`, `resources`, and `egress` are kept as raw `JsonValue` so
+/// the UI can render them in a JSON textarea without losing fidelity.
+/// admin-api validates these on write via `botwork-admin-core` and
+/// returns `422 validation_failed` with a precise message if they
+/// don't match the schema.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Plugin {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub port: u64,
+    pub path: String,
+    pub upstream_auth: String,
+    pub env: JsonValue,
+    pub resources: Option<JsonValue>,
+    pub egress: JsonValue,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// POST body for plugin create. Optional fields use the same wire
+/// shape as `PluginBody` on the admin-api side — `None` means "use
+/// the validator default", not "set to null".
+#[derive(Debug, Serialize)]
+pub struct PluginCreate {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_auth: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress: Option<JsonValue>,
+}
+
+/// PUT body for plugin update. Same shape as `PluginCreate` plus the
+/// optimistic-lock token. The form sends back the full row (so an
+/// unedited field stays at its current value) rather than a sparse
+/// patch.
+#[derive(Debug, Serialize)]
+pub struct PluginUpdate {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_auth: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress: Option<JsonValue>,
+    pub if_unmodified_since: String,
+}
+
+pub async fn list_plugins() -> Result<ListResponse<Plugin>, ApiError> {
+    get_json(&format!("{API_BASE}/plugins")).await
+}
+
+pub async fn get_plugin(id: &str) -> Result<Plugin, ApiError> {
+    get_json(&format!("{API_BASE}/plugins/{id}")).await
+}
+
+pub async fn create_plugin(body: &PluginCreate) -> Result<Plugin, ApiError> {
+    send_json("POST", &format!("{API_BASE}/plugins"), Some(body)).await
+}
+
+pub async fn update_plugin(id: &str, body: &PluginUpdate) -> Result<Plugin, ApiError> {
+    send_json("PUT", &format!("{API_BASE}/plugins/{id}"), Some(body)).await
+}
+
+/// Plugin delete is RESTRICTed by FK from `workspace_plugin` — a
+/// plugin with live bindings returns `409 has_dependents` with the
+/// blocking bindings named.
+pub async fn delete_plugin(id: &str) -> Result<(), ApiError> {
+    send_no_content(&format!("{API_BASE}/plugins/{id}")).await
+}
+
+// ── workspace_plugin ──────────────────────────────────────────────
+
+/// Workspace_plugin binding — composite PK on `(workspace_id,
+/// plugin_id)`. Mirror of `botwork_entity::workspace_plugin::Model`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspacePlugin {
+    pub workspace_id: String,
+    pub plugin_id: String,
+    pub config: Option<JsonValue>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspacePluginCreate {
+    pub workspace_id: String,
+    pub plugin_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<JsonValue>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspacePluginUpdate {
+    /// Wire contract: `Some(JsonValue::Null)` clears the config;
+    /// `None` leaves it unchanged. The serializer below maps that:
+    /// `None` ⇒ field absent (skip_serializing_if), explicit null ⇒
+    /// `"config": null`.
+    pub config: Option<JsonValue>,
+    pub if_unmodified_since: String,
+}
+
+/// List bindings, optionally filtered by workspace + plugin.
+pub async fn list_workspace_plugins(
+    workspace_id: Option<&str>,
+    plugin_id: Option<&str>,
+) -> Result<ListResponse<WorkspacePlugin>, ApiError> {
+    let mut url = format!("{API_BASE}/workspace_plugins");
+    let mut sep = '?';
+    if let Some(wid) = workspace_id {
+        url.push(sep);
+        url.push_str(&format!("workspace_id={wid}"));
+        sep = '&';
+    }
+    if let Some(pid) = plugin_id {
+        url.push(sep);
+        url.push_str(&format!("plugin_id={pid}"));
+    }
+    get_json(&url).await
+}
+
+pub async fn get_workspace_plugin(
+    workspace_id: &str,
+    plugin_id: &str,
+) -> Result<WorkspacePlugin, ApiError> {
+    get_json(&format!(
+        "{API_BASE}/workspace_plugins/{workspace_id}/{plugin_id}"
+    ))
+    .await
+}
+
+pub async fn create_workspace_plugin(
+    body: &WorkspacePluginCreate,
+) -> Result<WorkspacePlugin, ApiError> {
+    send_json("POST", &format!("{API_BASE}/workspace_plugins"), Some(body)).await
+}
+
+pub async fn update_workspace_plugin(
+    workspace_id: &str,
+    plugin_id: &str,
+    body: &WorkspacePluginUpdate,
+) -> Result<WorkspacePlugin, ApiError> {
+    send_json(
+        "PUT",
+        &format!("{API_BASE}/workspace_plugins/{workspace_id}/{plugin_id}"),
+        Some(body),
+    )
+    .await
+}
+
+/// Binding delete goes through the live-state gate against
+/// control-plane. Failure modes: `503 unavailable` if control-plane
+/// is unreachable (the DB is rolled back, UI should retry).
+pub async fn delete_workspace_plugin(workspace_id: &str, plugin_id: &str) -> Result<(), ApiError> {
+    send_no_content(&format!(
+        "{API_BASE}/workspace_plugins/{workspace_id}/{plugin_id}"
+    ))
+    .await
+}
+
+// ── agent_session (read-only) ─────────────────────────────────────
+
+/// agent_session model — mirror of `botwork_entity::agent_session::Model`.
+///
+/// admin-api exposes read-only access; session-broker owns all writes
+/// (state transitions, last_active_at bumps, reactivation_count
+/// increments). See `admin-ui/wasm/src/pages/sessions.rs` for the
+/// rationale on why CUD doesn't surface here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentSession {
+    pub id: String,
+    pub tenant_id: String,
+    pub workspace_id: String,
+    pub agent_session_id: String,
+    pub state: String,
+    pub created_at: String,
+    pub last_active_at: String,
+    pub reactivation_count: i64,
+}
+
+/// List agent_sessions with optional filters. `state` matches the
+/// `agent_session::state` module constants (active / grace /
+/// inactive / teardown_requested / purged) verbatim.
+pub async fn list_agent_sessions(
+    tenant_id: Option<&str>,
+    workspace_id: Option<&str>,
+    state: Option<&str>,
+) -> Result<ListResponse<AgentSession>, ApiError> {
+    let mut url = format!("{API_BASE}/agent_sessions");
+    let mut sep = '?';
+    if let Some(tid) = tenant_id {
+        url.push(sep);
+        url.push_str(&format!("tenant_id={tid}"));
+        sep = '&';
+    }
+    if let Some(wid) = workspace_id {
+        url.push(sep);
+        url.push_str(&format!("workspace_id={wid}"));
+        sep = '&';
+    }
+    if let Some(st) = state {
+        url.push(sep);
+        url.push_str(&format!("state={st}"));
+    }
+    get_json(&url).await
+}
+
+pub async fn get_agent_session(id: &str) -> Result<AgentSession, ApiError> {
+    get_json(&format!("{API_BASE}/agent_sessions/{id}")).await
+}
+
+// ── session_worker (read-only) ────────────────────────────────────
+
+/// session_worker model — mirror of
+/// `botwork_entity::session_worker::Model`.
+///
+/// `agent_session_id` is nullable (spawn-to-first-bind window).
+/// `reaped_at` is nullable (NULL = live; non-NULL = teardown
+/// scheduled / done). admin-api exposes read-only access for the
+/// same reasons as agent_session.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionWorker {
+    pub id: String,
+    pub agent_session_id: Option<String>,
+    pub plugin_id: String,
+    pub container_name: String,
+    pub container_ip: String,
+    pub mcp_session_id: String,
+    pub spawned_at: String,
+    pub reaped_at: Option<String>,
+}
+
+/// List session_workers with optional filters. `live=Some(true)`
+/// filters to `reaped_at IS NULL`, `Some(false)` to `IS NOT NULL`,
+/// `None` doesn't constrain.
+pub async fn list_session_workers(
+    agent_session_id: Option<&str>,
+    plugin_id: Option<&str>,
+    live: Option<bool>,
+) -> Result<ListResponse<SessionWorker>, ApiError> {
+    let mut url = format!("{API_BASE}/session_workers");
+    let mut sep = '?';
+    if let Some(aid) = agent_session_id {
+        url.push(sep);
+        url.push_str(&format!("agent_session_id={aid}"));
+        sep = '&';
+    }
+    if let Some(pid) = plugin_id {
+        url.push(sep);
+        url.push_str(&format!("plugin_id={pid}"));
+        sep = '&';
+    }
+    if let Some(live) = live {
+        url.push(sep);
+        url.push_str(&format!("live={live}"));
+    }
+    get_json(&url).await
+}
+
+pub async fn get_session_worker(id: &str) -> Result<SessionWorker, ApiError> {
+    get_json(&format!("{API_BASE}/session_workers/{id}")).await
 }
 
 // ── transport ───────────────────────────────────────────────────
@@ -236,6 +572,14 @@ pub async fn delete_tenant(id: &str) -> Result<(), ApiError> {
 async fn get_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, ApiError> {
     let request = build_request("GET", url, &Headers::new().map_err(transport)?)?;
     fetch_and_decode(request).await
+}
+
+/// Issue a DELETE expecting `204 No Content`. Lifted out of the
+/// per-entity callers to keep the operator-header + envelope
+/// handling consistent across all 4 deletable entities.
+async fn send_no_content(url: &str) -> Result<(), ApiError> {
+    let _: serde_json::Value = send_json::<(), serde_json::Value>("DELETE", url, None).await?;
+    Ok(())
 }
 
 async fn send_json<B: Serialize, T: serde::de::DeserializeOwned>(

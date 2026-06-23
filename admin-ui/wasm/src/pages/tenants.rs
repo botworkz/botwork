@@ -22,7 +22,7 @@ use leptos_router::hooks::{use_navigate, use_params_map};
 use web_sys::SubmitEvent;
 
 use crate::api;
-use crate::pages::{Async, AsyncView};
+use crate::pages::{render_dependents, Async, AsyncView};
 
 /// List view — table of every tenant, sorted server-side by name.
 #[component]
@@ -470,39 +470,4 @@ pub fn DeleteConfirm() -> impl IntoView {
             />
         </article>
     }
-}
-
-/// Render an admin-api `dependents` payload (JSON shape is
-/// `[{kind, id, name}]` today). Kept defensive so a future
-/// admin-api version that adds fields doesn't break this UI.
-fn render_dependents(deps: &serde_json::Value) -> AnyView {
-    let arr = deps.as_array().cloned().unwrap_or_default();
-    if arr.is_empty() {
-        return view! {
-            <p class="muted">"(no dependent details returned)"</p>
-        }
-        .into_any();
-    }
-    view! {
-        <ul class="dependents">
-            {arr.into_iter().map(|item| {
-                let kind = item.get("kind").and_then(|v| v.as_str())
-                    .unwrap_or("?").to_string();
-                let name = item.get("name").and_then(|v| v.as_str())
-                    .unwrap_or("?").to_string();
-                let id = item.get("id").and_then(|v| v.as_str())
-                    .unwrap_or("?").to_string();
-                view! {
-                    <li>
-                        <strong>{kind}</strong>
-                        " "
-                        {name}
-                        " "
-                        <code class="muted">{id}</code>
-                    </li>
-                }
-            }).collect_view()}
-        </ul>
-    }
-    .into_any()
 }
