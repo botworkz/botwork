@@ -345,10 +345,25 @@ async fn recovery_excludes_reaped_pre_bind_and_pre_initialize_rows() {
         eprintln!("IGNORED recovery_excludes_reaped_pre_bind_and_pre_initialize_rows");
         return;
     };
-    let (tenant_id, workspace_id, _bash_id, fetch_id) = resolve_ids(&db).await;
+    let (tenant_id, workspace_id, bash_id, fetch_id) = resolve_ids(&db).await;
 
     // Three "won't make it through the JOIN" rows + one positive
     // control so the assertion proves we're not just zero-counting.
+    //
+    // We can't reuse `(bound, fetch_id)` across multiple live rows
+    // even when the predicates we're testing would exclude all but
+    // one — `ux_session_worker_live_per_plugin` (partial UNIQUE on
+    // `(agent_session_id, plugin_id) WHERE reaped_at IS NULL AND
+    // agent_session_id IS NOT NULL`) fires at INSERT time, before
+    // the JOIN that filters them out gets a chance to. So:
+    //   * (b) reaped:       same (bound, fetch_id) but reaped_at
+    //                       NOT NULL ⇒ exempt from the partial.
+    //   * (c) pre-bind:     agent_session_id NULL ⇒ exempt.
+    //   * (d) pre-initialize: live + bound, so it MUST use a
+    //                       different plugin to coexist with the
+    //                       positive control. mcp-bash is the
+    //                       sibling plugin in the bootstrap
+    //                       fixture; the JOIN treats it identically.
     let bound = seed_agent_session(
         &db,
         tenant_id,
@@ -395,9 +410,16 @@ async fn recovery_excludes_reaped_pre_bind_and_pre_initialize_rows() {
     .await;
 
     // (d) Pre-initialize row — `mcp_session_id = ''` excludes it.
+    // Uses `bash_id` instead of `fetch_id` so the
+    // `ux_session_worker_live_per_plugin` partial UNIQUE
+    // (`(agent_session_id, plugin_id) WHERE reaped_at IS NULL AND
+    // agent_session_id IS NOT NULL`) doesn't fire against the
+    // positive control's `(bound, fetch_id)` slot at INSERT time —
+    // which would mask the JOIN-side filtering we're actually
+    // trying to test here.
     seed_session_worker(
         &db,
-        fetch_id,
+        bash_id,
         Some(bound),
         "mcp_session_preinit",
         "172.20.0.8",
