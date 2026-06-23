@@ -10,11 +10,12 @@
 //!   snapshot.
 //! * `handler` — axum router exposing `POST /sessions`,
 //!   `DELETE /sessions/<id>`, `GET /sessions/<id>`, `GET /sessions`.
-//! * `session_broker` + `recovery` — cold-start recovery sync. Polls
-//!   session-broker's `GET /control-plane/sessions` admin endpoint on
-//!   startup and bulk-seeds the store so an empty in-memory state
-//!   after a control-plane restart does not silently drop live
-//!   sessions from the xDS feeder's view.
+//! * `recovery` — cold-start recovery sync, post-RFE-#105-round-3.
+//!   Reads `session_worker` JOIN `agent_session` (plus tenant/workspace/
+//!   plugin) directly from postgres on startup and bulk-seeds the
+//!   store so an empty in-memory state after a control-plane restart
+//!   does not silently drop live sessions from the xDS feeder's view.
+//!   See `recovery::run_with_retries` for the wire-shape mapping.
 //! * `policy` — pure compilation of `SessionRecord` snapshots into
 //!   envoy LDS / CDS resource protos. No IO; called from the xDS
 //!   server on every push.
@@ -24,26 +25,25 @@
 //!
 //! Out of scope for this crate's v0:
 //!
-//! * Persistence. State is in-memory; control-plane rebuilds on
-//!   startup via recovery sync (see `recovery`).
+//! * Persistence of the in-memory `SessionStore` (writes still live
+//!   in-process; we re-seed from the DB on every restart).
 //! * Caller authentication. The trust boundary is the docker network
 //!   (`botwork-internal`), same posture as config-broker and auth-broker.
 //!
 //! See [issue #81](https://github.com/botworkz/botwork/issues/81) for the
-//! full design.
+//! full design and [RFE #105](https://github.com/botworkz/botwork/issues/105)
+//! for the recovery cutover.
 
 pub mod handler;
 pub mod policy;
 pub mod recovery;
-pub mod session_broker;
 pub mod sessions;
 pub mod xds;
 
 use std::sync::Arc;
 
 pub use handler::{build_router, AppState, ACK_DISABLED_ENV, DEFAULT_ACK_WAIT};
-pub use recovery::run_with_retries as run_recovery_with_retries;
-pub use session_broker::{fetch_sessions, SessionBrokerError};
+pub use recovery::{run_with_retries as run_recovery_with_retries, RecoveryError};
 pub use sessions::{AckWaitError, SessionRecord, SessionStore, StoreError, XdsSubscriberGuard};
 pub use xds::AdsServer;
 

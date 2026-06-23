@@ -115,28 +115,30 @@ container exit session-broker fires-and-forgets `DELETE /sessions/<id>`
 to control-plane. Failures there are logged and ignored: the container
 has already exited, and any drift between session-broker and
 control-plane is reconciled by the recovery-sync flow on the next
-control-plane cold start (control-plane polls session-broker's
-`/control-plane/sessions` admin endpoint described below).
+control-plane cold start. **Note:** post-RFE-#105-round-3,
+control-plane reads its recovery snapshot from postgres directly
+(`session_worker` JOIN `agent_session`) rather than from this
+admin server. The `/control-plane/sessions` endpoint that used to
+hold that contract is gone; the operator-visible `/sessions` view
+documented below survives unchanged.
 
 ## Admin endpoints
 
-session-broker exposes two read-only HTTP endpoints on
+session-broker exposes one read-only HTTP endpoint on
 `BOTWORK_SESSION_BROKER_ADMIN_ADDR` (default `0.0.0.0:9002`):
 
-- `GET /sessions` — full session registry (one row per spawned
-  container, with staging path, image, agent id, etc.). Unchanged in
-  shape since 0.1.0.
-- `GET /control-plane/sessions` — recovery-sync surface for
-  control-plane. Returns one entry per live transport session in
-  `control-plane`-`SessionRecord`-wire-shape:
-  `{ session_id, container_ip, tenant, workspace, plugin, egress_policy }`.
-  Sorted by `session_id`. Only sessions that have reached
-  `response_headers` (and therefore have a populated `Mcp-Session-Id`)
-  appear; pre-`response_headers` records are deliberately excluded
-  because control-plane only cares about sessions that could actually
-  be hit by an inbound request.
+- `GET /sessions` — operator-visible view of the live in-memory
+  `transport_sessions` map. Container-name-keyed shape that
+  `botwork-tools ps` consumes; one entry per spawned container with
+  ip, tenant, workspace, plugin, and (post-bind) agent id.
 
-Neither endpoint authenticates. They are reachable on the
+`GET /control-plane/sessions` used to be the recovery-sync surface
+for control-plane; it was retired in the RFE #105 round-3 follow-up.
+control-plane reads `session_worker` JOIN `agent_session` from
+postgres directly now and no longer needs a session-broker HTTP
+round-trip on cold start.
+
+The remaining endpoint does not authenticate. It is reachable on the
 `botwork-internal` docker network only — the trust boundary is network
 membership, not the endpoint.
 
