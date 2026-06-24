@@ -31,6 +31,7 @@ use web_sys::SubmitEvent;
 
 use crate::api;
 use crate::pages::{render_dependents, Async, AsyncView};
+use crate::ui_path;
 
 /// Pretty-print a JSON value for display in a textarea. Falls back to
 /// `null` if the input can't be serialized (which shouldn't happen
@@ -69,7 +70,7 @@ pub fn List() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Plugins"</h1>
-                <A href="/plugins/new">
+                <A href=ui_path!("/plugins/new")>
                     <button class="primary">"+ New plugin"</button>
                 </A>
             </header>
@@ -99,9 +100,9 @@ pub fn List() -> impl IntoView {
                                 </thead>
                                 <tbody>
                                     {r.items.into_iter().map(|p| {
-                                        let detail = format!("/plugins/{}", p.id);
-                                        let edit = format!("/plugins/{}/edit", p.id);
-                                        let delete = format!("/plugins/{}/delete", p.id);
+                                        let detail = ui_path!("/plugins/{}", p.id);
+                                        let edit = ui_path!("/plugins/{}/edit", p.id);
+                                        let delete = ui_path!("/plugins/{}/delete", p.id);
                                         view! {
                                             <tr>
                                                 <td><A href=detail.clone()>{p.name.clone()}</A></td>
@@ -146,14 +147,14 @@ pub fn Detail() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Plugin"</h1>
-                <p><A href="/plugins">"← All plugins"</A></p>
+                <p><A href=ui_path!("/plugins")>"← All plugins"</A></p>
             </header>
 
             <AsyncView
                 state=state
                 children=Box::new(|p: api::Plugin| {
-                    let edit_link = format!("/plugins/{}/edit", p.id);
-                    let delete_link = format!("/plugins/{}/delete", p.id);
+                    let edit_link = ui_path!("/plugins/{}/edit", p.id);
+                    let delete_link = ui_path!("/plugins/{}/delete", p.id);
                     let env_pretty = pretty(&p.env);
                     let res_pretty = p.resources.as_ref().map(pretty).unwrap_or_else(|| "null".to_string());
                     let egress_pretty = pretty(&p.egress);
@@ -327,7 +328,7 @@ pub fn Create() -> impl IntoView {
         let navigate = navigate.clone();
         spawn_local(async move {
             match api::create_plugin(&body).await {
-                Ok(p) => navigate(&format!("/plugins/{}", p.id), Default::default()),
+                Ok(p) => navigate(&ui_path!("/plugins/{}", p.id), Default::default()),
                 Err(err) => {
                     set_api_error.set(Some(err));
                     set_busy.set(false);
@@ -340,7 +341,7 @@ pub fn Create() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"New plugin"</h1>
-                <p><A href="/plugins">"← All plugins"</A></p>
+                <p><A href=ui_path!("/plugins")>"← All plugins"</A></p>
             </header>
 
             <form class="entity-form" on:submit=on_submit>
@@ -406,7 +407,7 @@ pub fn Edit() -> impl IntoView {
         let navigate = navigate.clone();
         spawn_local(async move {
             match api::update_plugin(&id_val, &body).await {
-                Ok(_) => navigate(&format!("/plugins/{}", id_val), Default::default()),
+                Ok(_) => navigate(&ui_path!("/plugins/{}", id_val), Default::default()),
                 Err(api::ApiError::Stale { message }) => {
                     if let Ok(fresh) = api::get_plugin(&id_val).await {
                         set_lock.set(fresh.updated_at.clone());
@@ -427,7 +428,7 @@ pub fn Edit() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Edit plugin"</h1>
-                <p><A href="/plugins">"← All plugins"</A></p>
+                <p><A href=ui_path!("/plugins")>"← All plugins"</A></p>
             </header>
 
             <AsyncView
@@ -563,13 +564,13 @@ pub fn DeleteConfirm() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Delete plugin"</h1>
-                <p><A href="/plugins">"← All plugins"</A></p>
+                <p><A href=ui_path!("/plugins")>"← All plugins"</A></p>
             </header>
 
             <AsyncView
                 state=loaded
                 children=Box::new(move |p: api::Plugin| {
-                    let detail_link = format!("/plugins/{}", p.id);
+                    let detail_link = ui_path!("/plugins/{}", p.id);
                     let navigate_inner = navigate.clone();
                     let on_confirm = move |_ev: web_sys::MouseEvent| {
                         let id_val = id.get_untracked();
@@ -578,7 +579,7 @@ pub fn DeleteConfirm() -> impl IntoView {
                         let navigate = navigate_inner.clone();
                         spawn_local(async move {
                             match api::delete_plugin(&id_val).await {
-                                Ok(()) => navigate("/plugins", Default::default()),
+                                Ok(()) => navigate(ui_path!("/plugins"), Default::default()),
                                 Err(err) => {
                                     set_error.set(Some(err));
                                     set_busy.set(false);

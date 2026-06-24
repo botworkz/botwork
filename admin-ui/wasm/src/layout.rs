@@ -16,14 +16,18 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 
+use crate::ui_path;
+
 /// Render a labelled sidebar entry. We use a component rather than
 /// inlining `<A>` everywhere so the "active" highlighting (a TODO
 /// for the styling pass) lands in one place.
 #[component]
 fn NavLink(
-    /// Absolute path (e.g. `/tenants`). `leptos_router` resolves
-    /// it against the `<Router base="/admin">` so the rendered
-    /// `href` becomes `/admin/tenants`.
+    /// Absolute path the router will use as the rendered `href`.
+    /// Must already be UI-base-prefixed — pass values from
+    /// [`crate::ui_path!`]. `leptos_router` does NOT prepend
+    /// `<Router base>` for hrefs that begin with `/`, so the prefix
+    /// is the caller's responsibility (see [`crate::UI_BASE`]).
     href: &'static str,
     /// Operator-facing label.
     label: &'static str,
@@ -52,19 +56,19 @@ pub fn Shell(children: Children) -> impl IntoView {
                 </header>
                 <nav>
                     <ul>
-                        <NavLink href="/" label="Dashboard" />
+                        <NavLink href=ui_path!("/") label="Dashboard" />
                     </ul>
                     <h2>"Config"</h2>
                     <ul>
-                        <NavLink href="/tenants" label="Tenants" />
-                        <NavLink href="/workspaces" label="Workspaces" />
-                        <NavLink href="/plugins" label="Plugins" />
-                        <NavLink href="/bindings" label="Bindings" />
+                        <NavLink href=ui_path!("/tenants") label="Tenants" />
+                        <NavLink href=ui_path!("/workspaces") label="Workspaces" />
+                        <NavLink href=ui_path!("/plugins") label="Plugins" />
+                        <NavLink href=ui_path!("/bindings") label="Bindings" />
                     </ul>
                     <h2>"Runtime"</h2>
                     <ul>
-                        <NavLink href="/sessions" label="Sessions" />
-                        <NavLink href="/workers" label="Workers" />
+                        <NavLink href=ui_path!("/sessions") label="Sessions" />
+                        <NavLink href=ui_path!("/workers") label="Workers" />
                     </ul>
                 </nav>
                 <footer class="admin-sidebar-footer">

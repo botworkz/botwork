@@ -33,6 +33,56 @@ pub mod api;
 pub mod layout;
 pub mod pages;
 
+/// URL prefix the admin-ui SPA is mounted under.
+///
+/// **Three places must agree on this string:**
+///
+/// 1. `<Router base=…>` below in [`App`].
+/// 2. `public_url = "/admin/"` in `wasm/Trunk.toml`.
+/// 3. The ingress envoy `/admin/*` route (lives in `botworkz/space`).
+///
+/// **Why we spell it into every router-relative href.** `leptos_router`
+/// *does not* prepend `<Router base>` to hrefs that start with `/` —
+/// see `use_resolved_path` in the `leptos_router` source. With the
+/// router mounted at `/admin`, a literal `<A href="/tenants">` renders
+/// verbatim, the router's click handler sees a path that isn't inside
+/// `/admin/*`, and the browser does a full-page navigation to
+/// `/tenants` — which the ingress envoy treats as MCP traffic
+/// (catch-all route → ext_authz → 401). The links appear dead.
+///
+/// Use the [`ui_path!`] macro at every router-relative href site;
+/// it handles both the literal and `format!`-style flavours.
+pub const UI_BASE: &str = "/admin";
+
+/// Build a router-absolute URL for the admin-ui SPA. See [`UI_BASE`]
+/// for why every router-relative href has to be prefix-spelled.
+///
+/// Two flavours, mirroring `concat!` and `format!`:
+///
+/// * `ui_path!("/tenants/new")` → `&'static str =
+///   "/admin/tenants/new"`. Evaluates at compile time; no per-render
+///   allocation. Use this at `<A href=…>` sites.
+/// * `ui_path!("/tenants/{}", id)` → `String =
+///   "/admin/tenants/<id>"`. Evaluates at runtime; takes the same
+///   format-args as `format!`. Use this for dynamic links and for
+///   `use_navigate()` calls.
+///
+/// The `"/admin"` literal is intentionally duplicated against
+/// [`UI_BASE`] here: `concat!` only accepts literal strings, not
+/// `const &str`. The pair lives in the same module so the duplication
+/// is trivial to audit if [`UI_BASE`] ever changes — and the
+/// `ui_base_matches_macro` test in this crate fails loudly if they
+/// drift.
+#[macro_export]
+macro_rules! ui_path {
+    ($lit:literal) => {
+        concat!("/admin", $lit)
+    };
+    ($fmt:literal, $($arg:tt)*) => {
+        format!(concat!("/admin", $fmt), $($arg)*)
+    };
+}
+
 /// Root component.
 ///
 /// Mounts the router. Routes that exist in the route table but
@@ -44,6 +94,9 @@ pub fn App() -> impl IntoView {
     use leptos_router::path;
 
     view! {
+        // `base` must match [`UI_BASE`]; see the docstring there for
+        // why this string is repeated in four places (Router base,
+        // UI_BASE const, ui_path! macro, Trunk.toml `public_url`).
         <Router base="/admin">
             <layout::Shell>
                 <Routes fallback=|| view! { <pages::NotFound /> }>
@@ -111,4 +164,44 @@ pub fn App() -> impl IntoView {
 pub fn main() {
     console_error_panic_hook::set_once();
     leptos::mount::mount_to_body(App);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UI_BASE;
+
+    // Compile-time use: if `ui_path!` ever stopped returning a
+    // `&'static str` for the literal form, this `const` binding would
+    // fail to compile. That's the property `<A href=ui_path!(…)>`
+    // sites rely on (no per-render allocation), so we pin it here.
+    const _STATIC_NEW: &str = ui_path!("/tenants/new");
+    const _STATIC_ROOT: &str = ui_path!("/");
+    const _STATIC_EMPTY: &str = ui_path!("");
+
+    #[test]
+    fn literal_prepends_admin_prefix() {
+        assert_eq!(ui_path!("/"), "/admin/");
+        assert_eq!(ui_path!("/tenants"), "/admin/tenants");
+        assert_eq!(ui_path!("/tenants/new"), "/admin/tenants/new");
+    }
+
+    #[test]
+    fn format_prepends_admin_prefix() {
+        let id = "abc-123";
+        assert_eq!(ui_path!("/tenants/{}", id), "/admin/tenants/abc-123");
+        assert_eq!(ui_path!("/bindings/{}/{}", "w", "p"), "/admin/bindings/w/p");
+        assert_eq!(
+            ui_path!("/workers?agent_session_id={}", id),
+            "/admin/workers?agent_session_id=abc-123"
+        );
+    }
+
+    #[test]
+    fn ui_base_matches_macro() {
+        // The two have to agree. `concat!("/admin", "")` is just
+        // `"/admin"`, which is `UI_BASE`. If a future refactor moves
+        // UI_BASE off `/admin`, the `ui_path!` macro body still has
+        // to change in lockstep — this test fails when it doesn't.
+        assert_eq!(UI_BASE, ui_path!(""));
+    }
 }

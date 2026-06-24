@@ -23,6 +23,7 @@ use web_sys::SubmitEvent;
 
 use crate::api;
 use crate::pages::{render_dependents, Async, AsyncView};
+use crate::ui_path;
 
 /// List view — table of every tenant, sorted server-side by name.
 #[component]
@@ -42,7 +43,7 @@ pub fn List() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Tenants"</h1>
-                <A href="/tenants/new">
+                <A href=ui_path!("/tenants/new")>
                     <button class="primary">"+ New tenant"</button>
                 </A>
             </header>
@@ -73,9 +74,9 @@ pub fn List() -> impl IntoView {
                                 <tbody>
                                     {r.items.into_iter().map(|t| {
                                         let id = t.id.clone();
-                                        let detail = format!("/tenants/{}", id);
-                                        let edit = format!("/tenants/{}/edit", id);
-                                        let delete = format!("/tenants/{}/delete", id);
+                                        let detail = ui_path!("/tenants/{}", id);
+                                        let edit = ui_path!("/tenants/{}/edit", id);
+                                        let delete = ui_path!("/tenants/{}/delete", id);
                                         view! {
                                             <tr>
                                                 <td><A href=detail.clone()>{t.name.clone()}</A></td>
@@ -122,14 +123,14 @@ pub fn Detail() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Tenant"</h1>
-                <p><A href="/tenants">"← All tenants"</A></p>
+                <p><A href=ui_path!("/tenants")>"← All tenants"</A></p>
             </header>
 
             <AsyncView
                 state=state
                 children=Box::new(|t: api::Tenant| {
-                    let edit_link = format!("/tenants/{}/edit", t.id);
-                    let delete_link = format!("/tenants/{}/delete", t.id);
+                    let edit_link = ui_path!("/tenants/{}/edit", t.id);
+                    let delete_link = ui_path!("/tenants/{}/delete", t.id);
                     view! {
                         <dl class="entity-detail">
                             <dt>"Name"</dt>
@@ -179,7 +180,7 @@ pub fn Create() -> impl IntoView {
         spawn_local(async move {
             match api::create_tenant(&body).await {
                 Ok(t) => {
-                    navigate(&format!("/tenants/{}", t.id), Default::default());
+                    navigate(&ui_path!("/tenants/{}", t.id), Default::default());
                 }
                 Err(err) => {
                     set_error.set(Some(err));
@@ -193,7 +194,7 @@ pub fn Create() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"New tenant"</h1>
-                <p><A href="/tenants">"← All tenants"</A></p>
+                <p><A href=ui_path!("/tenants")>"← All tenants"</A></p>
             </header>
 
             <form class="entity-form" on:submit=on_submit>
@@ -287,7 +288,7 @@ pub fn Edit() -> impl IntoView {
         spawn_local(async move {
             match api::update_tenant(&id_val, &body).await {
                 Ok(_) => {
-                    navigate(&format!("/tenants/{}", id_val), Default::default());
+                    navigate(&ui_path!("/tenants/{}", id_val), Default::default());
                 }
                 Err(api::ApiError::Stale { message }) => {
                     // Re-fetch to pick up the new lock token. We keep
@@ -313,7 +314,7 @@ pub fn Edit() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Edit tenant"</h1>
-                <p><A href="/tenants">"← All tenants"</A></p>
+                <p><A href=ui_path!("/tenants")>"← All tenants"</A></p>
             </header>
 
             <AsyncView
@@ -404,13 +405,13 @@ pub fn DeleteConfirm() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Delete tenant"</h1>
-                <p><A href="/tenants">"← All tenants"</A></p>
+                <p><A href=ui_path!("/tenants")>"← All tenants"</A></p>
             </header>
 
             <AsyncView
                 state=loaded
                 children=Box::new(move |t: api::Tenant| {
-                    let detail_link = format!("/tenants/{}", t.id);
+                    let detail_link = ui_path!("/tenants/{}", t.id);
                     let navigate_inner = navigate.clone();
                     let on_confirm = move |_ev: web_sys::MouseEvent| {
                         let id_val = id.get_untracked();
@@ -420,7 +421,7 @@ pub fn DeleteConfirm() -> impl IntoView {
                         spawn_local(async move {
                             match api::delete_tenant(&id_val).await {
                                 Ok(()) => {
-                                    navigate("/tenants", Default::default());
+                                    navigate(ui_path!("/tenants"), Default::default());
                                 }
                                 Err(err) => {
                                     set_error.set(Some(err));

@@ -26,6 +26,7 @@ use web_sys::SubmitEvent;
 
 use crate::api;
 use crate::pages::{render_dependents, Async, AsyncView};
+use crate::ui_path;
 
 fn pretty(v: &JsonValue) -> String {
     serde_json::to_string_pretty(v).unwrap_or_else(|_| "null".to_string())
@@ -49,7 +50,7 @@ pub fn List() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Bindings"</h1>
-                <A href="/bindings/new">
+                <A href=ui_path!("/bindings/new")>
                     <button class="primary">"+ New binding"</button>
                 </A>
             </header>
@@ -79,18 +80,18 @@ pub fn List() -> impl IntoView {
                                 </thead>
                                 <tbody>
                                     {r.items.into_iter().map(|b| {
-                                        let detail = format!(
+                                        let detail = ui_path!(
                                             "/bindings/{}/{}", b.workspace_id, b.plugin_id
                                         );
-                                        let edit = format!(
+                                        let edit = ui_path!(
                                             "/bindings/{}/{}/edit", b.workspace_id, b.plugin_id
                                         );
-                                        let delete = format!(
+                                        let delete = ui_path!(
                                             "/bindings/{}/{}/delete",
                                             b.workspace_id, b.plugin_id,
                                         );
-                                        let ws_link = format!("/workspaces/{}", b.workspace_id);
-                                        let pl_link = format!("/plugins/{}", b.plugin_id);
+                                        let ws_link = ui_path!("/workspaces/{}", b.workspace_id);
+                                        let pl_link = ui_path!("/plugins/{}", b.plugin_id);
                                         let has_config = b.config.is_some();
                                         view! {
                                             <tr>
@@ -149,20 +150,20 @@ pub fn Detail() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Binding"</h1>
-                <p><A href="/bindings">"← All bindings"</A></p>
+                <p><A href=ui_path!("/bindings")>"← All bindings"</A></p>
             </header>
 
             <AsyncView
                 state=state
                 children=Box::new(|b: api::WorkspacePlugin| {
-                    let edit_link = format!(
+                    let edit_link = ui_path!(
                         "/bindings/{}/{}/edit", b.workspace_id, b.plugin_id
                     );
-                    let delete_link = format!(
+                    let delete_link = ui_path!(
                         "/bindings/{}/{}/delete", b.workspace_id, b.plugin_id
                     );
-                    let ws_link = format!("/workspaces/{}", b.workspace_id);
-                    let pl_link = format!("/plugins/{}", b.plugin_id);
+                    let ws_link = ui_path!("/workspaces/{}", b.workspace_id);
+                    let pl_link = ui_path!("/plugins/{}", b.plugin_id);
                     let config_display = match &b.config {
                         Some(v) => pretty(v),
                         None => "(no config)".to_string(),
@@ -268,7 +269,7 @@ pub fn Create() -> impl IntoView {
         spawn_local(async move {
             match api::create_workspace_plugin(&body).await {
                 Ok(b) => navigate(
-                    &format!("/bindings/{}/{}", b.workspace_id, b.plugin_id),
+                    &ui_path!("/bindings/{}/{}", b.workspace_id, b.plugin_id),
                     Default::default(),
                 ),
                 Err(err) => {
@@ -283,7 +284,7 @@ pub fn Create() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"New binding"</h1>
-                <p><A href="/bindings">"← All bindings"</A></p>
+                <p><A href=ui_path!("/bindings")>"← All bindings"</A></p>
             </header>
 
             <form class="entity-form" on:submit=on_submit>
@@ -422,7 +423,7 @@ pub fn Edit() -> impl IntoView {
         let navigate = navigate.clone();
         spawn_local(async move {
             match api::update_workspace_plugin(&w, &p, &body).await {
-                Ok(_) => navigate(&format!("/bindings/{}/{}", w, p), Default::default()),
+                Ok(_) => navigate(&ui_path!("/bindings/{}/{}", w, p), Default::default()),
                 Err(api::ApiError::Stale { message }) => {
                     if let Ok(fresh) = api::get_workspace_plugin(&w, &p).await {
                         set_lock.set(fresh.updated_at.clone());
@@ -443,7 +444,7 @@ pub fn Edit() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Edit binding"</h1>
-                <p><A href="/bindings">"← All bindings"</A></p>
+                <p><A href=ui_path!("/bindings")>"← All bindings"</A></p>
             </header>
 
             <AsyncView
@@ -519,13 +520,13 @@ pub fn DeleteConfirm() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Delete binding"</h1>
-                <p><A href="/bindings">"← All bindings"</A></p>
+                <p><A href=ui_path!("/bindings")>"← All bindings"</A></p>
             </header>
 
             <AsyncView
                 state=loaded
                 children=Box::new(move |b: api::WorkspacePlugin| {
-                    let detail_link = format!(
+                    let detail_link = ui_path!(
                         "/bindings/{}/{}", b.workspace_id, b.plugin_id
                     );
                     let navigate_inner = navigate.clone();
@@ -536,7 +537,7 @@ pub fn DeleteConfirm() -> impl IntoView {
                         let navigate = navigate_inner.clone();
                         spawn_local(async move {
                             match api::delete_workspace_plugin(&w, &p).await {
-                                Ok(()) => navigate("/bindings", Default::default()),
+                                Ok(()) => navigate(ui_path!("/bindings"), Default::default()),
                                 Err(err) => {
                                     set_error.set(Some(err));
                                     set_busy.set(false);

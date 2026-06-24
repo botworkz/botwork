@@ -96,7 +96,7 @@ pub fn NotFound() -> impl IntoView {
             <h1>"Not found"</h1>
             <p>"The page you requested does not exist."</p>
             <p>
-                <a href="/admin/">"Back to dashboard"</a>
+                <a href={crate::ui_path!("/")}>"Back to dashboard"</a>
             </p>
         </article>
     }

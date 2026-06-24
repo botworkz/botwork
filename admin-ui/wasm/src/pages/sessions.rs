@@ -29,6 +29,7 @@ use leptos_router::hooks::use_params_map;
 
 use crate::api;
 use crate::pages::{Async, AsyncView};
+use crate::ui_path;
 
 #[component]
 pub fn List() -> impl IntoView {
@@ -113,9 +114,9 @@ pub fn List() -> impl IntoView {
                                 </thead>
                                 <tbody>
                                     {r.items.into_iter().map(|s| {
-                                        let detail = format!("/sessions/{}", s.id);
-                                        let tlink = format!("/tenants/{}", s.tenant_id);
-                                        let wlink = format!("/workspaces/{}", s.workspace_id);
+                                        let detail = ui_path!("/sessions/{}", s.id);
+                                        let tlink = ui_path!("/tenants/{}", s.tenant_id);
+                                        let wlink = ui_path!("/workspaces/{}", s.workspace_id);
                                         view! {
                                             <tr>
                                                 <td>
@@ -171,15 +172,15 @@ pub fn Detail() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Session"</h1>
-                <p><A href="/sessions">"← All sessions"</A></p>
+                <p><A href=ui_path!("/sessions")>"← All sessions"</A></p>
             </header>
 
             <AsyncView
                 state=state
                 children=Box::new(|s: api::AgentSession| {
-                    let workers_link = format!("/workers?agent_session_id={}", s.id);
-                    let tenant_link = format!("/tenants/{}", s.tenant_id);
-                    let workspace_link = format!("/workspaces/{}", s.workspace_id);
+                    let workers_link = ui_path!("/workers?agent_session_id={}", s.id);
+                    let tenant_link = ui_path!("/tenants/{}", s.tenant_id);
+                    let workspace_link = ui_path!("/workspaces/{}", s.workspace_id);
                     view! {
                         <dl class="entity-detail">
                             <dt>"Agent session id"</dt>
