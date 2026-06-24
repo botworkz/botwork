@@ -31,3 +31,12 @@ tempfile = "3"
 # against control-plane (botworkz/botwork#112).
 wiremock = "0.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# RFE #105 round-3 cleanup: `botwork-tools ps` now consumes
+# session-broker's `GET /sessions` HTTP endpoint instead of reading
+# the retired `/var/lib/botwork/sessions.json` file. The deserialiser
+# tests stand up a small in-process HTTP server (same shape
+# control-plane uses for its recovery_test); these are the runtime
+# pieces that fake-server needs.
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }

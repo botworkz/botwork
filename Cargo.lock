@@ -653,6 +653,9 @@ version = "0.0.0"
 dependencies = [
  "botwork-admin-core",
  "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "reqwest",
  "serde",
  "serde_json",
