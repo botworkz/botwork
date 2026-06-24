@@ -8,8 +8,9 @@
 //! 1. `Migrator::up` returns `Ok(())`.
 //! 2. The `seaql_migrations` tracking table exists in `public` (and lists
 //!    our migrations in order).
-//! 3. The six v1 tables (`tenant`, `workspace`, `plugin`,
-//!    `workspace_plugin`, `agent_session`, `session_worker`) all exist.
+//! 3. The eight v1 tables (`tenant`, `workspace`, `plugin`,
+//!    `workspace_plugin`, `agent_session`, `session_worker`,
+//!    `opaque_password_file`, `lease`) all exist.
 //! 4. A second `up` invocation against the same DB is also `Ok(())`
 //!    (idempotency — the oneshot can restart safely).
 //! 5. FK semantics are wired the right way:
@@ -20,6 +21,8 @@
 //!    * `agent_session.workspace_id → workspace.id`  ON DELETE **CASCADE** (RFE #105)
 //!    * `session_worker.agent_session_id → agent_session.id`  ON DELETE **CASCADE** (RFE #105 round-3)
 //!    * `session_worker.plugin_id → plugin.id`  ON DELETE **RESTRICT** (RFE #105 round-3)
+//!    * `opaque_password_file.tenant_id → tenant.id`  ON DELETE **CASCADE** (botworkz/botwork#141)
+//!    * `lease.tenant_id → tenant.id`  ON DELETE **CASCADE** (botworkz/botwork#141)
 //! 6. The composite uniqueness `UNIQUE(tenant_id, name)` on workspace lets
 //!    multiple tenants own a workspace called `mcp` without collision.
 //! 7. The natural-key UNIQUE on
@@ -32,6 +35,16 @@
 //!    live workers for the same `(agent, plugin)` pair, but accepts
 //!    multiple audit rows (reaped_at NOT NULL) and multiple pre-bind
 //!    rows (agent_session_id NULL) (RFE #105 round-3).
+//! 9. The UNIQUE on `opaque_password_file.tenant_id` rejects a second
+//!    row for the same tenant (botworkz/botwork#141).
+//! 10. The UNIQUE on `lease.bearer_hash` rejects a second lease with
+//!     the same bearer-hash bytes, and the partial index
+//!     `ix_lease_live` is registered with a `WHERE` predicate
+//!     (botworkz/botwork#141).
+//! 11. CASCADE on tenant: dropping a tenant (after dropping its
+//!     workspaces and agent sessions, per the existing two-step
+//!     posture) sweeps any `opaque_password_file` + `lease` rows it
+//!     owned (botworkz/botwork#141).
 //!
 //! The test gates on whether docker is reachable. In CI, the runner has
 //! docker and the test runs in full. On dev machines without docker, the
@@ -164,6 +177,8 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "workspace_plugin",
         "agent_session",
         "session_worker",
+        "opaque_password_file",
+        "lease",
     ] {
         assert!(
             table_exists(&db, table).await,
@@ -181,6 +196,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "m20260620_000002_extend_plugin_schema".to_owned(),
         "m20260622_000001_create_agent_session".to_owned(),
         "m20260622_000002_create_session_worker".to_owned(),
+        "m20260624_000001_create_auth_tables".to_owned(),
     ];
     assert_eq!(
         applied_migration_names(&db).await,
@@ -205,6 +221,10 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
     assert_agent_session_natural_key_unique_per_workspace(&db).await;
     assert_session_worker_live_per_plugin_uniqueness(&db).await;
     assert_session_worker_cascade_on_agent_session_delete(&db).await;
+    assert_opaque_password_file_unique_per_tenant(&db).await;
+    assert_lease_bearer_hash_unique(&db).await;
+    assert_lease_live_index_is_partial(&db).await;
+    assert_auth_tables_cascade_on_tenant_delete(&db).await;
 }
 
 async fn table_exists(db: &DatabaseConnection, name: &str) -> bool {
@@ -267,6 +287,11 @@ async fn assert_fk_actions(db: &DatabaseConnection) {
         // workers can't be silently dropped.
         ("fk_session_worker_agent_session", "CASCADE"),
         ("fk_session_worker_plugin", "RESTRICT"),
+        // botworkz/botwork#141: opaque_password_file + lease are
+        // both projections of tenant; the password file blob and
+        // the bearer-lease state are meaningless without it.
+        ("fk_opaque_password_file_tenant", "CASCADE"),
+        ("fk_lease_tenant", "CASCADE"),
     ] {
         let backend = db.get_database_backend();
         let stmt = Statement::from_sql_and_values(
@@ -778,4 +803,278 @@ async fn assert_session_worker_cascade_on_agent_session_delete(db: &DatabaseConn
     ))
     .await
     .expect("cascade tenant cleanup");
+}
+
+/// botworkz/botwork#141: assert the `opaque_password_file` UNIQUE on
+/// `tenant_id` rejects a second row for the same tenant. v0 ships
+/// "one current OPAQUE suite per tenant"; the unique constraint is
+/// the enforcement mechanism. A second insert for the same tenant
+/// must fail on `ux_opaque_password_file_tenant`.
+async fn assert_opaque_password_file_unique_per_tenant(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name) VALUES (gen_random_uuid(), 'opaque-tenant')".to_owned(),
+    ))
+    .await
+    .expect("seed opaque-tenant");
+
+    // First row: OK.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO opaque_password_file (id, tenant_id, password_file) \
+         SELECT gen_random_uuid(), id, '\\x4f50415155453031'::bytea \
+         FROM tenant WHERE name = 'opaque-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("first opaque_password_file row must insert");
+
+    // Second row for the same tenant: must violate
+    // ux_opaque_password_file_tenant.
+    let dup = db
+        .execute(Statement::from_string(
+            backend,
+            "INSERT INTO opaque_password_file (id, tenant_id, password_file) \
+             SELECT gen_random_uuid(), id, '\\x4f50415155453032'::bytea \
+             FROM tenant WHERE name = 'opaque-tenant'"
+                .to_owned(),
+        ))
+        .await;
+    assert!(
+        dup.is_err(),
+        "second opaque_password_file row for same tenant must violate \
+         ux_opaque_password_file_tenant"
+    );
+
+    // Cleanup. tenant CASCADE sweeps the password_file row.
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM tenant WHERE name = 'opaque-tenant'".to_owned(),
+    ))
+    .await
+    .expect("opaque-tenant cleanup");
+}
+
+/// botworkz/botwork#141: assert the `lease.bearer_hash` UNIQUE rejects
+/// a second lease with the same hash bytes. Auth-broker hashes the
+/// incoming `Authorization: Bearer <token>` and looks the row up by
+/// hash; the unique constraint is what makes "two leases with the
+/// same bearer" structurally impossible.
+async fn assert_lease_bearer_hash_unique(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name) VALUES (gen_random_uuid(), 'lease-unique-tenant')"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed lease-unique-tenant");
+
+    // First lease: OK.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO lease \
+           (id, tenant_id, bearer_hash, wrapped_export_key, \
+            issued_at, expires_at, idle_extends_to) \
+         SELECT gen_random_uuid(), id, '\\xdeadbeef'::bytea, '\\x01'::bytea, \
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + interval '30 days', \
+                CURRENT_TIMESTAMP + interval '7 days' \
+         FROM tenant WHERE name = 'lease-unique-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("first lease must insert");
+
+    // Same bearer_hash, same tenant: must violate ux_lease_bearer_hash.
+    let dup_same_tenant = db
+        .execute(Statement::from_string(
+            backend,
+            "INSERT INTO lease \
+               (id, tenant_id, bearer_hash, wrapped_export_key, \
+                issued_at, expires_at, idle_extends_to) \
+             SELECT gen_random_uuid(), id, '\\xdeadbeef'::bytea, '\\x02'::bytea, \
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + interval '30 days', \
+                    CURRENT_TIMESTAMP + interval '7 days' \
+             FROM tenant WHERE name = 'lease-unique-tenant'"
+                .to_owned(),
+        ))
+        .await;
+    assert!(
+        dup_same_tenant.is_err(),
+        "second lease with same bearer_hash under same tenant must violate \
+         ux_lease_bearer_hash"
+    );
+
+    // Same bearer_hash, *different* tenant: must also violate — the
+    // UNIQUE is global on the column, not scoped per tenant. (The
+    // hash collision space is 2^256; in practice a collision across
+    // tenants is impossible, but the schema is what enforces the
+    // invariant.)
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name) VALUES (gen_random_uuid(), 'lease-unique-tenant-b')"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed lease-unique-tenant-b");
+    let dup_cross_tenant = db
+        .execute(Statement::from_string(
+            backend,
+            "INSERT INTO lease \
+               (id, tenant_id, bearer_hash, wrapped_export_key, \
+                issued_at, expires_at, idle_extends_to) \
+             SELECT gen_random_uuid(), id, '\\xdeadbeef'::bytea, '\\x03'::bytea, \
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + interval '30 days', \
+                    CURRENT_TIMESTAMP + interval '7 days' \
+             FROM tenant WHERE name = 'lease-unique-tenant-b'"
+                .to_owned(),
+        ))
+        .await;
+    assert!(
+        dup_cross_tenant.is_err(),
+        "second lease with same bearer_hash under a different tenant must also \
+         violate ux_lease_bearer_hash (the index is global on the column)"
+    );
+
+    // Cleanup. tenant CASCADE sweeps the lease rows.
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM tenant WHERE name IN ('lease-unique-tenant', 'lease-unique-tenant-b')"
+            .to_owned(),
+    ))
+    .await
+    .expect("lease-unique tenants cleanup");
+}
+
+/// botworkz/botwork#141: assert `ix_lease_live` is a *partial* index
+/// — its `pg_indexes.indexdef` must include a `WHERE` clause. The
+/// partial-ness is what keeps the operator "list my active leases"
+/// hot path cheap as the revoked audit tail grows; a non-partial
+/// index would still answer the query, but would also include
+/// long-revoked rows in the index and grow without bound.
+async fn assert_lease_live_index_is_partial(db: &DatabaseConnection) {
+    #[derive(FromQueryResult)]
+    struct IndexDefRow {
+        indexdef: String,
+    }
+
+    let backend = db.get_database_backend();
+    let stmt = Statement::from_sql_and_values(
+        backend,
+        "SELECT indexdef \
+         FROM pg_indexes \
+         WHERE schemaname = 'public' AND indexname = $1",
+        ["ix_lease_live".into()],
+    );
+    let row = IndexDefRow::find_by_statement(stmt)
+        .one(db)
+        .await
+        .expect("pg_indexes query must succeed")
+        .expect("ix_lease_live index should exist");
+    assert!(
+        row.indexdef.contains("WHERE"),
+        "ix_lease_live must be a partial index (indexdef should contain WHERE); \
+         got: {indexdef}",
+        indexdef = row.indexdef
+    );
+    assert!(
+        row.indexdef.contains("revoked_at IS NULL"),
+        "ix_lease_live predicate should target live (non-revoked) rows; \
+         got: {indexdef}",
+        indexdef = row.indexdef
+    );
+}
+
+/// botworkz/botwork#141: assert CASCADE on tenant deletes sweeps any
+/// `opaque_password_file` + `lease` rows the tenant owned. Mirrors
+/// the existing two-step posture: workspace.tenant_id is RESTRICT so
+/// a tenant with workspaces can't be deleted; drop the workspace
+/// first, then the tenant, and the auth rows go with it.
+async fn assert_auth_tables_cascade_on_tenant_delete(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name) VALUES (gen_random_uuid(), 'auth-cascade-tenant')"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed auth-cascade-tenant");
+
+    // Plant one password file + two leases under the tenant.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO opaque_password_file (id, tenant_id, password_file) \
+         SELECT gen_random_uuid(), id, '\\xcafebabe'::bytea \
+         FROM tenant WHERE name = 'auth-cascade-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed cascade opaque_password_file");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO lease \
+           (id, tenant_id, bearer_hash, wrapped_export_key, \
+            issued_at, expires_at, idle_extends_to) \
+         SELECT gen_random_uuid(), id, '\\xaabbccdd'::bytea, '\\x10'::bytea, \
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + interval '30 days', \
+                CURRENT_TIMESTAMP + interval '7 days' \
+         FROM tenant WHERE name = 'auth-cascade-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed cascade live lease");
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO lease \
+           (id, tenant_id, bearer_hash, wrapped_export_key, \
+            issued_at, expires_at, idle_extends_to, revoked_at) \
+         SELECT gen_random_uuid(), id, '\\xeeff0011'::bytea, '\\x11'::bytea, \
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + interval '30 days', \
+                CURRENT_TIMESTAMP + interval '7 days', CURRENT_TIMESTAMP \
+         FROM tenant WHERE name = 'auth-cascade-tenant'"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed cascade revoked lease (audit row)");
+
+    // Drop the tenant. Both tables cascade.
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM tenant WHERE name = 'auth-cascade-tenant'".to_owned(),
+    ))
+    .await
+    .expect("tenant delete should CASCADE into opaque_password_file + lease");
+
+    let opf_remaining = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT count(*)::int AS c FROM opaque_password_file \
+             WHERE password_file = '\\xcafebabe'::bytea"
+                .to_owned(),
+        ))
+        .await
+        .expect("count opaque_password_file rows after cascade")
+        .expect("count returns one row");
+    let opf_count: i32 = opf_remaining.try_get("", "c").expect("c column");
+    assert_eq!(
+        opf_count, 0,
+        "opaque_password_file row must cascade-delete with its tenant"
+    );
+
+    let lease_remaining = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT count(*)::int AS c FROM lease \
+             WHERE bearer_hash IN ('\\xaabbccdd'::bytea, '\\xeeff0011'::bytea)"
+                .to_owned(),
+        ))
+        .await
+        .expect("count lease rows after cascade")
+        .expect("count returns one row");
+    let lease_count: i32 = lease_remaining.try_get("", "c").expect("c column");
+    assert_eq!(
+        lease_count, 0,
+        "both live and revoked lease rows must cascade-delete with their tenant"
+    );
 }

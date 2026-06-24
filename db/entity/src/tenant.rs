@@ -15,6 +15,11 @@
 //!   parent is gone (RFE #105). The RESTRICT on workspace still
 //!   enforces the two-step posture, since workspaces have to drop
 //!   first.
+//! * `opaque_password_file.tenant_id` → **CASCADE** — same reason as
+//!   agent_session: the OPAQUE registration blob has no meaning
+//!   without the tenant it authenticates (botworkz/botwork#141).
+//! * `lease.tenant_id` → **CASCADE** — same posture; a lease without
+//!   a tenant is meaningless (botworkz/botwork#141).
 //!
 //! [`workspace`]: super::workspace
 
@@ -42,6 +47,18 @@ pub enum Relation {
     /// (agent_session → tenant) is defined on agent_session.
     #[sea_orm(has_many = "super::agent_session::Entity")]
     AgentSession,
+    /// A tenant has zero-or-one OPAQUE password file rows
+    /// (botworkz/botwork#141). v0 ships UNIQUE on `tenant_id` so the
+    /// cardinality is enforced; `has_many` is the SeaORM idiom for
+    /// the inverse side regardless (the typed wrapper crate in
+    /// botworkz/botwork-extra#123 collapses it back to a single row
+    /// at the application layer).
+    #[sea_orm(has_many = "super::opaque_password_file::Entity")]
+    OpaquePasswordFile,
+    /// A tenant has many leases (botworkz/botwork#141). Inverse side
+    /// (lease → tenant) is defined on lease.
+    #[sea_orm(has_many = "super::lease::Entity")]
+    Lease,
 }
 
 impl Related<super::workspace::Entity> for Entity {
@@ -53,6 +70,18 @@ impl Related<super::workspace::Entity> for Entity {
 impl Related<super::agent_session::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::AgentSession.def()
+    }
+}
+
+impl Related<super::opaque_password_file::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::OpaquePasswordFile.def()
+    }
+}
+
+impl Related<super::lease::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Lease.def()
     }
 }
 

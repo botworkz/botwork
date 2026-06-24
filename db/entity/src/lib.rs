@@ -3,8 +3,8 @@
 //! Holds SeaORM entity definitions and the helpers used to obtain a
 //! [`sea_orm::DatabaseConnection`]. Every persistence-aware consumer
 //! (config-broker, control-plane, the future admin-api, the bootstrap
-//! binary) depends on this crate so the schema has a single source of
-//! truth.
+//! binary, the future auth-broker) depends on this crate so the
+//! schema has a single source of truth.
 //!
 //! # v0 schema (RFE #101)
 //!
@@ -42,6 +42,25 @@
 //!   Round-3 of the persistence cutover (this is what makes
 //!   `/var/lib/botwork/sessions.json` deletable).
 //!
+//! [botworkz/botwork#141][issue-141] (cross-repo with
+//! [botworkz/botwork-extra#123][rfe-123]) adds the auth-broker side:
+//!
+//! * [`opaque_password_file`] — one row per tenant. Holds the OPAQUE
+//!   registration "password file" auth-broker reads on every login
+//!   handshake. The blob is binary (`bytea`) and opaque to postgres
+//!   — no `@>` predicates needed. UNIQUE on `tenant_id` enforces "one
+//!   current suite per tenant" in v0; a future suite-rotation
+//!   migration relaxes that to UNIQUE on `(tenant_id, suite_version)`.
+//! * [`lease`] — one row per outstanding auth-broker lease. Bearer
+//!   plaintext never lands in postgres; the hot-path lookup is by
+//!   `bearer_hash` (SHA-256 of the bearer). UPDATEs on each request
+//!   bump `idle_extends_to`; explicit revoke sets `revoked_at`. The
+//!   janitor + per-tenant `max_lease` cap live in auth-broker, not
+//!   here.
+//!
+//! [issue-141]: https://github.com/botworkz/botwork/issues/141
+//! [rfe-123]: https://github.com/botworkz/botwork-extra/issues/123
+//!
 //! Resolve hot-path (config-broker, post-cutover):
 //!
 //! ```sql
@@ -73,6 +92,8 @@
 
 pub mod agent_session;
 pub mod connection;
+pub mod lease;
+pub mod opaque_password_file;
 pub mod plugin;
 pub mod session_worker;
 pub mod tenant;

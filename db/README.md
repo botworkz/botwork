@@ -73,9 +73,19 @@ production needs an operator surface that exists outside admin-api.
 
 ```
    tenant ─1:N─┐
-               │
-             workspace ─M:N─ workspace_plugin ─N:1─ plugin
+               ├─ workspace ─M:N─ workspace_plugin ─N:1─ plugin
+               ├─ agent_session ─1:N─ session_worker ─N:1─ plugin
+               ├─ opaque_password_file               (0..1 per tenant)
+               └─ lease ─1:N
 ```
+
+The `tenant`/`workspace`/`workspace_plugin`/`plugin` quadrant is the
+config-broker resolve surface (RFE #101). The
+`agent_session`/`session_worker` pair is the durable identity +
+per-incarnation projection for goose sessions (RFE #105). The
+`opaque_password_file`/`lease` pair is the auth-broker persistence
+layer (botworkz/botwork#141; parent RFE
+[botworkz/botwork-extra#123](https://github.com/botworkz/botwork-extra/issues/123)).
 
 ### Tables
 
@@ -129,6 +139,44 @@ collision.
 A reverse-direction index `ix_workspace_plugin_plugin (plugin_id)`
 exists for the future admin-api "where is plugin X used?" query.
 
+#### `opaque_password_file` (botworkz/botwork#141)
+
+| Column          | Type          | Notes                                                                  |
+|-----------------|---------------|------------------------------------------------------------------------|
+| `id`            | `uuid` PK     | `DEFAULT gen_random_uuid()`                                            |
+| `tenant_id`     | `uuid`        | UNIQUE, FK → `tenant.id` ON DELETE **CASCADE**                         |
+| `password_file` | `bytea`       | `opaque-ke` registration output (RFC draft-irtf-cfrg-opaque-13 §3.1)   |
+| `suite_version` | `integer`     | `NOT NULL DEFAULT 1` — placeholder for future suite rotation           |
+| `created_at`    | `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                                            |
+| `updated_at`    | `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                                            |
+
+One row per tenant in v0. Auth-broker reads this on every login
+handshake to compute its half of the OPAQUE protocol. The blob is
+opaque to postgres — no `@>` predicates needed.
+
+#### `lease` (botworkz/botwork#141)
+
+| Column               | Type          | Notes                                                          |
+|----------------------|---------------|----------------------------------------------------------------|
+| `id`                 | `uuid` PK     | `DEFAULT gen_random_uuid()`                                    |
+| `tenant_id`          | `uuid`        | FK → `tenant.id` ON DELETE **CASCADE**                         |
+| `bearer_hash`        | `bytea`       | UNIQUE — SHA-256 of the bearer; bearer plaintext never stored  |
+| `wrapped_export_key` | `bytea`       | OPAQUE `export_key` sealed under a broker-side wrapping key    |
+| `issued_at`          | `timestamptz` | `DEFAULT CURRENT_TIMESTAMP`                                    |
+| `expires_at`         | `timestamptz` | Hard ceiling; client request capped at tenant `max_lease`      |
+| `idle_extends_to`    | `timestamptz` | `min(expires_at, now + idle_window)`; bumped on each use       |
+| `revoked_at`         | `timestamptz` | NULL = live; non-NULL = terminal audit state                   |
+
+One row per outstanding lease. Auth-broker INSERTs on successful
+OPAQUE login, looks up by `bearer_hash` on every request to
+validate-and-extend, UPDATEs `idle_extends_to` on each use, and sets
+`revoked_at` on explicit revoke / password change / admin action. The
+partial index `ix_lease_live (tenant_id, expires_at) WHERE revoked_at
+IS NULL` is the hot path for both the operator "list my active
+leases" surface and the janitor's expired-row sweep — keeping the
+revoked audit tail out of the index keeps it cheap as the tail
+grows.
+
 ### FK semantics, named
 
 * **`workspace.tenant_id` → `tenant.id` ON DELETE RESTRICT.**
@@ -143,6 +191,14 @@ exists for the future admin-api "where is plugin X used?" query.
   be removed. The future admin-api's "delete plugin" surface walks the
   reverse-index and refuses the operation if any bindings still point
   at it.
+* **`opaque_password_file.tenant_id` → `tenant.id` ON DELETE CASCADE**
+  (botworkz/botwork#141). The OPAQUE registration blob is meaningless
+  without the tenant it authenticates; cascading on delete keeps the
+  janitor out of the loop. The deliberate-two-step posture still lives
+  one layer up at `workspace.tenant_id` RESTRICT.
+* **`lease.tenant_id` → `tenant.id` ON DELETE CASCADE**
+  (botworkz/botwork#141). Same posture: a lease without a tenant is
+  meaningless.
 
 ### Resolve hot-path
 
