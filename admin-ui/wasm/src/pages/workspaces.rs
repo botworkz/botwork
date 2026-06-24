@@ -24,6 +24,7 @@ use web_sys::SubmitEvent;
 
 use crate::api;
 use crate::pages::{render_dependents, Async, AsyncView};
+use crate::ui_path;
 
 #[component]
 pub fn List() -> impl IntoView {
@@ -42,7 +43,7 @@ pub fn List() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Workspaces"</h1>
-                <A href="/workspaces/new">
+                <A href=ui_path!("/workspaces/new")>
                     <button class="primary">"+ New workspace"</button>
                 </A>
             </header>
@@ -72,10 +73,10 @@ pub fn List() -> impl IntoView {
                                 </thead>
                                 <tbody>
                                     {r.items.into_iter().map(|w| {
-                                        let detail = format!("/workspaces/{}", w.id);
-                                        let edit = format!("/workspaces/{}/edit", w.id);
-                                        let delete = format!("/workspaces/{}/delete", w.id);
-                                        let tenant_link = format!("/tenants/{}", w.tenant_id);
+                                        let detail = ui_path!("/workspaces/{}", w.id);
+                                        let edit = ui_path!("/workspaces/{}/edit", w.id);
+                                        let delete = ui_path!("/workspaces/{}/delete", w.id);
+                                        let tenant_link = ui_path!("/tenants/{}", w.tenant_id);
                                         view! {
                                             <tr>
                                                 <td><A href=detail.clone()>{w.name.clone()}</A></td>
@@ -124,15 +125,15 @@ pub fn Detail() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Workspace"</h1>
-                <p><A href="/workspaces">"← All workspaces"</A></p>
+                <p><A href=ui_path!("/workspaces")>"← All workspaces"</A></p>
             </header>
 
             <AsyncView
                 state=state
                 children=Box::new(|w: api::Workspace| {
-                    let edit_link = format!("/workspaces/{}/edit", w.id);
-                    let delete_link = format!("/workspaces/{}/delete", w.id);
-                    let tenant_link = format!("/tenants/{}", w.tenant_id);
+                    let edit_link = ui_path!("/workspaces/{}/edit", w.id);
+                    let delete_link = ui_path!("/workspaces/{}/delete", w.id);
+                    let tenant_link = ui_path!("/tenants/{}", w.tenant_id);
                     view! {
                         <dl class="entity-detail">
                             <dt>"Name"</dt>
@@ -209,7 +210,7 @@ pub fn Create() -> impl IntoView {
         let navigate = navigate.clone();
         spawn_local(async move {
             match api::create_workspace(&body).await {
-                Ok(w) => navigate(&format!("/workspaces/{}", w.id), Default::default()),
+                Ok(w) => navigate(&ui_path!("/workspaces/{}", w.id), Default::default()),
                 Err(err) => {
                     set_error.set(Some(err));
                     set_busy.set(false);
@@ -222,7 +223,7 @@ pub fn Create() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"New workspace"</h1>
-                <p><A href="/workspaces">"← All workspaces"</A></p>
+                <p><A href=ui_path!("/workspaces")>"← All workspaces"</A></p>
             </header>
 
             <AsyncView
@@ -328,7 +329,7 @@ pub fn Edit() -> impl IntoView {
         let navigate = navigate.clone();
         spawn_local(async move {
             match api::update_workspace(&id_val, &body).await {
-                Ok(_) => navigate(&format!("/workspaces/{}", id_val), Default::default()),
+                Ok(_) => navigate(&ui_path!("/workspaces/{}", id_val), Default::default()),
                 Err(api::ApiError::Stale { message }) => {
                     if let Ok(fresh) = api::get_workspace(&id_val).await {
                         set_lock.set(fresh.updated_at.clone());
@@ -349,7 +350,7 @@ pub fn Edit() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Edit workspace"</h1>
-                <p><A href="/workspaces">"← All workspaces"</A></p>
+                <p><A href=ui_path!("/workspaces")>"← All workspaces"</A></p>
             </header>
 
             <AsyncView
@@ -414,13 +415,13 @@ pub fn DeleteConfirm() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Delete workspace"</h1>
-                <p><A href="/workspaces">"← All workspaces"</A></p>
+                <p><A href=ui_path!("/workspaces")>"← All workspaces"</A></p>
             </header>
 
             <AsyncView
                 state=loaded
                 children=Box::new(move |w: api::Workspace| {
-                    let detail_link = format!("/workspaces/{}", w.id);
+                    let detail_link = ui_path!("/workspaces/{}", w.id);
                     let navigate_inner = navigate.clone();
                     let on_confirm = move |_ev: web_sys::MouseEvent| {
                         let id_val = id.get_untracked();
@@ -429,7 +430,7 @@ pub fn DeleteConfirm() -> impl IntoView {
                         let navigate = navigate_inner.clone();
                         spawn_local(async move {
                             match api::delete_workspace(&id_val).await {
-                                Ok(()) => navigate("/workspaces", Default::default()),
+                                Ok(()) => navigate(ui_path!("/workspaces"), Default::default()),
                                 Err(err) => {
                                     set_error.set(Some(err));
                                     set_busy.set(false);

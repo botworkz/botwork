@@ -14,6 +14,7 @@ use leptos_router::hooks::{use_params_map, use_query_map};
 
 use crate::api;
 use crate::pages::{Async, AsyncView};
+use crate::ui_path;
 
 #[component]
 pub fn List() -> impl IntoView {
@@ -117,11 +118,11 @@ pub fn List() -> impl IntoView {
                                 </thead>
                                 <tbody>
                                     {r.items.into_iter().map(|w| {
-                                        let detail = format!("/workers/{}", w.id);
-                                        let plink = format!("/plugins/{}", w.plugin_id);
+                                        let detail = ui_path!("/workers/{}", w.id);
+                                        let plink = ui_path!("/plugins/{}", w.plugin_id);
                                         let session_view = match w.agent_session_id.clone() {
                                             Some(aid) => {
-                                                let href = format!("/sessions/{}", aid);
+                                                let href = ui_path!("/sessions/{}", aid);
                                                 view! {
                                                     <A href=href>
                                                         <code class="muted">{aid}</code>
@@ -181,16 +182,16 @@ pub fn Detail() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Worker"</h1>
-                <p><A href="/workers">"← All workers"</A></p>
+                <p><A href=ui_path!("/workers")>"← All workers"</A></p>
             </header>
 
             <AsyncView
                 state=state
                 children=Box::new(|w: api::SessionWorker| {
-                    let plink = format!("/plugins/{}", w.plugin_id);
+                    let plink = ui_path!("/plugins/{}", w.plugin_id);
                     let session_view = match w.agent_session_id.clone() {
                         Some(aid) => {
-                            let href = format!("/sessions/{}", aid);
+                            let href = ui_path!("/sessions/{}", aid);
                             view! {
                                 <A href=href>
                                     <code>{aid}</code>
