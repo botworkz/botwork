@@ -41,57 +41,16 @@
   -->
   <link data-trunk rel="rust" data-wasm-opt="z" />
 
-  <style>
-    *, *::before, *::after { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, sans-serif;
-      font-size: 15px;
-      background: #1a1a2e;
-      color: #e0e0e0;
-      min-height: 100dvh;
-    }
-
-    .admin-ui-root {
-      max-width: 720px;
-      margin: 0 auto;
-      padding: 2rem 1.5rem;
-    }
-
-    header h1 { margin: 0 0 0.25rem; font-size: 1.5rem; }
-    header .subtitle { margin: 0; color: #9090a8; font-size: 0.9rem; }
-
-    .health-card {
-      margin-top: 2rem;
-      padding: 1.25rem 1.5rem;
-      background: #25253d;
-      border: 1px solid #34344f;
-      border-radius: 6px;
-    }
-    .health-card h2 { margin: 0 0 1rem; font-size: 1.1rem; }
-
-    .health-detail { margin: 0 0 1rem; display: grid; grid-template-columns: 8rem 1fr; gap: 0.25rem 1rem; }
-    .health-detail dt { color: #9090a8; }
-    .health-detail dd { margin: 0; }
-    .health-db-ok { color: #6acf86; }
-    .health-db-bad { color: #e07070; }
-    .health-message { color: #d0d050; font-family: ui-monospace, monospace; }
-
-    .health-idle, .health-loading { color: #9090a8; margin: 0 0 1rem; }
-    .health-failed { color: #e07070; margin: 0 0 1rem; }
-
-    button.refresh {
-      background: #34344f;
-      color: #e0e0e0;
-      border: 1px solid #45456a;
-      padding: 0.4rem 0.9rem;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 0.9rem;
-    }
-    button.refresh:hover { background: #3e3e5c; }
-  </style>
+  <!--
+    Baseline operator stylesheet. Trunk pipelines + fingerprints the
+    `admin.css` file (sibling of this template) and emits it as
+    `/admin/admin-<hash>.css` alongside the JS loader and wasm blob,
+    which the admin-ui server picks up automatically via
+    `include_dir!`. See admin.css for the rule inventory + the
+    rationale for splitting it out of the inline <style> block this
+    replaces.
+  -->
+  <link data-trunk rel="css" href="admin.css" />
 </head>
 <body>
 </body>

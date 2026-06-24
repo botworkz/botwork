@@ -92,7 +92,11 @@ echo "${body}" | grep -q "data-trunk"
 #      `/foo.js` is the specific failure mode this probe
 #      catches,
 #   c. curl it and assert 200 + a JS-ish content-type,
-#   d. do the same for the `.wasm` blob (preload href).
+#   d. do the same for the `.wasm` blob (preload href),
+#   e. do the same for the baseline stylesheet (also a
+#      data-trunk asset pipelined under public_url; the
+#      panel still renders without it but is operator-
+#      hostile, so we want the same fail-loud).
 js_url="$(printf '%s' "${body}" \
   | grep -oE 'href="[^"]+\.js"' \
   | head -1 \
@@ -131,6 +135,31 @@ case "${wasm_url}" in
     ;;
 esac
 
+# Baseline stylesheet. Trunk pipelines `<link data-trunk rel="css">`
+# and emits a fingerprinted `admin-<hash>.css` under public_url. We
+# grep for the rendered href (the data-trunk attribute is stripped
+# from the emitted HTML, so it doesn't show up in step 3's grep) and
+# enforce the same `/admin/` prefix invariant as JS/wasm.
+css_url="$(printf '%s' "${body}" \
+  | grep -oE 'href="[^"]+\.css"' \
+  | head -1 \
+  | sed -E 's/^href="([^"]+)"$/\1/')"
+if [[ -z "${css_url}" ]]; then
+  echo "could not find a CSS href in /admin/ body" >&2
+  echo "did the data-trunk rel=\"css\" directive get dropped from index.html?" >&2
+  printf '%s\n' "${body}" >&2
+  exit 1
+fi
+echo "css_url: ${css_url}"
+case "${css_url}" in
+  /admin/*) ;;
+  *)
+    echo "css href ${css_url} is not /admin/-prefixed" >&2
+    echo "this means Trunk.toml lost public_url = \"/admin/\"" >&2
+    exit 1
+    ;;
+esac
+
 # c. — JS loader must serve 200 + JS-ish content-type. We
 # use `curl -D` to capture headers separately from the body
 # because the JS payload is noisy in logs and we only care
@@ -155,3 +184,18 @@ printf '%s\n' "${hdrs}" \
   | tr -d '\r' \
   | awk -F': ' 'tolower($1)=="content-type"{print tolower($2)}' \
   | grep -q '^application/wasm$'
+
+# e. — stylesheet must serve 200 + text/css. Catches "trunk
+# emitted the link but the file is missing from dist/" (an
+# include_dir! footgun if the file was renamed without
+# updating index.html), distinct from step (3)'s "is index.html
+# in the bundle".
+hdrs="$(docker run --rm --network "${net}" curlimages/curl:8.10.1 \
+  --fail --silent --show-error --dump-header - --output /dev/null \
+  "http://admin_ui:9500${css_url}")"
+echo "css headers:"
+printf '%s\n' "${hdrs}"
+printf '%s\n' "${hdrs}" \
+  | tr -d '\r' \
+  | awk -F': ' 'tolower($1)=="content-type"{print tolower($2)}' \
+  | grep -Eq '^text/css'

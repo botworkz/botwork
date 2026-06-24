@@ -1,0 +1,491 @@
+/* botwork-admin-ui — baseline stylesheet.
+ *
+ * Loaded via `<link data-trunk rel="css" href="admin.css">` in
+ * `index.html`; trunk pipelines + fingerprints it and emits
+ * `/admin/admin-<hash>.css` alongside the JS loader + wasm blob. The
+ * admin-ui server's `include_dir!` macro picks it up automatically
+ * because the macro embeds whatever trunk wrote into `dist/`.
+ *
+ * # Why a separate file (and not the inline `<style>` block this
+ * replaces)
+ *
+ * The old inline block was the v0 "health card" mock from RFE #106
+ * PR1, kept in `index.html` because PR2 explicitly deferred the
+ * styling pass. With the entity tree wired up in PR3 the inline
+ * rules are dead (the only thing they style — `.health-card`,
+ * `.health-detail`, `button.refresh`, etc. — no longer renders) and
+ * the markup-without-CSS rendering blocked operator-facing review.
+ *
+ * Splitting the rules out:
+ *   * makes the stylesheet cacheable (the inline version was re-
+ *     parsed on every load),
+ *   * keeps `index.html` short enough to read at a glance, and
+ *   * lets trunk fingerprint the CSS so cache-busting matches the
+ *     JS/wasm story without manual versioning.
+ *
+ * # Class inventory + which page uses each one
+ *
+ *   .admin-shell / .admin-sidebar / .admin-sidebar-header /
+ *   .admin-sidebar-footer / .admin-main / .operator / .subtitle
+ *       layout.rs                              (shell + sidebar)
+ *
+ *   .page / .page-header / .lede               every page
+ *   .counts                                    pages/mod.rs (Dashboard)
+ *
+ *   .entity-list                               every List
+ *   .entity-detail                             every Detail
+ *   .entity-form / .filter-row                 every Create/Edit + the
+ *                                              read-only filter rows
+ *
+ *   .actions                                   anywhere with a button
+ *                                              row (.primary / .danger
+ *                                              / default Cancel)
+ *
+ *   .error / .loading / .muted / .lock-token / .dependents
+ *       cross-cutting status/affordance classes
+ *
+ * If a new class lands in markup without a rule here, the catch-all
+ * is "no rule, browser default" — it won't break anything, just look
+ * unstyled. Add to this file in the same PR as the markup change.
+ *
+ * # Scope vs. follow-ups
+ *
+ * Baseline only. Specifically out of scope (deferred to whoever picks
+ * up the next styling round):
+ *
+ *   * responsive / mobile layout — the shell is desktop-first because
+ *     the operator audience is operators-on-laptops in v0,
+ *   * theming — colours are hard-coded; a CSS-custom-properties layer
+ *     is the obvious refactor once we know whether light theme is on
+ *     the roadmap,
+ *   * icons — every nav entry is text only,
+ *   * `aria-current="page"` highlighting on the active sidebar link is
+ *     wired up via `<A>`'s default behaviour, but the rule below is
+ *     minimal (background tint); a future round can fold in border /
+ *     left-bar / etc.,
+ *   * focus-visible polish beyond the browser default outline.
+ */
+
+/* --- Reset / base ----------------------------------------------- */
+
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100dvh;
+}
+
+a {
+    color: #82aaff;
+    text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+a:focus-visible { outline: 2px solid #82aaff; outline-offset: 2px; }
+
+code, pre {
+    font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono",
+                 Menlo, Consolas, monospace;
+    font-size: 0.92em;
+}
+
+pre {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    background: #14142a;
+    border: 1px solid #2a2a44;
+    border-radius: 4px;
+    overflow-x: auto;
+    white-space: pre;
+}
+
+/* --- Shell: sidebar + main ------------------------------------- */
+
+.admin-shell {
+    display: grid;
+    grid-template-columns: 16rem 1fr;
+    min-height: 100dvh;
+}
+
+.admin-sidebar {
+    background: #14142a;
+    border-right: 1px solid #2a2a44;
+    /* Two fixed sections (header at top, footer at bottom) with the
+     * scrollable nav between them. `100dvh - 0` keeps the sidebar
+     * pinned to the viewport when the main pane scrolls.
+     */
+    display: flex;
+    flex-direction: column;
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100dvh;
+}
+
+.admin-sidebar-header {
+    padding: 1.25rem 1.25rem 0.75rem;
+    border-bottom: 1px solid #2a2a44;
+}
+.admin-sidebar-header h1 {
+    margin: 0;
+    font-size: 1.15rem;
+    letter-spacing: 0.02em;
+}
+.admin-sidebar-header .subtitle {
+    margin: 0.1rem 0 0;
+    color: #9090a8;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.admin-sidebar nav {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.75rem 0.5rem 1rem;
+}
+
+.admin-sidebar h2 {
+    /* Section heading inside the sidebar. Small caps, muted. */
+    margin: 1.25rem 0.75rem 0.4rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #7a7a92;
+}
+.admin-sidebar h2:first-of-type { margin-top: 0.25rem; }
+
+.admin-sidebar ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.admin-sidebar li a {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: 4px;
+    color: #c8c8da;
+    font-size: 0.93rem;
+}
+.admin-sidebar li a:hover {
+    background: #1f1f3a;
+    text-decoration: none;
+}
+/* `<A>` sets aria-current="page" on the link matching the current
+ * route — this is the only "active link" affordance v0 ships.
+ */
+.admin-sidebar li a[aria-current="page"] {
+    background: #2a2a4a;
+    color: #ffffff;
+}
+
+.admin-sidebar-footer {
+    border-top: 1px solid #2a2a44;
+    padding: 0.75rem 1.25rem;
+    font-size: 0.8rem;
+    color: #7a7a92;
+}
+.admin-sidebar-footer .operator { margin: 0; }
+.admin-sidebar-footer .operator code { color: #c8c8da; }
+
+/* --- Main pane / page chrome ----------------------------------- */
+
+.admin-main {
+    padding: 1.5rem 2rem 3rem;
+    min-width: 0; /* let children with overflow shrink instead of
+                   * pushing the sidebar around */
+}
+
+.page { max-width: 64rem; }
+
+.page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid #2a2a44;
+}
+.page-header h1 {
+    margin: 0;
+    font-size: 1.5rem;
+    line-height: 1.2;
+}
+.page-header p { margin: 0; }
+
+.lede {
+    color: #b0b0c8;
+    font-size: 0.95rem;
+    margin: 0 0 1.25rem;
+    max-width: 50rem;
+}
+
+h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
+h3 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
+
+/* --- Status / inline messages ---------------------------------- */
+
+.muted { color: #9090a8; }
+
+.error {
+    color: #f08080;
+    background: #2a1a26;
+    border: 1px solid #4a2a36;
+    border-radius: 4px;
+    padding: 0.6rem 0.9rem;
+    margin: 0.75rem 0;
+}
+.error p { margin: 0 0 0.4rem; }
+.error p:last-child { margin-bottom: 0; }
+
+.loading {
+    color: #9090a8;
+    font-style: italic;
+    margin: 0.5rem 0;
+}
+
+.lock-token {
+    font-size: 0.8rem;
+    margin: 0.5rem 0;
+    word-break: break-all;
+}
+
+.dependents {
+    margin: 0.5rem 0 0 1.25rem;
+    padding: 0;
+}
+.dependents li { margin: 0.2rem 0; }
+
+/* --- Entity list table ----------------------------------------- */
+
+.entity-list {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.5rem 0 1.5rem;
+    font-size: 0.95rem;
+}
+.entity-list thead th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9090a8;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #2a2a44;
+}
+.entity-list tbody td {
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid #20203a;
+    vertical-align: top;
+}
+.entity-list tbody tr:hover { background: #1c1c34; }
+
+/* "actions" can render in a table cell OR as a flex row below a
+ * detail/form; both selectors land in the same rule set.
+ */
+.entity-list td.actions { white-space: nowrap; }
+.entity-list td.actions a { margin-right: 0.15rem; }
+
+/* --- Entity detail (dt/dd grid) -------------------------------- */
+
+.entity-detail {
+    margin: 0 0 1.25rem;
+    display: grid;
+    grid-template-columns: 11rem 1fr;
+    gap: 0.45rem 1rem;
+    align-items: baseline;
+}
+.entity-detail dt {
+    color: #9090a8;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.entity-detail dd {
+    margin: 0;
+    word-break: break-word;
+    min-width: 0;
+}
+.entity-detail dd pre { white-space: pre-wrap; }
+
+/* --- Dashboard counts ------------------------------------------ */
+
+.counts dl {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+    gap: 0.75rem 1.5rem;
+    margin: 0.5rem 0 1.5rem;
+}
+.counts dt {
+    color: #9090a8;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0;
+}
+.counts dd {
+    margin: 0;
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: #ffffff;
+    /* The async-loaded value renders inside a <span>; the
+     * `Loading…` placeholder lands as a <p class="loading"> so
+     * vertically aligning the big number with the small label works
+     * even before resolution. */
+    line-height: 1.1;
+}
+.counts dd .loading { font-size: 0.85rem; font-weight: 400; }
+
+/* --- Forms ----------------------------------------------------- */
+
+.entity-form {
+    max-width: 44rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    margin-bottom: 1.5rem;
+}
+.entity-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+.entity-form label > span {
+    font-size: 0.8rem;
+    color: #b0b0c8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.entity-form input,
+.entity-form select,
+.entity-form textarea,
+.filter-row input,
+.filter-row select {
+    background: #14142a;
+    color: #e0e0e0;
+    border: 1px solid #2a2a44;
+    border-radius: 4px;
+    padding: 0.45rem 0.6rem;
+    font: inherit;
+    font-size: 0.95rem;
+}
+.entity-form textarea {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 0.88rem;
+    resize: vertical;
+    min-height: 5rem;
+}
+.entity-form input:focus,
+.entity-form select:focus,
+.entity-form textarea:focus,
+.filter-row input:focus,
+.filter-row select:focus {
+    outline: 2px solid #82aaff;
+    outline-offset: 1px;
+    border-color: #82aaff;
+}
+
+/* --- Filter row (sessions/workers) ----------------------------- */
+
+.filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 0.75rem 1rem;
+    margin: 0.5rem 0 1.25rem;
+}
+.filter-row label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.85rem;
+}
+.filter-row label > span {
+    color: #9090a8;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* --- Buttons + actions row ------------------------------------- */
+
+.actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.75rem 0 0;
+}
+/* "actions" inside the page-header is the table-list "+ New X"
+ * button; let it sit flush right via the page-header flex layout.
+ */
+.page-header .actions { margin: 0; }
+
+button {
+    font: inherit;
+    font-size: 0.92rem;
+    background: #2a2a44;
+    color: #e0e0e0;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    padding: 0.45rem 0.95rem;
+    cursor: pointer;
+    transition: background 0.1s ease, border-color 0.1s ease;
+}
+button:hover:not(:disabled) {
+    background: #34344f;
+    border-color: #45456a;
+}
+button:focus-visible {
+    outline: 2px solid #82aaff;
+    outline-offset: 1px;
+}
+button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+button.primary {
+    background: #3a5fbf;
+    border-color: #4a72d8;
+    color: #ffffff;
+}
+button.primary:hover:not(:disabled) {
+    background: #4a72d8;
+    border-color: #5a82e8;
+}
+
+button.danger {
+    background: #8a3a3a;
+    border-color: #a04a4a;
+    color: #ffffff;
+}
+button.danger:hover:not(:disabled) {
+    background: #a04a4a;
+    border-color: #b85a5a;
+}
+
+/* When a button is wrapped in an <A> (the "+ New" entries in
+ * tenants/workspaces/plugins/bindings), the anchor's default
+ * underline-on-hover bleeds through the button — kill it.
+ */
+.actions a:hover,
+.page-header .actions a:hover {
+    text-decoration: none;
+}

@@ -13,6 +13,7 @@ admin-ui/
 │   ├── Cargo.toml        ← cdylib + rlib, leptos = "0.8" csr
 │   ├── Trunk.toml        ← build config + dev proxy → admin-api
 │   ├── index.html        ← trunk template
+│   ├── admin.css         ← baseline operator stylesheet
 │   ├── src/
 │   │   └── lib.rs        ← App component + #[wasm_bindgen(start)]
 │   └── dist/             ← (gitignored) trunk build --release output
