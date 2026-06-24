@@ -31,6 +31,7 @@ pub mod m20260620_000001_create_core_tables;
 pub mod m20260620_000002_extend_plugin_schema;
 pub mod m20260622_000001_create_agent_session;
 pub mod m20260622_000002_create_session_worker;
+pub mod m20260624_000001_create_auth_tables;
 
 /// The migrator.
 pub struct Migrator;
@@ -43,6 +44,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260620_000002_extend_plugin_schema::Migration),
             Box::new(m20260622_000001_create_agent_session::Migration),
             Box::new(m20260622_000002_create_session_worker::Migration),
+            Box::new(m20260624_000001_create_auth_tables::Migration),
         ]
     }
 }
