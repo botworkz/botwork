@@ -68,6 +68,23 @@ pub const CONFIG_ENV_NAME: &str = "BOTWORK_MCP_CONFIG";
 /// Plugin-name regex (same as tenant/workspace; checked at parse-time).
 pub const PLUGIN_NAME_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
 
+/// MCP tool-name regex.
+///
+/// Intentionally *different* from [`PLUGIN_NAME_RE`]:
+///
+/// * tools allow a leading digit (`fetch_url_2` exists in the wild),
+/// * tools allow underscore as a word separator (snake_case is the
+///   dominant style across the MCP server ecosystem),
+/// * tools don't carry the 31-character cap because they're not a
+///   DB-storage key — they live in the per-image label set instead.
+///
+/// Lives here (next to `PLUGIN_NAME_RE`) for the same reason the
+/// env-name caps and reserved prefixes do: `botwork-tools mcp-probe`
+/// and a future consumer-side catalog upserter both want to enforce
+/// the rule, and "the answer to what makes a tool name valid" should
+/// have one definition, not two.
+pub const TOOL_NAME_RE: &str = r"^[a-z0-9][a-z0-9_-]*$";
+
 /// Raw plugin entry as it appears in bootstrap.yaml's top-level
 /// `plugins:` list (or as a JSON request body to admin-api). Field
 /// shapes mirror the original `plugins.yaml` structure;

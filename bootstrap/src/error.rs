@@ -57,6 +57,26 @@ pub enum BootstrapError {
     #[error("{context}: {detail}")]
     BindingInvalid { context: String, detail: String },
 
+    /// Bootstrap-side tripwire for `PackageInvalid` — the
+    /// `mcp-package.yaml`-only validation variant
+    /// (`botwork-admin-core::ValidationError::PackageInvalid`) that
+    /// `validate_package` emits for the package-side-only rules
+    /// (isolation, spill). Bootstrap reads `bootstrap.yaml`, not
+    /// `mcp-package.yaml`, so the package-side validator is never on
+    /// the reachable codepath here — but the exhaustiveness check on
+    /// the `ValidationError -> BootstrapError` lowering forces us to
+    /// name the variant or pattern-match it out. We name it, with a
+    /// loud `internal` error rather than a wildcard `_` arm, so that
+    /// if the impossibility ever stops being one (e.g. a future
+    /// refactor routes a package-side check through bootstrap), the
+    /// operator gets a precise bug report rather than a silent fallback.
+    #[error(
+        "internal: bootstrap reached package-side validator path for plugin \
+         '{plugin}': {detail} (this is a bug; packages are validated by \
+         mcp-probe, not bootstrap — see botworkz/botwork#147)"
+    )]
+    UnexpectedPackageValidation { plugin: String, detail: String },
+
     // -- DB-side errors ---------------------------------------------------
     #[error(transparent)]
     Db(#[from] sea_orm::DbErr),
@@ -71,6 +91,9 @@ impl From<ValidationError> for BootstrapError {
             }
             ValidationError::BindingInvalid { context, detail } => {
                 Self::BindingInvalid { context, detail }
+            }
+            ValidationError::PackageInvalid { plugin, detail } => {
+                Self::UnexpectedPackageValidation { plugin, detail }
             }
             ValidationError::DuplicatePlugin(name) => Self::DuplicatePlugin(name),
             ValidationError::DuplicateTenant(name) => Self::DuplicateTenant(name),

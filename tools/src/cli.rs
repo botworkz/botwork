@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{bootstrap, ps};
+use crate::{bootstrap, mcp_probe, ps};
 
 pub fn dispatch(args: Vec<String>) -> Result<i32, CliError> {
     match args.get(1).map(String::as_str) {
@@ -36,6 +36,27 @@ pub fn dispatch(args: Vec<String>) -> Result<i32, CliError> {
                 }
             }
         }
+        Some("mcp-probe") => {
+            // mcp-probe mirrors bootstrap's posture: owns its own
+            // argv-tail parsing + exit-code mapping. The dispatch
+            // hands the tail straight in; errors are printed on
+            // stderr unless they're the Usage branch (exit 0), which
+            // goes to stdout so `--help` pipes work like a normal
+            // help text. See `mcp_probe::McpProbeError::exit_code`
+            // for the full table — matches the RFE-stated codes.
+            match mcp_probe::run(&args[2..]) {
+                Ok(code) => Ok(code),
+                Err(err) => {
+                    let code = err.exit_code();
+                    if code != 0 {
+                        eprintln!("{err}");
+                    } else {
+                        println!("{err}");
+                    }
+                    Ok(code)
+                }
+            }
+        }
         Some(other) => Err(CliError::UnknownSubcommand(other.to_string())),
     }
 }
@@ -46,13 +67,14 @@ fn print_usage() {
     println!("Available subcommands:");
     println!("  ps         List running botwork sessions");
     println!("  bootstrap  Apply a bootstrap.yaml through admin-api");
+    println!("  mcp-probe  Probe an MCP image and generate / verify / describe its labels");
     println!();
     println!("Run `botwork-tools <SUBCOMMAND> --help` for subcommand options.");
 }
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through admin-api")]
+    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through admin-api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
     UnknownSubcommand(String),
     #[error(transparent)]
     Ps(#[from] ps::PsError),

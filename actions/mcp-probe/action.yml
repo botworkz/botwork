@@ -1,0 +1,206 @@
+# `botwork-tools mcp-probe` composite action.
+#
+# Filed against this RFE: https://github.com/botworkz/botwork/issues/147
+#
+# Thin wrapper around the released `botwork-tools` binary. The action
+# downloads the release artifact (same one VM consumes), installs
+# `crane`, and invokes `botwork-tools mcp-probe <mode> ...` with the
+# supplied inputs.
+#
+# Pinning policy: consumers MUST pin to a tagged release. The action
+# source lives alongside the binary so they version together — there
+# is no "@main" recommendation, only "@vX.Y.Z".
+#
+# Usage:
+#
+#   - uses: botworkz/botwork/actions/mcp-probe@vX.Y.Z
+#     with:
+#       mode: generate                  # or "verify" or "describe"
+#       image: mcp-foo:unlabeled
+#       package: ./mcp-package.yaml
+#       out: botwork/mcp-foo:local      # generate-only
+#
+# Path: this action lives at top-level `actions/`, not `.github/actions/`,
+# because the convention this repo uses is:
+#
+#   * `.github/actions/`  — internal CI plumbing this repo's own
+#     workflows consume (no external-stability promise).
+#   * `actions/`          — composite actions external repos depend on,
+#     versioned with the binary they wrap; deprecation/rename is a
+#     contract change.
+#
+# Outputs are the action's exit status — every mcp-probe exit code
+# bubbles up. See `botwork-tools mcp-probe --help` for the full
+# table; the load-bearing ones are 0 (ok), 6 (verify drift), and 7
+# (crane+buildx both unavailable).
+
+name: 'botwork mcp-probe'
+description: >-
+  Probe an MCP image, validate against mcp-package.yaml, and either
+  generate a labeled image, verify the labels match the live tools/list
+  catalog, or describe the would-be labels to stdout.
+author: 'botworkz'
+
+inputs:
+  mode:
+    description: >-
+      One of `generate`, `verify`, or `describe`. `generate` writes a
+      labeled image to the `out` tag; `verify` re-probes and fails
+      with exit 6 on drift; `describe` prints labels to stdout (no
+      image write).
+    required: true
+  image:
+    description: >-
+      Source image (passed to `--in`). Tag or digest reference; must
+      be locally available (loaded or pulled before this step).
+    required: true
+  package:
+    description: >-
+      Path to `mcp-package.yaml`. Defaults to the conventional
+      sibling-of-Dockerfile location.
+    required: false
+    default: './mcp-package.yaml'
+  out:
+    description: >-
+      Destination image tag. Required in `generate` mode, ignored
+      otherwise.
+    required: false
+    default: ''
+  port:
+    description: >-
+      Host port to bind during the probe. Empty = ephemeral (the
+      default, recommended for CI runners where you can't predict
+      what's free).
+    required: false
+    default: ''
+  timeout:
+    description: >-
+      Overall handshake timeout in seconds. Defaults to 60.
+    required: false
+    default: '60'
+  runtime:
+    description: >-
+      Container runtime; defaults to `docker`. The action does not
+      install non-docker runtimes; if you set this to `podman` you
+      must arrange for it to be on PATH already.
+    required: false
+    default: 'docker'
+  tools_version:
+    description: >-
+      The `botwork-tools` release tag to install. REQUIRED, no default
+      — consumers must pin a tagged release so the action's runtime
+      surface stays reproducible across runner upgrades. Set to `latest`
+      explicitly if you really want floating-version behaviour and own
+      the consequences.
+    required: true
+  crane_version:
+    description: >-
+      The `crane` release tag to install. Pinned because go-containerregistry's
+      `latest` track can change behaviour between releases; pinning
+      keeps the image-patch path stable across runner upgrades.
+    required: false
+    default: 'v0.20.6'
+
+runs:
+  using: 'composite'
+  steps:
+  # ── Install botwork-tools ───────────────────────────────────────────
+  # We download from the matching release tag and drop the binary
+  # into the runner's PATH. The release artifact is published by
+  # `botwork`'s own ci.yml (release-binaries job) so there's no
+  # separate "tools" release stream to track. `latest` is supported
+  # explicitly for consumers who opt in to the floating tag (see the
+  # input's docstring).
+  - name: Install botwork-tools (${{ inputs.tools_version }})
+    shell: bash
+    run: |
+      set -euo pipefail
+      version='${{ inputs.tools_version }}'
+      # `gh release download` with --pattern keeps us byte-faithful
+      # to whatever the matching release published.
+      if [ "${version}" = "latest" ]; then
+        gh release download \
+          --repo botworkz/botwork \
+          --pattern 'botwork-tools' \
+          --dir "${RUNNER_TEMP}"
+      else
+        gh release download "${version}" \
+          --repo botworkz/botwork \
+          --pattern 'botwork-tools' \
+          --dir "${RUNNER_TEMP}"
+      fi
+      install -m 0755 "${RUNNER_TEMP}/botwork-tools" /usr/local/bin/botwork-tools
+      echo "::group::botwork-tools version"
+      botwork-tools --help
+      echo "::endgroup::"
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+  # ── Install crane (fast image-patch path) ───────────────────────────
+  # The probe falls back to `docker buildx` when crane isn't
+  # available, so this step is technically optional. We install
+  # crane anyway because the buildx fallback adds ~10s per probe
+  # and the action runs once per build; the install cost amortises
+  # across the savings on every run. Cached via actions/cache@v4
+  # keyed on the runner arch + crane version — the binary is ~30MiB
+  # and the install path is identical across runs.
+  - name: Cache crane (${{ inputs.crane_version }})
+    id: cache-crane
+    uses: actions/cache@v4
+    with:
+      path: /usr/local/bin/crane
+      key: crane-${{ runner.arch }}-${{ inputs.crane_version }}
+  - name: Install crane (${{ inputs.crane_version }})
+    if: steps.cache-crane.outputs.cache-hit != 'true'
+    shell: bash
+    run: |
+      set -euo pipefail
+      version='${{ inputs.crane_version }}'
+      # Map runner arch to crane release naming. Linux runners are
+      # the realistic case for this action; we don't try to support
+      # macOS/windows runners because the rest of the botwork
+      # build chain is linux-only.
+      case "$(uname -m)" in
+        x86_64)  asset='go-containerregistry_Linux_x86_64.tar.gz' ;;
+        aarch64) asset='go-containerregistry_Linux_arm64.tar.gz' ;;
+        *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+      esac
+      url="https://github.com/google/go-containerregistry/releases/download/${version}/${asset}"
+      curl -fsSL "${url}" \
+        | tar -xz -C "${RUNNER_TEMP}" crane
+      install -m 0755 "${RUNNER_TEMP}/crane" /usr/local/bin/crane
+  - name: Print crane version
+    shell: bash
+    run: crane version
+
+  # ── Build the argv and invoke the probe ─────────────────────────────
+  # The shell script assembles the argv from the action inputs;
+  # empty optional inputs (port, out) get omitted so the binary's
+  # own default kicks in. We invoke the binary directly rather
+  # than echoing through `bash -c` so the exit code surfaces as
+  # the step's status without an intermediate shell rewrite.
+  - name: Run mcp-probe ${{ inputs.mode }} on ${{ inputs.image }}
+    shell: bash
+    run: |
+      set -euo pipefail
+      argv=( '${{ inputs.mode }}' '--in' '${{ inputs.image }}' )
+      argv+=( '--package' '${{ inputs.package }}' )
+      argv+=( '--timeout' '${{ inputs.timeout }}' )
+      argv+=( '--runtime' '${{ inputs.runtime }}' )
+      if [ -n '${{ inputs.port }}' ]; then
+        argv+=( '--port' '${{ inputs.port }}' )
+      fi
+      if [ '${{ inputs.mode }}' = 'generate' ]; then
+        if [ -z '${{ inputs.out }}' ]; then
+          echo "ERROR: mode=generate requires the 'out' input" >&2
+          exit 2
+        fi
+        argv+=( '--out' '${{ inputs.out }}' )
+      fi
+      echo "::group::botwork-tools mcp-probe ${argv[*]}"
+      botwork-tools mcp-probe "${argv[@]}"
+      echo "::endgroup::"
+
+branding:
+  icon: 'tag'
+  color: 'blue'
