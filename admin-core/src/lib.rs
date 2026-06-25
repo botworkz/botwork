@@ -26,6 +26,11 @@
 //!   `botwork-bootstrap` crate so consumers don't need to depend on
 //!   bootstrap's runtime stack (sea-orm, multi-thread tokio) just to
 //!   parse a config file.
+//! * [`package`] — `mcp-package.yaml` parser + validator consumed by
+//!   `botwork-tools mcp-probe`. Shares per-field rules with
+//!   [`plugin_spec`] (image-less plugin entry + `isolation` + `spill`)
+//!   so the producer-side rules and the consumer-side rules can't
+//!   drift apart.
 //!
 //! # What does NOT live here
 //!
@@ -44,6 +49,7 @@
 
 pub mod config;
 pub mod error;
+pub mod package;
 pub mod plugin_spec;
 
 pub use config::{
@@ -51,8 +57,12 @@ pub use config::{
     WorkspacePluginEntry, WorkspacePluginRaw, WorkspaceRaw,
 };
 pub use error::ValidationError;
+pub use package::{
+    validate_package, Isolation, PackageFileEntry, SpillEntry, SpillMode, ValidatedPackage,
+    DEFAULT_PACKAGE_PATH,
+};
 pub use plugin_spec::{
     validate_one, validate_workspace_plugin_config, RawPluginEntry, ValidatedPlugin,
     CONFIG_ENV_NAME, MAX_ENV_VALUE_BYTES, MAX_STATIC_ENV_ENTRIES, PLUGIN_NAME_RE,
-    RESERVED_ENV_NAMES, SECRET_ENV_PREFIX,
+    RESERVED_ENV_NAMES, SECRET_ENV_PREFIX, TOOL_NAME_RE,
 };

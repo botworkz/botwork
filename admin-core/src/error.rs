@@ -55,6 +55,16 @@ pub enum ValidationError {
     #[error("{context}: {detail}")]
     BindingInvalid { context: String, detail: String },
 
+    /// `mcp-package.yaml` package-only rule (isolation, spill)
+    /// failed validation. Plugin-shape failures still surface as
+    /// [`Self::PluginInvalid`] because the package validator routes
+    /// shared fields through `validate_one`; this variant exists
+    /// solely for rules that are package-side-only (so consumer
+    /// crates can distinguish "the package file is bad" from "the
+    /// plugin fields inside the package file are bad").
+    #[error("package 'plugin {plugin}': {detail}")]
+    PackageInvalid { plugin: String, detail: String },
+
     // -- list-level rules (only fired by config::BootstrapConfig::from_raw) -
     /// Two `plugins[]` entries share a name.
     #[error("duplicate plugin name in plugins[]: {0}")]
