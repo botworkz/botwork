@@ -641,6 +641,10 @@ async fn create_plugin(
         egress: Set(validated.egress),
         created_at: Set(now),
         updated_at: Set(now),
+        // RFE #146: operator-intent row leaves `current_facet_id`
+        // NULL on create; the `botwork-image-catalog` oneshot is
+        // the only writer of that pointer.
+        current_facet_id: sea_orm::ActiveValue::NotSet,
     }
     .insert(state.db.as_ref())
     .await?;

@@ -8,9 +8,9 @@
 //! 1. `Migrator::up` returns `Ok(())`.
 //! 2. The `seaql_migrations` tracking table exists in `public` (and lists
 //!    our migrations in order).
-//! 3. The eight v1 tables (`tenant`, `workspace`, `plugin`,
+//! 3. The nine v1 tables (`tenant`, `workspace`, `plugin`,
 //!    `workspace_plugin`, `agent_session`, `session_worker`,
-//!    `opaque_password_file`, `lease`) all exist.
+//!    `opaque_password_file`, `lease`, `plugin_image_facet`) all exist.
 //! 4. A second `up` invocation against the same DB is also `Ok(())`
 //!    (idempotency — the oneshot can restart safely).
 //! 5. FK semantics are wired the right way:
@@ -45,6 +45,15 @@
 //!     workspaces and agent sessions, per the existing two-step
 //!     posture) sweeps any `opaque_password_file` + `lease` rows it
 //!     owned (botworkz/botwork#141).
+//! 12. The `plugin_image_facet` table exists; `plugin.current_facet_id`
+//!     column exists with FK → `plugin_image_facet.id` ON DELETE
+//!     **RESTRICT** (RFE #146).
+//! 13. The UNIQUE on `plugin_image_facet (plugin_name,
+//!     image_config_sha)` rejects a duplicate insert; the
+//!     `ix_plugin_image_facet_name_observed` and `ix_plugin_current_facet`
+//!     indexes both exist on the live schema; deleting a facet that
+//!     a live `plugin.current_facet_id` points at is **RESTRICTED**
+//!     by the FK (RFE #146).
 //!
 //! The test gates on whether docker is reachable. In CI, the runner has
 //! docker and the test runs in full. On dev machines without docker, the
@@ -179,6 +188,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "session_worker",
         "opaque_password_file",
         "lease",
+        "plugin_image_facet",
     ] {
         assert!(
             table_exists(&db, table).await,
@@ -197,6 +207,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "m20260622_000001_create_agent_session".to_owned(),
         "m20260622_000002_create_session_worker".to_owned(),
         "m20260624_000001_create_auth_tables".to_owned(),
+        "m20260625_000001_create_plugin_image_facet".to_owned(),
     ];
     assert_eq!(
         applied_migration_names(&db).await,
@@ -225,6 +236,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
     assert_lease_bearer_hash_unique(&db).await;
     assert_lease_live_index_is_partial(&db).await;
     assert_auth_tables_cascade_on_tenant_delete(&db).await;
+    assert_plugin_image_facet_schema(&db).await;
 }
 
 async fn table_exists(db: &DatabaseConnection, name: &str) -> bool {
@@ -292,6 +304,10 @@ async fn assert_fk_actions(db: &DatabaseConnection) {
         // the bearer-lease state are meaningless without it.
         ("fk_opaque_password_file_tenant", "CASCADE"),
         ("fk_lease_tenant", "CASCADE"),
+        // RFE #146: plugin.current_facet_id is RESTRICT — deleting
+        // a facet a live plugin row points at would silently break
+        // that plugin's /resolve.
+        ("fk_plugin_current_facet", "RESTRICT"),
     ] {
         let backend = db.get_database_backend();
         let stmt = Statement::from_sql_and_values(
@@ -1077,4 +1093,174 @@ async fn assert_auth_tables_cascade_on_tenant_delete(db: &DatabaseConnection) {
         lease_count, 0,
         "both live and revoked lease rows must cascade-delete with their tenant"
     );
+}
+
+/// RFE #146: assert the `plugin_image_facet` schema landed and
+/// the `plugin.current_facet_id` pointer is wired correctly.
+///
+/// Covers four invariants in one helper because they're cheap to
+/// exercise against the same seeded facet row:
+///
+/// 1. The natural-key UNIQUE on `(plugin_name, image_config_sha)`
+///    rejects a duplicate insert — this is what makes the future
+///    catalog upserter's `ON CONFLICT DO NOTHING` posture correct.
+/// 2. The audit index `ix_plugin_image_facet_name_observed` exists,
+///    and is the `(plugin_name, observed_at DESC)` shape — the
+///    operator "all facets for plugin X newest first" query.
+/// 3. The forward-lookup index `ix_plugin_current_facet` exists on
+///    `plugin.current_facet_id` — planted now so the future resolve
+///    cutover doesn't have to alter `plugin` a second time.
+/// 4. Deleting a facet a live `plugin.current_facet_id` points at is
+///    RESTRICTED by the FK — the property that keeps the upserter's
+///    insert-only posture safe.
+async fn assert_plugin_image_facet_schema(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+
+    // ── seed: one tenant + plugin + facet row, pointer wired up ──
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO plugin (id, name, image, port, path, upstream_auth, env, egress) \
+         VALUES (gen_random_uuid(), 'facet-plugin', 'botwork/p:1', 8000, '/', 'none', \
+                 '[]'::jsonb, '{\"mode\":\"none\"}'::jsonb)"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed facet plugin");
+
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO plugin_image_facet \
+            (id, plugin_name, image_ref, image_config_sha, spec_version, \
+             port, path, upstream_auth, egress, env, isolation, \
+             capabilities, tools, resources_catalog, prompts, protocol_version) \
+         VALUES (gen_random_uuid(), 'facet-plugin', 'botwork/p:1', 'sha256:aaa', 'v1', \
+                 8000, '/', 'none', '{\"mode\":\"none\"}'::jsonb, '[]'::jsonb, 'shared', \
+                 '{}'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '2024-11-05')"
+            .to_owned(),
+    ))
+    .await
+    .expect("seed first plugin_image_facet row");
+
+    db.execute(Statement::from_string(
+        backend,
+        "UPDATE plugin \
+         SET current_facet_id = (SELECT id FROM plugin_image_facet \
+                                  WHERE plugin_name = 'facet-plugin' \
+                                    AND image_config_sha = 'sha256:aaa') \
+         WHERE name = 'facet-plugin'"
+            .to_owned(),
+    ))
+    .await
+    .expect("point plugin.current_facet_id at the facet");
+
+    // 1. Duplicate (plugin_name, image_config_sha) MUST violate
+    //    ux_plugin_image_facet_name_sha.
+    let dup = db
+        .execute(Statement::from_string(
+            backend,
+            "INSERT INTO plugin_image_facet \
+                (id, plugin_name, image_ref, image_config_sha, spec_version, \
+                 port, path, upstream_auth, egress, env, isolation, \
+                 capabilities, tools, resources_catalog, prompts, protocol_version) \
+             VALUES (gen_random_uuid(), 'facet-plugin', 'botwork/p:1', 'sha256:aaa', 'v1', \
+                     8000, '/', 'none', '{\"mode\":\"none\"}'::jsonb, '[]'::jsonb, 'shared', \
+                     '{}'::jsonb, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '2024-11-05')"
+                .to_owned(),
+        ))
+        .await;
+    assert!(
+        dup.is_err(),
+        "second plugin_image_facet row for same (plugin_name, image_config_sha) \
+         must violate ux_plugin_image_facet_name_sha"
+    );
+
+    // 2. ix_plugin_image_facet_name_observed exists and is the
+    //    (plugin_name, observed_at DESC) shape. SeaORM doesn't model
+    //    per-column DESC in IndexCreateStatement so the migration
+    //    builds it via raw SQL; the assertion mirrors that posture.
+    #[derive(FromQueryResult)]
+    struct IndexDefRow {
+        indexdef: String,
+    }
+    let stmt = Statement::from_sql_and_values(
+        backend,
+        "SELECT indexdef FROM pg_indexes \
+         WHERE schemaname = 'public' AND indexname = $1",
+        ["ix_plugin_image_facet_name_observed".into()],
+    );
+    let row = IndexDefRow::find_by_statement(stmt)
+        .one(db)
+        .await
+        .expect("pg_indexes query must succeed")
+        .expect("ix_plugin_image_facet_name_observed index should exist");
+    assert!(
+        row.indexdef.contains("plugin_name"),
+        "ix_plugin_image_facet_name_observed should include plugin_name; got {indexdef}",
+        indexdef = row.indexdef,
+    );
+    assert!(
+        row.indexdef.contains("observed_at DESC"),
+        "ix_plugin_image_facet_name_observed should order observed_at DESC; got {indexdef}",
+        indexdef = row.indexdef,
+    );
+
+    // 3. ix_plugin_current_facet exists on plugin.current_facet_id —
+    //    the forward-lookup index the future resolve cutover joins
+    //    through.
+    let stmt = Statement::from_sql_and_values(
+        backend,
+        "SELECT indexdef FROM pg_indexes \
+         WHERE schemaname = 'public' AND indexname = $1",
+        ["ix_plugin_current_facet".into()],
+    );
+    let row = IndexDefRow::find_by_statement(stmt)
+        .one(db)
+        .await
+        .expect("pg_indexes query must succeed")
+        .expect("ix_plugin_current_facet index should exist");
+    assert!(
+        row.indexdef.contains("current_facet_id"),
+        "ix_plugin_current_facet should reference current_facet_id; got {indexdef}",
+        indexdef = row.indexdef,
+    );
+
+    // 4. RESTRICT on plugin.current_facet_id: deleting the facet
+    //    while a live plugin row points at it MUST fail.
+    let restrict = db
+        .execute(Statement::from_string(
+            backend,
+            "DELETE FROM plugin_image_facet \
+             WHERE plugin_name = 'facet-plugin' AND image_config_sha = 'sha256:aaa'"
+                .to_owned(),
+        ))
+        .await;
+    assert!(
+        restrict.is_err(),
+        "deleting a plugin_image_facet row that a live plugin.current_facet_id \
+         points at must be REFUSED by fk_plugin_current_facet (ON DELETE RESTRICT)"
+    );
+
+    // Cleanup. Unhook the pointer, then drop the facet, then the
+    // plugin. Each step exercises the FK posture (RESTRICT on
+    // current_facet_id ↔ facet.id; RESTRICT on
+    // workspace_plugin.plugin_id ↔ plugin.id — no bindings here so
+    // the plugin delete is safe).
+    db.execute(Statement::from_string(
+        backend,
+        "UPDATE plugin SET current_facet_id = NULL WHERE name = 'facet-plugin'".to_owned(),
+    ))
+    .await
+    .expect("unhook plugin.current_facet_id");
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM plugin_image_facet WHERE plugin_name = 'facet-plugin'".to_owned(),
+    ))
+    .await
+    .expect("facet cleanup");
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM plugin WHERE name = 'facet-plugin'".to_owned(),
+    ))
+    .await
+    .expect("facet plugin cleanup");
 }

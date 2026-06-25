@@ -69,6 +69,20 @@ if [[ "${table}" != "seaql_migrations" ]]; then
   exit 1
 fi
 
+# 4b. — the schema-landing migrations actually ran. Smoke-check the
+# most recently added table from RFE #146 alongside the others so a
+# silently-skipped migration trips immediately rather than at the
+# next consumer cutover.
+for tbl in tenant workspace plugin workspace_plugin agent_session \
+           session_worker opaque_password_file lease plugin_image_facet; do
+  got="$(docker exec "${pg}" psql -U botwork -d botwork -tAc \
+    "SELECT to_regclass('public.${tbl}')")"
+  if [[ "${got}" != "${tbl}" ]]; then
+    echo "expected public.${tbl} after first up, got: '${got}'" >&2
+    exit 1
+  fi
+done
+
 # 5. — idempotent re-run.
 out2="$(docker run --rm --network "${net}" \
   -e BOTWORK_DATABASE_URL="postgres://botwork:smoke@postgres/botwork" \

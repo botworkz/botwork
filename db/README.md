@@ -77,6 +77,8 @@ production needs an operator surface that exists outside admin-api.
                ├─ agent_session ─1:N─ session_worker ─N:1─ plugin
                ├─ opaque_password_file               (0..1 per tenant)
                └─ lease ─1:N
+
+   plugin ─N:1─ plugin_image_facet         (current_facet_id pointer)
 ```
 
 The `tenant`/`workspace`/`workspace_plugin`/`plugin` quadrant is the
@@ -86,6 +88,10 @@ per-incarnation projection for goose sessions (RFE #105). The
 `opaque_password_file`/`lease` pair is the auth-broker persistence
 layer (botworkz/botwork#141; parent RFE
 [botworkz/botwork-extra#123](https://github.com/botworkz/botwork-extra/issues/123)).
+The `plugin_image_facet` row + `plugin.current_facet_id` pointer is
+the image-borne plugin-descriptor surface
+([RFE #146](https://github.com/botworkz/botwork/issues/146); tracking
+design [`botworkz/space#303`](https://github.com/botworkz/space/issues/303)).
 
 ### Tables
 
@@ -138,6 +144,52 @@ collision.
 `PRIMARY KEY (workspace_id, plugin_id)` is the natural binding key.
 A reverse-direction index `ix_workspace_plugin_plugin (plugin_id)`
 exists for the future admin-api "where is plugin X used?" query.
+
+#### `plugin_image_facet` (RFE #146)
+
+| Column              | Type          | Notes                                                                  |
+|---------------------|---------------|------------------------------------------------------------------------|
+| `id`                | `uuid` PK     | `DEFAULT gen_random_uuid()`                                            |
+| `plugin_name`       | `text`        | `org.botwork.mcp.name` (not an FK; see RFE #146)                       |
+| `image_ref`         | `text`        | Resolved image reference (e.g. `botwork/mcp-echo:local`)               |
+| `image_config_sha`  | `text`        | `docker image inspect`'s `Id`; together with `plugin_name` UNIQUE      |
+| `spec_version`      | `text`        | `org.botwork.mcp.spec` (`"v1"` today)                                  |
+| `port`              | `integer`     | `org.botwork.mcp.port` (u16-validated at upsert)                       |
+| `path`              | `text`        | `org.botwork.mcp.path` (`/`-prefixed)                                  |
+| `upstream_auth`     | `text`        | `"none"` or `"bearer/<service>"` — same wire form as `plugin`          |
+| `egress`            | `jsonb`       | `org.botwork.mcp.egress`; same wire shape as `plugin.egress`           |
+| `resources`         | `jsonb` NULL  | `{cpus?, memory?, pids?}` container caps                               |
+| `env`               | `jsonb`       | `[{name, value}, ...]` static env (default `'[]'`)                     |
+| `isolation`         | `text`        | `"shared" \| "per_agent_session" \| "per_request"`                     |
+| `capabilities`      | `jsonb`       | MCP `capabilities` object from `initialize`                            |
+| `tools`             | `jsonb`       | Denormalised tool array, pre-prefixed (default `'[]'`)                 |
+| `resources_catalog` | `jsonb`       | Denormalised resource array (default `'[]'`)                           |
+| `prompts`           | `jsonb`       | Denormalised prompt array (default `'[]'`)                             |
+| `protocol_version`  | `text`        | MCP wire pin (e.g. `"2024-11-05"`)                                     |
+| `spill_policy`      | `jsonb` NULL  | `{mode, threshold_bytes, include_methods, include_tools}` or NULL      |
+| `observed_at`       | `timestamptz` | `DEFAULT CURRENT_TIMESTAMP` — first time the catalog saw this image    |
+
+Insert-only. `(plugin_name, image_config_sha)` is the natural key
+(UNIQUE); re-observations of the same image labels are no-ops via
+the catalog upserter's `ON CONFLICT DO NOTHING`. JSON columns for
+`tools`/`resources_catalog`/`prompts` keep `/resolve` as one row out
+even though those fields are arrays of objects (no predicate runs
+against them; see RFE #146 for the side-tables-vs-jsonb rationale).
+No reader / writer wires this up in this PR — RFE #146 is the
+schema landing only.
+
+#### `plugin.current_facet_id` (RFE #146)
+
+`plugin` gains an optional `current_facet_id uuid NULL` column with a
+FK to `plugin_image_facet.id` ON DELETE **RESTRICT**. NULL during
+the rollout window where the catalog hasn't observed a facet for
+this plugin yet (config-broker's `/resolve` continues to read off
+`plugin` directly in that window); the future
+`botwork-image-catalog` oneshot repoints it after each ingest.
+
+The supporting `ix_plugin_current_facet (current_facet_id)` btree
+index lands in the same migration so the eventual `/resolve` JOIN
+through the pointer doesn't have to alter `plugin` a second time.
 
 #### `opaque_password_file` (botworkz/botwork#141)
 
@@ -199,6 +251,12 @@ grows.
 * **`lease.tenant_id` → `tenant.id` ON DELETE CASCADE**
   (botworkz/botwork#141). Same posture: a lease without a tenant is
   meaningless.
+* **`plugin.current_facet_id` → `plugin_image_facet.id` ON DELETE
+  RESTRICT** (RFE #146). Deleting a facet a live `plugin` row points
+  at would silently break that plugin's `/resolve` once the resolve
+  cutover lands; RESTRICT keeps the upserter's insert-only posture
+  safe. A future janitor that prunes old facets has to walk
+  `plugin.current_facet_id` first and either re-point or refuse.
 
 ### Resolve hot-path
 
