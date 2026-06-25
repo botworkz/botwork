@@ -34,6 +34,21 @@
 //! removed) on every workspace before it can be deleted. Prevents
 //! accidental "you deleted mcp-bash, every session that resolves it
 //! now 404s" cascades.
+//!
+//! ## `current_facet_id` (RFE #146)
+//!
+//! The optional `current_facet_id` pointer is a forward reference to
+//! the [`super::plugin_image_facet`] row that describes the image
+//! this plugin is currently running. NULL during the rollout window
+//! where a `plugin` row exists but no facet has been ingested yet
+//! (the catalog oneshot hasn't run, or the image legitimately lacks
+//! labels) — config-broker's `/resolve` continues to read straight
+//! off this row in that window. Once the facet lands, the catalog
+//! upserter (RFE #146 successor) repoints the pointer, and the
+//! eventual `/resolve` cutover (next RFE again) joins through it.
+//!
+//! The outbound FK is **RESTRICT**: deleting a facet a live plugin
+//! row points at would silently break that plugin's `/resolve`.
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -70,6 +85,13 @@ pub struct Model {
     pub egress: Json,
     pub created_at: ChronoDateTimeUtc,
     pub updated_at: ChronoDateTimeUtc,
+    /// Optional FK → [`super::plugin_image_facet::Model::id`]. NULL
+    /// during the rollout window where no facet has been ingested
+    /// for this plugin yet (RFE #146); the catalog upserter
+    /// repoints it once a matching `(plugin_name, image_config_sha)`
+    /// observation lands. RESTRICT on the inbound FK so a facet a
+    /// live plugin row points at cannot be silently dropped.
+    pub current_facet_id: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -83,6 +105,17 @@ pub enum Relation {
     /// live workers can't be silently dropped.
     #[sea_orm(has_many = "super::session_worker::Entity")]
     SessionWorker,
+    /// `plugin.current_facet_id` → `plugin_image_facet.id`. RESTRICT
+    /// on delete: a facet a live plugin row points at cannot be
+    /// silently dropped (RFE #146).
+    #[sea_orm(
+        belongs_to = "super::plugin_image_facet::Entity",
+        from = "Column::CurrentFacetId",
+        to = "super::plugin_image_facet::Column::Id",
+        on_update = "NoAction",
+        on_delete = "Restrict"
+    )]
+    CurrentFacet,
 }
 
 impl Related<super::workspace_plugin::Entity> for Entity {
@@ -94,6 +127,12 @@ impl Related<super::workspace_plugin::Entity> for Entity {
 impl Related<super::session_worker::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::SessionWorker.def()
+    }
+}
+
+impl Related<super::plugin_image_facet::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::CurrentFacet.def()
     }
 }
 

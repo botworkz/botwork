@@ -61,6 +61,22 @@
 //! [issue-141]: https://github.com/botworkz/botwork/issues/141
 //! [rfe-123]: https://github.com/botworkz/botwork-extra/issues/123
 //!
+//! [RFE #146][issue-146] (tracking design [`botworkz/space#303`][space-303])
+//! adds the image-borne plugin-descriptor surface:
+//!
+//! * [`plugin_image_facet`] — one row per `(plugin_name,
+//!   image_config_sha)` observation of a `botwork/mcp-*:local`
+//!   image's `org.botwork.mcp.*` OCI labels. Insert-only (full audit
+//!   history kept). [`plugin`] gains an optional
+//!   `current_facet_id` pointer that the future
+//!   `botwork-image-catalog` oneshot repoints after each image
+//!   ingest, and which config-broker's `/resolve` will JOIN through
+//!   in a follow-up RFE. No reader/writer is wired up in RFE #146 —
+//!   it is the schema landing only.
+//!
+//! [issue-146]: https://github.com/botworkz/botwork/issues/146
+//! [space-303]: https://github.com/botworkz/space/issues/303
+//!
 //! Resolve hot-path (config-broker, post-cutover):
 //!
 //! ```sql
@@ -95,6 +111,7 @@ pub mod connection;
 pub mod lease;
 pub mod opaque_password_file;
 pub mod plugin;
+pub mod plugin_image_facet;
 pub mod session_worker;
 pub mod tenant;
 pub mod workspace;

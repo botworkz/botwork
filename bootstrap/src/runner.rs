@@ -157,6 +157,11 @@ async fn upsert_plugin(
                 egress: Set(entry.egress.clone()),
                 created_at: Set(now),
                 updated_at: Set(now),
+                // RFE #146: the operator-intent `plugin` row leaves
+                // `current_facet_id` NULL on create. The future
+                // `botwork-image-catalog` oneshot is the only writer of
+                // that pointer; bootstrap never touches it.
+                current_facet_id: sea_orm::ActiveValue::NotSet,
             }
             .insert(tx)
             .await?;
