@@ -16,8 +16,26 @@ bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-libc = "0.2"
-libsystemd = "^0.7"
+# `listenfd` adopts a systemd `LISTEN_FDS` fd into a stdlib
+# `UnixListener` and validates AF_UNIX + SOCK_STREAM + CLOEXEC for us.
+# We picked it over `libsystemd` because:
+#   * it encapsulates the one mandatory `unsafe { from_raw_fd }` at
+#     the fd-adoption boundary so the launcher crate can stay
+#     `#![forbid(unsafe_code)]`;
+#   * its dep tree (libc, uuid) is a small subset of libsystemd's
+#     (which pulls in hmac, sha2, nom, once_cell, thiserror, nix);
+#   * listenfd's `LISTEN_PID` handling is a strict superset of
+#     libsystemd's — when `LISTEN_PID` is set (as systemd always
+#     does) the semantics are identical, when it is unset/empty
+#     listenfd tolerates it (for `systemfd` dev workflows) where
+#     libsystemd errors. Our production unit always sets
+#     `LISTEN_PID`, so the production code path is unchanged.
+listenfd = "1"
+# `nix` covers the rest of the syscall boundary (peer credentials on
+# the unix socket, group resolution, effective uid/gid lookup, chown).
+# `user` is gated behind getgrnam_r/getgrgid_r and `Uid`/`Gid::effective`;
+# `socket` exposes `getsockopt(.., PeerCredentials) -> UnixCredentials`.
+nix = { version = "0.29", default-features = false, features = ["user", "socket"] }
 regex = "1"
 serde_json = ">=1, <1.0.133"
 thiserror = "2"
@@ -25,3 +43,6 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

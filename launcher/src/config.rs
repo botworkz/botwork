@@ -1,5 +1,6 @@
 use std::env;
-use std::ffi::CString;
+
+use nix::unistd::{getegid, geteuid, Group};
 
 pub const PREFIX: &str = "[botwork-launcher]";
 pub const DEFAULT_SOCKET_PATH: &str = "/run/botwork/launcher.sock";
@@ -70,10 +71,7 @@ impl Config {
             if allowed_peer_uid.is_none() && allowed_peer_gid.is_none() {
                 // Default to our own identity for local dev, but production should still set the
                 // broker uid/gid explicitly so the launcher is not trusting ambient host state.
-                (
-                    Some(unsafe { libc::geteuid() }),
-                    Some(unsafe { libc::getegid() }),
-                )
+                (Some(geteuid().as_raw()), Some(getegid().as_raw()))
             } else {
                 (allowed_peer_uid, allowed_peer_gid)
             };
@@ -243,60 +241,26 @@ fn resolve_group_spec(spec: &str) -> Result<u32, String> {
         return Ok(gid);
     }
 
-    let c_spec = CString::new(spec.as_bytes())
-        .map_err(|err| format!("invalid BOTWORK_LAUNCHER_SOCKET_GROUP: {err}"))?;
-    let mut buffer_len = group_lookup_buffer_len();
-    for _ in 0..4 {
-        let mut group = std::mem::MaybeUninit::<libc::group>::zeroed();
-        let mut result = std::ptr::null_mut();
-        let mut buffer = vec![0_u8; buffer_len];
-        let rc = unsafe {
-            libc::getgrnam_r(
-                c_spec.as_ptr(),
-                group.as_mut_ptr(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                &mut result,
-            )
-        };
-        if rc == libc::ERANGE {
-            buffer_len *= 2;
-            continue;
-        }
-        if rc != 0 {
-            return Err(format!(
-                "failed to resolve BOTWORK_LAUNCHER_SOCKET_GROUP={spec}: {}",
-                std::io::Error::from_raw_os_error(rc)
-            ));
-        }
-        if result.is_null() {
-            return Err(format!(
-                "failed to resolve BOTWORK_LAUNCHER_SOCKET_GROUP={spec}: no such group"
-            ));
-        }
-
-        let group = unsafe { group.assume_init() };
-        return Ok(group.gr_gid);
-    }
-
-    Err(format!(
-        "failed to resolve BOTWORK_LAUNCHER_SOCKET_GROUP={spec}: group entry too large"
-    ))
-}
-
-fn group_lookup_buffer_len() -> usize {
-    let suggested = unsafe { libc::sysconf(libc::_SC_GETGR_R_SIZE_MAX) };
-    if suggested > 0 {
-        suggested as usize
-    } else {
-        16 * 1024
+    // `nix::unistd::Group::from_name` wraps `getgrnam_r(3)` and
+    // handles the ERANGE buffer-doubling retry loop internally, so we
+    // get the same semantics as the hand-rolled libc dance without any
+    // unsafe code or sysconf bookkeeping.
+    match Group::from_name(spec) {
+        Ok(Some(group)) => Ok(group.gid.as_raw()),
+        Ok(None) => Err(format!(
+            "failed to resolve BOTWORK_LAUNCHER_SOCKET_GROUP={spec}: no such group"
+        )),
+        Err(err) => Err(format!(
+            "failed to resolve BOTWORK_LAUNCHER_SOCKET_GROUP={spec}: {err}"
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::CStr;
     use std::sync::{Mutex, OnceLock};
+
+    use nix::unistd::{getegid, Group};
 
     use super::{
         parse_bool_env, resolve_group_spec, validate_egress_proxy, Config,
@@ -315,9 +279,25 @@ mod tests {
 
     #[test]
     fn resolve_group_spec_accepts_existing_group_name() {
-        let current_gid = unsafe { libc::getegid() };
-        let name = current_group_name(current_gid);
-        assert_eq!(resolve_group_spec(&name).expect("group name"), current_gid,);
+        // Look up the current gid via nix and round-trip its name back
+        // through `resolve_group_spec`. Skip silently if the current
+        // gid has no `/etc/group` entry — that happens on minimal
+        // container/CI images where the workspace uid was set up
+        // without a matching group line, and the test would be moot
+        // there anyway because no name to round-trip exists.
+        let current_gid = getegid();
+        let Some(group) = Group::from_gid(current_gid).expect("getgrgid_r should succeed") else {
+            eprintln!(
+                "skipping resolve_group_spec_accepts_existing_group_name: \
+                 no group entry for current gid {}",
+                current_gid.as_raw()
+            );
+            return;
+        };
+        assert_eq!(
+            resolve_group_spec(&group.name).expect("group name"),
+            current_gid.as_raw()
+        );
     }
 
     #[test]
@@ -488,27 +468,5 @@ mod tests {
         // misconfig instead of letting it through.
         let err = validate_egress_proxy("http://egress_envoy:3128/proxy").expect_err("path");
         assert!(err.contains("path"), "{err}");
-    }
-
-    fn current_group_name(gid: u32) -> String {
-        let mut group = std::mem::MaybeUninit::<libc::group>::zeroed();
-        let mut result = std::ptr::null_mut();
-        let mut buffer = vec![0_u8; 16 * 1024];
-        let rc = unsafe {
-            libc::getgrgid_r(
-                gid,
-                group.as_mut_ptr(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                &mut result,
-            )
-        };
-        assert_eq!(rc, 0, "getgrgid_r should succeed");
-        assert!(!result.is_null(), "current gid should resolve");
-        let group = unsafe { group.assume_init() };
-        unsafe { CStr::from_ptr(group.gr_name) }
-            .to_str()
-            .expect("group name utf8")
-            .to_string()
     }
 }

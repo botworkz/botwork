@@ -62,3 +62,6 @@ sea-orm-migration = { version = "1.1.20", default-features = false, features = [
     "sqlx-postgres",
 ] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -44,3 +44,13 @@ console_error_panic_hook = "0.1"
 # JSON wire format for talking to admin-api.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# NOTE: this crate intentionally does NOT inherit the workspace
+# `[lints]` block (which sets `unsafe_code = "forbid"` for the rest
+# of the workspace). `#[wasm_bindgen(start)]` and the leptos view!
+# macros expand into code that the `unsafe_code` lint flags from the
+# call-site crate; `forbid` is unconditional and cannot be downgraded
+# by a downstream `#[allow]`, so opting out at the manifest level is
+# the only knob we have. Hand-written `unsafe { }` blocks here are
+# still expected to be caught in review — `grep -n unsafe src/`
+# returns nothing today.

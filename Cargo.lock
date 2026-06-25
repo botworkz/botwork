@@ -587,8 +587,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "libc",
- "libsystemd",
+ "listenfd",
+ "nix",
  "regex",
  "serde_json",
  "tempfile",
@@ -2196,28 +2196,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsystemd"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19c97a761fc86953c5b885422b22c891dbf5bcb9dcc99d0110d6ce4c052759f0"
-dependencies = [
- "hmac",
- "libc",
- "log",
- "nix",
- "nom",
- "once_cell",
- "serde",
- "sha2",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "listenfd"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b87bc54a4629b4294d0b3ef041b64c40c611097a677d9dc07b2c67739fe39dba"
+dependencies = [
+ "libc",
+ "uuid",
+ "winapi",
+]
 
 [[package]]
 name = "litemap"
@@ -2370,15 +2363,6 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
-]
-
-[[package]]
-name = "nom"
-version = "8.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
-dependencies = [
- "memchr",
 ]
 
 [[package]]

@@ -19,6 +19,15 @@ The binary is produced at:
 
 ## Socket activation
 
+Socket activation is read through [`listenfd`](https://crates.io/crates/listenfd), which adopts the inherited fd into a stdlib `UnixListener` and validates `AF_UNIX` + `SOCK_STREAM` + sets `FD_CLOEXEC`. The launcher additionally rejects any `LISTEN_FDS` count other than `1` and confirms `SO_ACCEPTCONN` on the inherited fd before promoting it to the tokio runtime.
+
+We switched from `libsystemd` to `listenfd` for two reasons:
+
+* It encapsulates the one mandatory `unsafe { from_raw_fd }` at the fd-adoption boundary so the launcher crate can stay inside the workspace-wide `unsafe_code = "forbid"` lint.
+* Its dep tree (`libc`, `uuid`) is a small subset of `libsystemd`'s (which pulls in `hmac`, `sha2`, `nom`, `once_cell`, `thiserror`, `nix`).
+
+`listenfd`'s `LISTEN_PID` handling is a strict superset of `libsystemd`'s — when systemd sets `LISTEN_PID` (always, in production) the semantics are identical; when it is unset/empty (e.g. running under `systemfd` for dev), `listenfd` tolerates it where `libsystemd` errors. Our production unit always sets `LISTEN_PID`, so the production code path is unchanged.
+
 Production should run the launcher via systemd socket activation so systemd owns the socket path lifecycle and passes a single listener fd to the process.
 The launcher socket is the whole privilege boundary for `docker run` and `mount`: it must never be world-accessible.
 
