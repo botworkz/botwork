@@ -8,13 +8,9 @@ pub mod server;
 pub mod validate;
 
 use std::any::Any;
-use std::ffi::CString;
 use std::future::Future;
-use std::mem::{size_of, MaybeUninit};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +18,8 @@ use std::time::Duration;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use libsystemd::activation::{self, FileDescriptor};
+use listenfd::ListenFd;
+use nix::sys::socket::{getsockopt, sockopt};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::cmd::{log_info, log_warn};
@@ -69,28 +66,59 @@ pub async fn serve_on(listener: UnixListener, state: Arc<AppState>) -> Result<()
 }
 
 fn listener_from_activation(socket_path: &str) -> Result<Option<UnixListener>, String> {
-    let descriptors = activation::receive_descriptors(true)
-        .map_err(|err| format!("failed to receive systemd socket activation descriptors: {err}"))?;
-    listener_from_descriptors(descriptors, socket_path)
+    listener_from_listenfd(ListenFd::from_env(), socket_path)
 }
 
-fn listener_from_descriptors(
-    descriptors: Vec<FileDescriptor>,
+/// Adopt a systemd-passed unix socket through `listenfd`.
+///
+/// `listenfd::take_unix_listener` does the heavy lifting we used to do
+/// hand-rolled with libc:
+///
+/// * confirms the fd is open and is a socket (via `fstat`),
+/// * confirms the family is `AF_UNIX` and the type is `SOCK_STREAM`,
+/// * sets `FD_CLOEXEC`,
+/// * hands back a `std::os::unix::net::UnixListener` we then promote to
+///   tokio.
+///
+/// What `listenfd` does **not** check, and we still do:
+///
+/// * the LISTEN_FDS count is exactly 1 — production systemd units pass
+///   exactly one socket, anything else is a misconfig we want to fail
+///   loud at startup;
+/// * the inherited fd is in `listen(2)` state (`SO_ACCEPTCONN == 1`) —
+///   belt-and-braces in case someone sets `LISTEN_FDS` manually with a
+///   non-listening fd at position 0.
+fn listener_from_listenfd(
+    mut listenfd: ListenFd,
     socket_path: &str,
 ) -> Result<Option<UnixListener>, String> {
-    match descriptors.len() {
+    match listenfd.len() {
         0 => {
             log_info(&format!("self-bind: no LISTEN_FDS, binding {socket_path}"));
             Ok(None)
         }
         1 => {
-            let descriptor = descriptors
-                .into_iter()
-                .next()
-                .ok_or_else(|| "missing activated socket descriptor".to_string())?;
-            let fd = descriptor.into_raw_fd();
-            validate_activated_listener(fd)?;
-            let listener = unix_listener_from_raw_fd(fd)?;
+            let std_listener = listenfd
+                .take_unix_listener(0)
+                .map_err(|err| {
+                    format!("systemd socket activation fd 0 is not a unix stream socket: {err}")
+                })?
+                .ok_or_else(|| "missing activated unix socket descriptor".to_string())?;
+            // SO_ACCEPTCONN check used to live next to the AF_UNIX /
+            // SOCK_STREAM checks; listenfd covers the latter two but not
+            // this one, so keep it explicit.
+            let accepting = getsockopt(&std_listener, sockopt::AcceptConn).map_err(|err| {
+                format!("failed to inspect activated socket SO_ACCEPTCONN: {err}")
+            })?;
+            if !accepting {
+                return Err("systemd socket activation fd 0 is not a listening socket".to_string());
+            }
+            std_listener
+                .set_nonblocking(true)
+                .map_err(|err| format!("failed to set activated socket nonblocking: {err}"))?;
+            let fd = std_listener.as_raw_fd();
+            let listener = UnixListener::from_std(std_listener)
+                .map_err(|err| format!("failed to adopt activated socket: {err}"))?;
             log_info(&format!(
                 "socket-activated: using fd {fd} from systemd, path={socket_path}"
             ));
@@ -140,83 +168,6 @@ fn bind_listener(config: &Config) -> Result<UnixListener, String> {
     // SocketMode=0660 and SocketGroup=... in the systemd .socket unit instead.
 
     Ok(listener)
-}
-
-fn validate_activated_listener(fd: RawFd) -> Result<(), String> {
-    let family = socket_family(fd)?;
-    if family != libc::AF_UNIX {
-        return Err(format!(
-            "systemd socket activation fd {fd} must be AF_UNIX, got family={family}"
-        ));
-    }
-
-    let socket_type = socket_option_int(fd, libc::SO_TYPE, "SO_TYPE")?;
-    if socket_type != libc::SOCK_STREAM {
-        return Err(format!(
-            "systemd socket activation fd {fd} must be SOCK_STREAM, got type={socket_type}"
-        ));
-    }
-
-    let accept_conn = socket_option_int(fd, libc::SO_ACCEPTCONN, "SO_ACCEPTCONN")?;
-    if accept_conn == 0 {
-        return Err(format!(
-            "systemd socket activation fd {fd} is not a listening socket"
-        ));
-    }
-
-    Ok(())
-}
-
-fn socket_family(fd: RawFd) -> Result<i32, String> {
-    let mut address = MaybeUninit::<libc::sockaddr_storage>::zeroed();
-    let mut length = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    let rc = unsafe {
-        libc::getsockname(
-            fd,
-            address.as_mut_ptr().cast::<libc::sockaddr>(),
-            &mut length,
-        )
-    };
-    if rc != 0 {
-        return Err(format!(
-            "failed to inspect activated socket fd {fd} family: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    let address = unsafe { address.assume_init() };
-    Ok(address.ss_family as i32)
-}
-
-fn socket_option_int(fd: RawFd, option: libc::c_int, option_name: &str) -> Result<i32, String> {
-    let mut value = MaybeUninit::<libc::c_int>::uninit();
-    let mut length = size_of::<libc::c_int>() as libc::socklen_t;
-    let rc = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            option,
-            value.as_mut_ptr().cast(),
-            &mut length,
-        )
-    };
-    if rc != 0 {
-        return Err(format!(
-            "failed to inspect activated socket fd {fd} {option_name}: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(unsafe { value.assume_init() })
-}
-
-fn unix_listener_from_raw_fd(fd: RawFd) -> Result<UnixListener, String> {
-    let std_listener = unsafe { StdUnixListener::from_raw_fd(fd) };
-    std_listener
-        .set_nonblocking(true)
-        .map_err(|err| format!("failed to set activated socket fd {fd} nonblocking: {err}"))?;
-    UnixListener::from_std(std_listener)
-        .map_err(|err| format!("failed to adopt activated socket fd {fd}: {err}"))
 }
 
 async fn accept_next_stream<F, Fut>(
@@ -307,26 +258,20 @@ impl PeerCredentials {
 }
 
 fn peer_credentials(stream: &UnixStream) -> Option<PeerCredentials> {
-    let mut credentials = MaybeUninit::<libc::ucred>::zeroed();
-    let mut length = size_of::<libc::ucred>() as libc::socklen_t;
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            credentials.as_mut_ptr().cast(),
-            &mut length,
-        )
+    // `nix::sys::socket::sockopt::PeerCredentials` issues
+    // `getsockopt(SO_PEERCRED)` and returns a `UnixCredentials` wrapper.
+    // tokio's `UnixStream` implements `AsFd`, so the call is fully safe.
+    let creds = getsockopt(stream, sockopt::PeerCredentials).ok()?;
+    let raw_pid = creds.pid();
+    let pid = if raw_pid > 0 {
+        u32::try_from(raw_pid).ok()
+    } else {
+        None
     };
-    if rc != 0 || (length as usize) != size_of::<libc::ucred>() {
-        return None;
-    }
-
-    let credentials = unsafe { credentials.assume_init() };
     Some(PeerCredentials {
-        uid: credentials.uid,
-        gid: credentials.gid,
-        pid: (credentials.pid > 0).then_some(credentials.pid as u32),
+        uid: creds.uid(),
+        gid: creds.gid(),
+        pid,
     })
 }
 
@@ -341,17 +286,10 @@ fn peer_is_allowed(
 }
 
 fn chown_group(path: &Path, gid: u32) -> Result<(), String> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|err| format!("failed to prepare {} for chown: {err}", path.display()))?;
-    let rc = unsafe { libc::chown(c_path.as_ptr(), u32::MAX, gid) };
-    if rc != 0 {
-        return Err(format!(
-            "failed to chown {} to group {gid}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
+    // `std::os::unix::fs::chown` is stable since 1.73 and wraps `chown(2)`
+    // with `None` standing in for the libc "leave unchanged" sentinel.
+    std::os::unix::fs::chown(path, None, Some(gid))
+        .map_err(|err| format!("failed to chown {} to group {gid}: {err}", path.display()))
 }
 
 fn peer_pid_label(peer_pid: Option<u32>) -> String {
@@ -372,47 +310,59 @@ fn panic_payload(payload: Box<dyn Any + Send + 'static>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::TryFrom;
     use std::io::{Error, ErrorKind};
-    use std::os::fd::IntoRawFd;
-    use std::os::unix::net::{UnixDatagram, UnixListener as StdUnixListener};
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
-    use libsystemd::activation::FileDescriptor;
-    use tempfile::tempdir;
+    use listenfd::ListenFd;
+    use nix::unistd::{getegid, geteuid};
     use tokio::net::UnixStream;
     use tokio::time::timeout;
 
-    use super::{accept_next_stream, listener_from_descriptors, peer_is_allowed};
+    use super::{accept_next_stream, listener_from_listenfd, peer_is_allowed};
 
-    #[test]
-    fn activation_listener_rejects_wrong_fd_count() {
-        let temp = tempdir().expect("temp dir");
-        let first = StdUnixListener::bind(temp.path().join("first.sock")).expect("first listener");
-        let second =
-            StdUnixListener::bind(temp.path().join("second.sock")).expect("second listener");
-        let descriptors = vec![
-            FileDescriptor::try_from(first.into_raw_fd()).expect("first descriptor"),
-            FileDescriptor::try_from(second.into_raw_fd()).expect("second descriptor"),
-        ];
+    /// listenfd's `from_env` mutates `LISTEN_*` env vars, so every test that
+    /// touches them must serialise. Mirrors the env_lock pattern in
+    /// `config.rs` and `wire_contract.rs`.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
-        let err = listener_from_descriptors(descriptors, "/run/botwork/launcher.sock")
-            .expect_err("descriptor count should fail");
-        assert_eq!(err, "socket activation expected exactly one socket, got 2");
+    fn clear_listen_env() {
+        std::env::remove_var("LISTEN_PID");
+        std::env::remove_var("LISTEN_FDS");
+        std::env::remove_var("LISTEN_FDNAMES");
+        std::env::remove_var("LISTEN_FDS_FIRST_FD");
     }
 
     #[test]
-    fn activation_listener_rejects_wrong_socket_type() {
-        let (first, _second) = UnixDatagram::pair().expect("unix datagram pair");
-        let descriptor =
-            FileDescriptor::try_from(first.into_raw_fd()).expect("unix datagram descriptor");
+    fn activation_listener_falls_back_when_no_descriptors() {
+        // `ListenFd::empty()` simulates the "no socket activation" case
+        // without touching env vars — that's the dev / `cargo run`
+        // path that has to keep working.
+        let listener = listener_from_listenfd(ListenFd::empty(), "/run/botwork/launcher.sock")
+            .expect("empty descriptor list should fall back to self-bind");
+        assert!(listener.is_none(), "empty fd set must signal self-bind");
+    }
 
-        let err = listener_from_descriptors(vec![descriptor], "/run/botwork/launcher.sock")
-            .expect_err("datagram socket should fail");
-        assert!(
-            err.contains("must be SOCK_STREAM"),
-            "unexpected error: {err}"
-        );
+    #[test]
+    fn activation_listener_rejects_wrong_fd_count() {
+        // listenfd's `from_env` reads `LISTEN_FDS` verbatim and reports a
+        // matching `len()`, regardless of whether the fds actually exist.
+        // We can therefore exercise our "must be exactly one" check
+        // without setting up real listener fds.
+        let _guard = env_lock().lock().expect("env lock");
+        clear_listen_env();
+        std::env::set_var("LISTEN_PID", std::process::id().to_string());
+        std::env::set_var("LISTEN_FDS", "2");
+
+        let listenfd = ListenFd::from_env();
+        let err = listener_from_listenfd(listenfd, "/run/botwork/launcher.sock")
+            .expect_err("descriptor count should fail");
+        assert_eq!(err, "socket activation expected exactly one socket, got 2");
+
+        clear_listen_env();
     }
 
     #[tokio::test]
@@ -437,8 +387,8 @@ mod tests {
                         }
                     }
                 },
-                Some(unsafe { libc::geteuid() }),
-                Some(unsafe { libc::getegid() }),
+                Some(geteuid().as_raw()),
+                Some(getegid().as_raw()),
             )
             .await
         })

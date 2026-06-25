@@ -35,8 +35,8 @@ async fn wire_contract_validation_paths() {
     let config = Config {
         socket_path: socket_path.to_string_lossy().into_owned(),
         socket_group: None,
-        allowed_peer_uid: Some(unsafe { libc::geteuid() }),
-        allowed_peer_gid: Some(unsafe { libc::getegid() }),
+        allowed_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        allowed_peer_gid: Some(nix::unistd::getegid().as_raw()),
         plugin_uid: 1000,
         plugin_gid: 1000,
         image_allowlist_regex: r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$".to_string(),
@@ -149,8 +149,8 @@ async fn wire_contract_rejects_large_request_bodies() {
     let config = Config {
         socket_path: socket_path.to_string_lossy().into_owned(),
         socket_group: None,
-        allowed_peer_uid: Some(unsafe { libc::geteuid() }),
-        allowed_peer_gid: Some(unsafe { libc::getegid() }),
+        allowed_peer_uid: Some(nix::unistd::geteuid().as_raw()),
+        allowed_peer_gid: Some(nix::unistd::getegid().as_raw()),
         plugin_uid: 1000,
         plugin_gid: 1000,
         image_allowlist_regex: r"^(botspace|botwork)/[a-z0-9_-]+:[a-z0-9._-]+$".to_string(),

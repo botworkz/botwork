@@ -1,6 +1,6 @@
-use std::ffi::CString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use crate::cmd::{log_info, run_command};
 use crate::error::LauncherError;
@@ -168,17 +168,12 @@ pub(crate) fn fallback_message(stderr: &str, fallback: String) -> String {
 }
 
 fn chown_path(path: &str, uid: u32, gid: u32) -> Result<(), LauncherError> {
-    let c_path = CString::new(path.as_bytes()).map_err(|err| {
-        LauncherError::Internal(format!("failed to prepare path {path} for chown: {err}"))
-    })?;
-    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
-    if rc != 0 {
-        return Err(LauncherError::Internal(format!(
-            "failed to chown {path} to {uid}:{gid}: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(())
+    // `std::os::unix::fs::chown` is stable since 1.73 and wraps
+    // `chown(2)` so we don't need an `unsafe` libc call here. `None`
+    // would mean "don't touch this id"; we want both set.
+    std::os::unix::fs::chown(Path::new(path), Some(uid), Some(gid)).map_err(|err| {
+        LauncherError::Internal(format!("failed to chown {path} to {uid}:{gid}: {err}"))
+    })
 }
 
 #[cfg(test)]

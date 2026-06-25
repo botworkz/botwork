@@ -35,6 +35,21 @@ default-members = [
     "tools",
 ]
 
+# Workspace-wide lint policy. Inherited by every member crate via
+# `[lints] workspace = true` in their `Cargo.toml`. The set is
+# intentionally tiny:
+#
+# * `unsafe_code = "forbid"` — we don't write `unsafe` outside of
+#   tests, full stop. `forbid` (vs `deny`) means a downstream
+#   `#![allow(unsafe_code)]` cannot re-enable it; a future PR that
+#   needs an `unsafe` block has to first change the policy here in a
+#   stand-alone commit, which gets reviewed on its own merits.
+#
+# Any expansion belongs in a separate PR with its own justification —
+# this block is a policy gate, not a style sheet.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 # Abort on panic in release builds. This removes the stack unwinder and
 # its dependency on libgcc_s.so.1, so the binaries run on distroless
 # base-nossl-debian12 with no extra runtime libraries. Server daemons
