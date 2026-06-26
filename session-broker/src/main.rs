@@ -1,11 +1,11 @@
 use std::io::Write;
 
-use botwork_session_broker::{run, PREFIX};
+use botwork_session_broker::{run, version_string, PREFIX};
 
 fn handle_version_flag(args: &[String], mut writer: impl Write) -> Option<i32> {
     match args.get(1).map(String::as_str) {
         Some("--version") | Some("-V") => {
-            writeln!(writer, "botwork-session-broker {}", botwork_version::full())
+            writeln!(writer, "botwork-session-broker {}", version_string())
                 .expect("failed to write version output");
             Some(0)
         }
@@ -38,7 +38,10 @@ mod tests {
             assert_eq!(handle_version_flag(&args, &mut output), Some(0));
             assert_eq!(
                 String::from_utf8(output).expect("utf8"),
-                format!("botwork-session-broker {}\n", botwork_version::full())
+                format!(
+                    "botwork-session-broker {}\n",
+                    botwork_session_broker::version_string()
+                )
             );
         }
     }

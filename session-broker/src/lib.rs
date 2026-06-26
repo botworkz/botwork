@@ -23,6 +23,12 @@ use tracing::info;
 use crate::config_broker::{PluginDescriptor, UpstreamAuth};
 
 pub const PREFIX: &str = "[session-broker]";
+pub const VERSION: &str = include_str!("../../VERSION").trim_ascii();
+
+pub fn version_string() -> String {
+    botwork_version::format_full(VERSION, botwork_version::GIT_SHA)
+}
+
 pub const SESSION_PORT: u16 = 8000;
 pub const COLD_START_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROBE_SLEEP: Duration = Duration::from_millis(100);
@@ -272,10 +278,7 @@ pub async fn run() -> Result<(), String> {
         .with_env_filter(filter)
         .with_target(false)
         .try_init();
-    info!(
-        "{PREFIX} botwork-session-broker {}",
-        botwork_version::full()
-    );
+    info!("{PREFIX} botwork-session-broker {}", version_string());
 
     // Round-3 cutover (RFE #105 PR2 followup): sessions.json is no
     // longer the source of truth, and after this PR there is no
