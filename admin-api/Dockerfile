@@ -54,8 +54,10 @@ RUN apt-get update \
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
 
 ARG GIT_SHA=""
+ARG BOTWORK_VERSION=""
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.source="https://github.com/botworkz/botwork"
+LABEL org.opencontainers.image.version="${BOTWORK_VERSION}"
 
 COPY --from=rust-toolchain /lib/x86_64-linux-gnu/libgcc_s.so.1 \
     /lib/x86_64-linux-gnu/libgcc_s.so.1
