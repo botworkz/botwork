@@ -137,6 +137,8 @@ jobs:
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
     - name: Build launcher + tools (release)
+      env:
+        BOTWORK_GIT_SHA: ${{ github.sha }}
       run: |
         set -euo pipefail
         cargo build --release --locked -p botwork-launcher -p botwork-tools

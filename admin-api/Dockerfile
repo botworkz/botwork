@@ -24,6 +24,9 @@ COPY launcher/ ./launcher/
 COPY tools/ ./tools/
 COPY Cargo.toml Cargo.lock ./
 
+ARG BOTWORK_GIT_SHA=""
+ENV BOTWORK_GIT_SHA=${BOTWORK_GIT_SHA}
+
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \

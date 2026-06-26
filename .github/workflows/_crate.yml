@@ -164,6 +164,7 @@ jobs:
           --platform linux/amd64 \
           --user "$(id -u):$(id -g)" \
           -e HOME=/tmp/home \
+          -e BOTWORK_GIT_SHA="${GITHUB_SHA}" \
           -e CARGO_HOME=/cargo-home \
           -e RUSTUP_HOME=/usr/local/rustup \
           -e CARGO_TARGET_DIR=/work/target \
@@ -225,6 +226,7 @@ jobs:
           -t "botwork/${SERVICE}:local" \
           --build-arg BINARY_SOURCE=prebuilt \
           --build-arg "GIT_SHA=${GITHUB_SHA}" \
+          --build-arg "BOTWORK_GIT_SHA=${GITHUB_SHA}" \
           -f "${CRATE}/Dockerfile" \
           .
 
@@ -247,6 +249,7 @@ jobs:
           -t botwork/db-migrate:local \
           --build-arg BINARY_SOURCE=source \
           --build-arg "GIT_SHA=${GITHUB_SHA}" \
+          --build-arg "BOTWORK_GIT_SHA=${GITHUB_SHA}" \
           -f db/migration/Dockerfile \
           .
 
