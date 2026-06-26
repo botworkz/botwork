@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tracing::info;
 
 use crate::config_broker::{PluginDescriptor, UpstreamAuth};
 
@@ -271,6 +272,10 @@ pub async fn run() -> Result<(), String> {
         .with_env_filter(filter)
         .with_target(false)
         .try_init();
+    info!(
+        "{PREFIX} botwork-session-broker {}",
+        botwork_version::full()
+    );
 
     // Round-3 cutover (RFE #105 PR2 followup): sessions.json is no
     // longer the source of truth, and after this PR there is no

@@ -102,6 +102,7 @@ session-broker maps these onto client-facing responses:
 
 ## Environment variables
 
+- Version probe: `botwork-config-broker --version` (or `-V`).
 - `BOTWORK_DATABASE_URL` (required) — postgres URL in the canonical
   `postgres://botwork:<password>@postgres/botwork` shape. Same env the
   rest of the workspace's persistence-aware consumers use.

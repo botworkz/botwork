@@ -12,6 +12,7 @@ name = "botwork-launcher"
 path = "src/main.rs"
 
 [dependencies]
+botwork-version = { path = "../version" }
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }

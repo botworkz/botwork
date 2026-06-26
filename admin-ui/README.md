@@ -128,6 +128,8 @@ docker run --rm --name botwork-admin-ui \
   botwork/admin-ui:local
 ```
 
+Version probe: `botwork-admin-ui-server --version` (or `-V`).
+
 Operator reach (once the vm-side companion lands):
 
 ```

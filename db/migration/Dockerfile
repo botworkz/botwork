@@ -23,6 +23,8 @@ COPY db/ ./db/
 COPY session-broker/ ./session-broker/
 COPY launcher/ ./launcher/
 COPY tools/ ./tools/
+COPY version/ ./version/
+COPY VERSION ./VERSION
 COPY Cargo.toml Cargo.lock ./
 
 # hadolint ignore=DL3008

@@ -45,3 +45,5 @@ admin-ui/wasm/dist/*
 !tools/**
 !Cargo.toml
 !Cargo.lock
+!version
+!VERSION

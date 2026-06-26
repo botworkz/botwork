@@ -1,0 +1,11 @@
+[package]
+name = "botwork-version"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "botwork_version"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

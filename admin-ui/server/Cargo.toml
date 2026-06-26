@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.7"
+botwork-version = { path = "../../version" }
 # `include_dir!` pulls admin-ui/wasm/dist/ into the binary at compile
 # time so the distroless runtime image carries no extra filesystem
 # bits. `glob` feature lets us iterate entries when emitting the file

@@ -278,6 +278,7 @@ request.
 
 ## Environment variables
 
+- Version probe: `botwork-control-plane --version` (or `-V`).
 - `BOTWORK_DATABASE_URL` — postgres connection URL. Required; the
   binary exits 2 if unset. In production it is rendered by
   `botwork-db-init.service` into `/var/lib/botwork-db/secret.env` and
