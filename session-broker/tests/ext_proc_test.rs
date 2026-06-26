@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use botwork_session_broker::config_broker::{
     EnvEntry, PluginDescriptor, PluginResources, UpstreamAuth,
@@ -55,6 +56,7 @@ fn app_state_with_plugins_and_endpoints(
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        disconnect_grace: Duration::from_secs(300),
         // RFE #105 PR2 / round-3: production wires three DB-bound
         // handles via `run()`. ext_proc tests drive the gRPC
         // surface against in-memory `transport_sessions` only, so
@@ -111,6 +113,7 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        disconnect_grace: Duration::from_secs(300),
         // RFE #105 PR2 / round-3: production wires three DB-bound
         // handles via `run()`. ext_proc tests drive the gRPC
         // surface against in-memory `transport_sessions` only, so

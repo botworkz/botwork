@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 use axum::body::Body;
@@ -39,6 +40,7 @@ fn app_state_for_admin_tests() -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        disconnect_grace: Duration::from_secs(300),
         // RFE #105 PR2 / round-3: admin-endpoint tests render from
         // `transport_sessions` only. Production wires three DB-bound
         // handles via `run()`; tests pass `None` to stay hermetic
