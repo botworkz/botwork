@@ -346,7 +346,7 @@ spawn fails with a 5xx so operators can fix vault state explicitly.
   one-time migration hint — on startup, if a file exists at this
   path, its contents are dumped to the log for operator audit and
   the file is unlinked.
-- `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` (default `30`).
+- `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` (default `30`; sampled once at broker startup).
 - `BOTWORK_BROKER_SWEEPER_INTERVAL_SECS` (default `60`). Interval at which the
   background TTL sweepers wake to prune expired entries from the `tombstones`
   and `liveness_cache` maps. Both maps use a 5 min TTL; the default 60 s sweep

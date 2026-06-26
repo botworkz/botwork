@@ -30,8 +30,8 @@ use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_read
 use crate::secrets;
 use crate::{
     log_info, redact_token, AppState, PendingInit, SessionLiveness, TransportState,
-    COLD_START_TIMEOUT, DEFAULT_DISCONNECT_GRACE_SECS, LIVENESS_TTL, TENANT_RE,
-    TENANT_WORKSPACE_PLUGIN_PATH_RE, TOMBSTONE_TTL, WORKSPACE_RE,
+    COLD_START_TIMEOUT, LIVENESS_TTL, TENANT_RE, TENANT_WORKSPACE_PLUGIN_PATH_RE, TOMBSTONE_TTL,
+    WORKSPACE_RE,
 };
 
 /// `chrono::Utc::now()` formatted to the `%Y-%m-%dT%H:%M:%SZ` wire
@@ -664,11 +664,7 @@ pub async fn liveness_drop(state: &AppState, mcp_session_id: &str) {
 /// via [`reap_session`].  The timer handle is stored in `liveness` so it can be
 /// cancelled if the client reconnects before expiry.
 async fn schedule_grace_timer(state: AppState, sid: String, liveness: Arc<SessionLiveness>) {
-    let grace_secs = std::env::var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DISCONNECT_GRACE_SECS);
-    let grace = std::time::Duration::from_secs(grace_secs);
+    let grace = state.disconnect_grace;
 
     // Hold the handle lock across spawn-and-store so liveness_bump cannot
     // observe "no handle to abort" while we are mid-spawn.
@@ -1881,6 +1877,7 @@ mod tests {
             tombstones: Arc::new(Mutex::new(HashMap::new())),
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+            disconnect_grace: std::time::Duration::from_secs(300),
             // The ext_proc unit tests live within the crate and don't
             // touch the agent_session write-through path. Production
             // sets this via `run()`; tests pass `None` so they don't

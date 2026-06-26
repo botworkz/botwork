@@ -228,6 +228,10 @@ pub struct AppState {
     /// last ext_proc stream closes, a grace timer is started; expiry triggers
     /// automatic session teardown.
     pub stream_liveness: Arc<Mutex<HashMap<String, Arc<SessionLiveness>>>>,
+    /// Grace duration used when all streams for a session close. Read once at
+    /// startup from `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` and then reused for
+    /// every timer arm.
+    pub disconnect_grace: Duration,
     /// RFE #105 PR2: optional handle for the `agent_session`
     /// write-through path. `None` in tests that don't care about the
     /// DB; `Some(_)` in production where `run()` connects to
@@ -343,6 +347,11 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| "http://control_plane:9300".to_string());
     let broker_socket_path = std::env::var("BOTWORK_BROKER_SOCKET_PATH")
         .unwrap_or_else(|_| "/run/botwork/broker.sock".to_string());
+    let disconnect_grace_secs = std::env::var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DISCONNECT_GRACE_SECS);
+    let disconnect_grace = Duration::from_secs(disconnect_grace_secs);
 
     let state = AppState {
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -354,6 +363,7 @@ pub async fn run() -> Result<(), String> {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        disconnect_grace,
         agent_session_writer,
         session_worker_writer,
         db: Some(db_arc),

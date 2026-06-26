@@ -18,6 +18,7 @@ fn make_state() -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        disconnect_grace: Duration::from_secs(300),
         // RFE #105 PR2 / round-3: production wires three DB-bound
         // handles via `run()`. The container-exit path only touches
         // the in-memory `transport_sessions` map, so passing `None`
