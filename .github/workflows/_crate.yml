@@ -227,6 +227,7 @@ jobs:
           --build-arg BINARY_SOURCE=prebuilt \
           --build-arg "GIT_SHA=${GITHUB_SHA}" \
           --build-arg "BOTWORK_GIT_SHA=${GITHUB_SHA}" \
+          --build-arg "BOTWORK_VERSION=$(tr -d '[:space:]' < VERSION)" \
           -f "${CRATE}/Dockerfile" \
           .
 
@@ -250,6 +251,7 @@ jobs:
           --build-arg BINARY_SOURCE=source \
           --build-arg "GIT_SHA=${GITHUB_SHA}" \
           --build-arg "BOTWORK_GIT_SHA=${GITHUB_SHA}" \
+          --build-arg "BOTWORK_VERSION=$(tr -d '[:space:]' < VERSION)" \
           -f db/migration/Dockerfile \
           .
 
@@ -261,6 +263,42 @@ jobs:
       run: |
         set -euo pipefail
         bash "${CRATE}/smoke.sh"
+
+    # ── OCI labels ───────────────────────────────────────────────────────
+    # Prove the three labels we promise to ship on every botwork image
+    # are actually present on the bytes we just smoke-tested. The
+    # release-version label MUST match `/VERSION` (trimmed); the revision
+    # label MUST match `$GITHUB_SHA`; the source label is the repo URL.
+    # All three are inspectable via `docker image inspect` without booting
+    # the container — that's the point.
+    - name: Verify OCI labels
+      run: |
+        set -euo pipefail
+        image="botwork/${SERVICE}:local"
+        expect_version="$(tr -d '[:space:]' < VERSION)"
+        actual_version="$(docker image inspect "${image}" \
+          --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
+        actual_revision="$(docker image inspect "${image}" \
+          --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+        actual_source="$(docker image inspect "${image}" \
+          --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')"
+        fail=0
+        if [ "${actual_version}" != "${expect_version}" ]; then
+          echo "::error::image.version label mismatch: expected '${expect_version}', got '${actual_version}'"
+          fail=1
+        fi
+        if [ "${actual_revision}" != "${GITHUB_SHA}" ]; then
+          echo "::error::image.revision label mismatch: expected '${GITHUB_SHA}', got '${actual_revision}'"
+          fail=1
+        fi
+        if [ "${actual_source}" != "https://github.com/botworkz/botwork" ]; then
+          echo "::error::image.source label mismatch: got '${actual_source}'"
+          fail=1
+        fi
+        if [ "${fail}" -ne 0 ]; then
+          exit 1
+        fi
+        echo "OCI labels OK: version=${actual_version} revision=${actual_revision:0:7} source=${actual_source}"
 
     # ── Save runtime image as artifact ──────────────────────────────────────
     # `docker save | gzip` the smoke-tested image so the publish job
