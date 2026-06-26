@@ -27,7 +27,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use botwork_admin_api::{build_router, AppState, ControlPlaneClient};
+use botwork_admin_api::{build_router, AppState, ControlPlaneClient, SecretStoreClient};
 use botwork_bootstrap::{apply, BootstrapConfig, BootstrapConfigRaw};
 use botwork_entity::connection::connect;
 use botwork_migration::Migrator;
@@ -175,6 +175,7 @@ async fn spawn_server_with(control_plane: Option<ControlPlaneClient>) -> Option<
     let state = AppState {
         db: db_arc.clone(),
         control_plane: control_plane.unwrap_or_else(ControlPlaneClient::disabled),
+        secret_store: SecretStoreClient::disabled(),
     };
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
