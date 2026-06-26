@@ -196,12 +196,24 @@ jobs:
         # (i.e. any pre-release/dev suffix such as "-dev", "-beta1", "-rc2").
         # Only a bare "MAJOR.MINOR.PATCH" triggers a publish so that automated
         # bump commits never cause a double-release.
+        #
+        # A second guard checks whether the git tag v<VERSION> already exists
+        # on the remote. A clean VERSION can sit on more than one commit (e.g.
+        # a chore/docs push lands between the release-bump PR merge and the
+        # post-release `-dev` bump, or workflow_dispatch is re-run on an
+        # already-published tree). Without this check the publish steps would
+        # silently overwrite existing container tags on GHCR and re-upload
+        # binary assets to the existing GitHub Release — replacing previously
+        # published bytes with bytes from a different, unrelated commit.
         if [[ "${raw}" == *-* ]]; then
           echo "is_release=false" >> "$GITHUB_OUTPUT"
           echo "VERSION=${raw} contains a pre-release suffix — skipping publish."
+        elif git ls-remote --tags origin "refs/tags/v${raw}" | grep -q .; then
+          echo "is_release=false" >> "$GITHUB_OUTPUT"
+          echo "Tag v${raw} already exists on remote — skipping publish to prevent overwrite."
         else
           echo "is_release=true" >> "$GITHUB_OUTPUT"
-          echo "VERSION=${raw} is a clean semver — proceeding with publish."
+          echo "VERSION=${raw} is a clean semver and tag v${raw} is new — proceeding with publish."
         fi
 
     # ── Log in to GHCR ──────────────────────────────────────────────────────
@@ -267,8 +279,9 @@ jobs:
 
     # ── GitHub Release: create + upload assets ──────────────────────────────
     # `softprops/action-gh-release` creates the tag and release in one
-    # step. If the tag already exists the action fails with a clear
-    # error, preventing silent overwrites.
+    # step. Overwrite protection is provided by the tag-existence check
+    # in the `Read VERSION` step above; by the time this step runs the
+    # tag is guaranteed not to exist yet.
     - name: Create GitHub Release
       if: steps.version.outputs.is_release == 'true'
       uses: softprops/action-gh-release@v2
