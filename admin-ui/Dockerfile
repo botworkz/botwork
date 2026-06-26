@@ -101,8 +101,10 @@ RUN rustup component add rustfmt clippy
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
 
 ARG GIT_SHA=""
+ARG BOTWORK_VERSION=""
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.source="https://github.com/botworkz/botwork"
+LABEL org.opencontainers.image.version="${BOTWORK_VERSION}"
 
 # Rust's precompiled std links libgcc_s.so.1 as NEEDED (stack unwinder),
 # and panic = "abort" doesn't drop it because std itself was built
