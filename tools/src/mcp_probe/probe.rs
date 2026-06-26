@@ -202,15 +202,31 @@ pub fn wait_for_tcp(port: u16, deadline: Instant) -> Result<(), ProbeError> {
 /// carries `Mcp-Session-Id`; subsequent calls echo it back. We do
 /// not exercise the SSE / multi-response side of Streamable-HTTP
 /// because the four init-time calls are request/response shaped.
+///
+/// Protocol-version header rule (MCP 2025-06-18 spec, mirroring
+/// the upstream rmcp client implementation):
+/// - `initialize` — do NOT send `MCP-Protocol-Version`; the body's
+///   `params.protocolVersion` carries the client's requested version
+///   and the server uses it to negotiate. There is no agreed version
+///   yet at this point.
+/// - All subsequent requests (`notifications/initialized`,
+///   `tools/list`, etc.) — DO send `MCP-Protocol-Version` using the
+///   version the server returned in its `initialize` response (which
+///   may be lower than what the client requested if the server
+///   downgraded). See:
+///   <https://github.com/modelcontextprotocol/rust-sdk/blob/main/crates/rmcp/src/transport/streamable_http_client.rs>
 pub fn handshake(url: &str, deadline: Instant) -> Result<ProbeResult, ProbeError> {
     let client = Client::builder()
         .timeout(HTTP_CALL_TIMEOUT)
         .build()
         .map_err(|err| ProbeError::Io(err.to_string()))?;
 
+    // `initialize`: no MCP-Protocol-Version header — version is not
+    // yet negotiated. The requested version lives in the body only.
     let initialize_resp = call(
         &client,
         url,
+        None,
         None,
         json!({
             "jsonrpc": "2.0",
@@ -238,6 +254,9 @@ pub fn handshake(url: &str, deadline: Instant) -> Result<ProbeResult, ProbeError
         .get("capabilities")
         .cloned()
         .unwrap_or(JsonValue::Object(Default::default()));
+    // Use the version the server actually agreed to (it may have
+    // downgraded from our requested MCP_PROTOCOL_VERSION).  All
+    // calls after initialize echo this negotiated version back.
     let protocol_version = init_result
         .get("protocolVersion")
         .and_then(JsonValue::as_str)
@@ -251,6 +270,7 @@ pub fn handshake(url: &str, deadline: Instant) -> Result<ProbeResult, ProbeError
         &client,
         url,
         session_id.as_deref(),
+        Some(&protocol_version),
         json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
@@ -263,6 +283,7 @@ pub fn handshake(url: &str, deadline: Instant) -> Result<ProbeResult, ProbeError
         &client,
         url,
         session_id.as_deref(),
+        &protocol_version,
         "tools/list",
         "tools",
         2,
@@ -273,6 +294,7 @@ pub fn handshake(url: &str, deadline: Instant) -> Result<ProbeResult, ProbeError
             &client,
             url,
             session_id.as_deref(),
+            &protocol_version,
             "resources/list",
             "resources",
             3,
@@ -286,6 +308,7 @@ pub fn handshake(url: &str, deadline: Instant) -> Result<ProbeResult, ProbeError
             &client,
             url,
             session_id.as_deref(),
+            &protocol_version,
             "prompts/list",
             "prompts",
             4,
@@ -315,10 +338,19 @@ fn has_capability(capabilities: &JsonValue, feature: &str) -> bool {
 
 /// POST a JSON-RPC envelope to `url`, optionally with the
 /// `Mcp-Session-Id` header. Returns the parsed envelope.
+///
+/// `protocol_version` controls whether the `MCP-Protocol-Version`
+/// header is included:
+/// - `None` — omit the header (use for `initialize`, where no
+///   version has been negotiated yet).
+/// - `Some(v)` — send `MCP-Protocol-Version: v` (use for every
+///   call after `initialize`, with the version the server returned
+///   in its `initialize` response).
 fn call(
     client: &Client,
     url: &str,
     session_id: Option<&str>,
+    protocol_version: Option<&str>,
     body: JsonValue,
     deadline: Instant,
 ) -> Result<JsonValue, ProbeError> {
@@ -327,8 +359,10 @@ fn call(
         .post(url)
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
         .json(&body);
+    if let Some(version) = protocol_version {
+        req = req.header("MCP-Protocol-Version", version);
+    }
     if let Some(sid) = session_id {
         req = req.header("Mcp-Session-Id", sid);
     }
@@ -401,10 +435,12 @@ fn parse_sse_first_event(bytes: &[u8]) -> Result<JsonValue, ProbeError> {
 
 /// Call a list endpoint (`tools/list`, `resources/list`,
 /// `prompts/list`) and return the array under `result.<key>`.
+#[allow(clippy::too_many_arguments)]
 fn list(
     client: &Client,
     url: &str,
     session_id: Option<&str>,
+    protocol_version: &str,
     method: &str,
     result_key: &str,
     id: u64,
@@ -414,6 +450,7 @@ fn list(
         client,
         url,
         session_id,
+        Some(protocol_version),
         json!({
             "jsonrpc": "2.0",
             "id": id,

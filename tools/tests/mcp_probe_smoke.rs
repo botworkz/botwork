@@ -92,6 +92,9 @@ async fn handle_request(req: Request<Incoming>) -> Response<Full<Bytes>> {
             .expect("response");
     }
 
+    // Capture headers before consuming the body.
+    let headers = req.headers().clone();
+
     let bytes = req
         .into_body()
         .collect()
@@ -107,6 +110,22 @@ async fn handle_request(req: Request<Incoming>) -> Response<Full<Bytes>> {
             env.pointer("/params/clientInfo/version")
                 .and_then(JsonValue::as_str),
             Some(VERSION)
+        );
+        // The Streamable HTTP spec requires that initialize does NOT
+        // carry MCP-Protocol-Version — the version is not yet
+        // negotiated at this point.
+        assert!(
+            !headers.contains_key("mcp-protocol-version"),
+            "initialize must NOT carry MCP-Protocol-Version header per MCP spec"
+        );
+    } else if !method.is_empty() {
+        // Every post-initialize call must carry the negotiated version.
+        assert_eq!(
+            headers
+                .get("mcp-protocol-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("2025-06-18"),
+            "post-initialize call {method:?} must carry MCP-Protocol-Version: 2025-06-18"
         );
     }
 
