@@ -47,6 +47,7 @@ use serde_json::Value as JsonValue;
 use tracing::{error, warn};
 
 use crate::control_plane::ControlPlaneClient;
+use crate::secret_store::SecretStoreClient;
 use crate::{read, write};
 
 pub(crate) const PREFIX: &str = "[admin-api]";
@@ -59,10 +60,14 @@ pub(crate) const PREFIX: &str = "[admin-api]";
 /// * `control_plane` — HTTP client targeting control-plane on
 ///   `botwork-internal` for the live-state ack gate. See
 ///   [`crate::control_plane`] for the failure semantics.
+/// * `secret_store` — HTTP client targeting the secret-store
+///   backend on `botwork-internal`. See [`crate::secret_store`]
+///   for the failure semantics.
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<DatabaseConnection>,
     pub control_plane: ControlPlaneClient,
+    pub secret_store: SecretStoreClient,
 }
 
 /// Wire-shape for non-2xx responses.
@@ -308,6 +313,24 @@ pub(crate) fn operator(headers: &HeaderMap) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("anonymous")
         .to_string()
+}
+
+/// Tenant identity header injected by the ingress envoy's ext_authz
+/// overlay. admin-api trusts the value — the envoy filter is the
+/// gate; this crate reads it and uses it as the secret's scope.
+///
+/// Returns `ApiError::bad_request` if the header is absent or
+/// empty, which means the request arrived without going through
+/// ext_authz (a misconfiguration in the deployment).
+pub(crate) const TENANT_HEADER: &str = "x-botwork-tenant";
+
+pub(crate) fn tenant_header(headers: &HeaderMap) -> Result<String, ApiError> {
+    headers
+        .get(TENANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| ApiError::bad_request("missing x-botwork-tenant header"))
 }
 
 // ── JSON body parse helper with envelope-shaped errors ─────────────

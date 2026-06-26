@@ -11,24 +11,39 @@ entities and extracts the per-entry validators into a shared
 `botwork-admin-core` crate. The write endpoints (POST/PUT/DELETE,
 delete-guards, xDS coupling) land in PR3.
 
-## What ships post-PR2
+## What ships post-PR3
 
 ```text
 GET /admin/api/v1/health                            -> { status, db }
 
 GET /admin/api/v1/tenants                           -> { items: [...], total }
+POST /admin/api/v1/tenants                          -> 201 Tenant + Location
 GET /admin/api/v1/tenants/{id}                      -> Tenant
+PUT /admin/api/v1/tenants/{id}                      -> 200 Tenant
+DELETE /admin/api/v1/tenants/{id}                   -> 204 / 409
 
 GET /admin/api/v1/workspaces                        -> { items: [...], total }
     ?tenant_id=<uuid>                                  (optional filter)
 GET /admin/api/v1/workspaces/{id}                   -> Workspace
+POST /admin/api/v1/workspaces                       -> 201 Workspace + Location
+PUT /admin/api/v1/workspaces/{id}                   -> 200 Workspace
+DELETE /admin/api/v1/workspaces/{id}                -> 204
 
 GET /admin/api/v1/plugins                           -> { items: [...], total }
 GET /admin/api/v1/plugins/{id}                      -> Plugin
+POST /admin/api/v1/plugins                          -> 201 Plugin + Location
+PUT /admin/api/v1/plugins/{id}                      -> 200 Plugin
+DELETE /admin/api/v1/plugins/{id}                   -> 204 / 409
 
 GET /admin/api/v1/workspace_plugins                 -> { items: [...], total }
     ?workspace_id=<uuid>&plugin_id=<uuid>              (optional filters)
 GET /admin/api/v1/workspace_plugins/{wid}/{pid}     -> WorkspacePlugin
+POST /admin/api/v1/workspace_plugins                -> 201 WorkspacePlugin
+PUT /admin/api/v1/workspace_plugins/{wid}/{pid}     -> 200 WorkspacePlugin
+DELETE /admin/api/v1/workspace_plugins/{wid}/{pid}  -> 204
+
+POST /admin/api/v1/secrets                          -> 201 { stored, created } + Location
+DELETE /admin/api/v1/secrets/{service}/{name}       -> 204 / 404
 ```
 
 Plus the unchanged infrastructure from PR1:
@@ -86,6 +101,42 @@ extending ext_authz to recognise an admin scope on `/admin/api/*`
   `envoy.filters.http.ext_authz` seam. admin-api itself stays
   credless and reads `x-botwork-tenant` (and, when the overlay adds
   it, `x-botwork-role`) verbatim from the request.
+* Secrets endpoints follow the same posture as the rest:
+  `x-botwork-tenant` is set by envoy ext_authz and trusted as the
+  secret's scope; admin-api does no further authz. The tenant is
+  read from the header, **never** from the URL path — this is by
+  design and matches the rest of admin-api.
+
+## Secret store coupling
+
+The secrets write endpoints (`POST /admin/api/v1/secrets`,
+`DELETE /admin/api/v1/secrets/{service}/{name}`) do not store
+secrets in postgres. They forward to a dedicated `secret_store`
+backend service over the `botwork-internal` docker network.
+
+The backend is not part of `botwork` — composition is provided by
+deployment (see `botworkz/space`). From admin-api's perspective the
+backend is anonymous: it could be a cocoon-vault adapter, an HSM
+proxy, or a test stub. The wire contract is a small, stable HTTP
+seam:
+
+* `POST   /secrets` — body `{ tenant, service, name, kind, value_b64, ... }`
+* `DELETE /secrets/{service}/{name}?tenant={tenant}` — tenant as
+  query param, never in the path
+
+**Failure semantics:**
+
+* `BOTWORK_ADMIN_API_DISABLE_SECRET_STORE=1` (break-glass) —
+  admin-api returns 503 immediately with a message that names the
+  flag. No request reaches the backend.
+* Transport failure / backend 5xx — admin-api returns 503
+  `unavailable` with "secret-store unavailable" in the message. The
+  secret was NOT stored.
+* Backend 409 — propagated as 409 `already_exists` (use
+  `overwrite: true` to replace).
+* Backend 404 on delete — propagated as 404 `not_found`.
+* Backend 400 — propagated as 400 `bad_request` (bad base64, unknown
+  kind, etc. — the backend is the authority on what is well-formed).
 
 ## Production invocation pattern
 
@@ -114,6 +165,15 @@ This is what the `botwork-admin-api.service` systemd unit (lives in
   alias, and its port is **never** published to the host. The docker
   network is the trust boundary, not the bind address. **Do not** add
   a port publish for this service.
+- `BOTWORK_CONTROL_PLANE_ENDPOINT` (default: `http://control_plane:9300`) —
+  live-state ack target. Break-glass:
+  `BOTWORK_ADMIN_API_DISABLE_LIVE_GATE=1` bypasses control-plane
+  coupling. Not for production use.
+- `BOTWORK_SECRET_STORE_ENDPOINT` (default: `http://secret_store:9500`) —
+  secret-store backend endpoint. See "Secret store coupling" below.
+- `BOTWORK_ADMIN_API_DISABLE_SECRET_STORE` (default unset) — break-glass;
+  all secret writes return 503 immediately with a clear message. Not
+  for production use.
 - `RUST_LOG` — standard `tracing-subscriber` filter; defaults to
   `info`.
 

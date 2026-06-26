@@ -39,6 +39,9 @@
 //!   (live sessions for the triple terminated through control-plane)
 //! DELETE /admin/api/v1/workspace_plugins/{wid}/{pid}     -> 204
 //!   (live sessions for the triple terminated through control-plane)
+//!
+//! POST   /admin/api/v1/secrets                           -> 201 { stored, created } + Location
+//! DELETE /admin/api/v1/secrets/{service}/{name}          -> 204 / 404
 //! ```
 //!
 //! # Response shapes
@@ -57,7 +60,8 @@
 //!   `validation_failed` (422), `has_dependents` / `stale_write` /
 //!   `already_exists` (409), `unavailable` (503), `internal` (500).
 //!   `has_dependents` adds a `dependents` array describing each
-//!   blocker.
+//!   blocker. `unavailable` (503) covers both control-plane backend
+//!   failures and secret-store backend failures.
 //!
 //! # Optimistic locking
 //!
@@ -104,6 +108,10 @@
 //!   adds it, `x-botwork-role`) verbatim from the request. The
 //!   `x-botwork-admin` header is recorded in audit events.
 //!
+//! * Secrets endpoints follow the same posture as the rest:
+//!   `x-botwork-tenant` is set by envoy ext_authz and trusted as the
+//!   secret's scope; admin-api does no further authz.
+
 //! # Env contract
 //!
 //! * `BOTWORK_DATABASE_URL` (required) — postgres URL.
@@ -114,13 +122,19 @@
 //! * `BOTWORK_ADMIN_API_DISABLE_LIVE_GATE` (default unset) —
 //!   break-glass; bypasses control-plane coupling. Not for
 //!   production use.
+//! * `BOTWORK_SECRET_STORE_ENDPOINT` (default
+//!   `http://secret_store:9500`) — secret-store backend endpoint.
+//! * `BOTWORK_ADMIN_API_DISABLE_SECRET_STORE` (default unset) —
+//!   break-glass; all secret writes return 503 immediately.
 //! * `RUST_LOG` — standard `tracing-subscriber` filter; defaults to
 //!   `info`.
 
 pub mod control_plane;
 pub mod handler;
 pub mod read;
+pub mod secret_store;
 pub mod write;
 
 pub use control_plane::ControlPlaneClient;
 pub use handler::{build_router, AppState};
+pub use secret_store::SecretStoreClient;

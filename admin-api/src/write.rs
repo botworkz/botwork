@@ -66,7 +66,10 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::control_plane::{outcome_summary, terminate_live_sessions, GateError};
-use crate::handler::{bad_request, operator, parse_body, ApiError, ApiErrorExt, AppState, PREFIX};
+use crate::handler::{
+    bad_request, operator, parse_body, tenant_header, ApiError, ApiErrorExt, AppState, PREFIX,
+};
+use crate::secret_store::{PutSecretRequest, SecretStoreError};
 
 // ── shared name regex ──────────────────────────────────────────────
 
@@ -154,6 +157,12 @@ pub fn router() -> Router<AppState> {
         .route(
             "/admin/api/v1/workspace_plugins/:workspace_id/:plugin_id",
             delete(delete_workspace_plugin),
+        )
+        // secrets
+        .route("/admin/api/v1/secrets", post(create_secret))
+        .route(
+            "/admin/api/v1/secrets/:service/:name",
+            delete(delete_secret),
         )
 }
 
@@ -1077,6 +1086,132 @@ async fn delete_workspace_plugin(
             sum = outcome_summary(&live_outcome),
         ),
     );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── secrets ─────────────────────────────────────────────────────────
+//
+// No optimistic locking on secrets in this PR. The secret-store
+// contract doesn't currently expose an `updated_at` token; adding the
+// lock token can wait until the backend supports it.
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretCreate {
+    service: String,
+    name: String,
+    kind: String,
+    value_b64: String,
+    #[serde(default)]
+    allowed_consumers: Vec<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+async fn create_secret(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(raw_body): Json<JsonValue>,
+) -> Result<impl IntoResponse, ApiError> {
+    let body: SecretCreate = parse_body(raw_body)?;
+    let tenant = tenant_header(&headers)?;
+    let service = require_name("service", &body.service)?;
+    let name = require_name("name", &body.name)?;
+    // kind and value_b64 are opaque to admin-api — the backend is the
+    // authority on what kinds it accepts and whether the base64 decodes.
+    let op = operator(&headers);
+
+    let req = PutSecretRequest {
+        tenant: tenant.clone(),
+        service: service.clone(),
+        name: name.clone(),
+        kind: body.kind.clone(),
+        value_b64: body.value_b64.clone(),
+        allowed_consumers: body.allowed_consumers.clone(),
+        tags: body.tags.clone(),
+        overwrite: body.overwrite,
+    };
+
+    let resp = state
+        .secret_store
+        .put_secret(req)
+        .await
+        .map_err(|err| match err {
+            SecretStoreError::Disabled => ApiError::unavailable(
+                "secret-store is disabled (break-glass); secret was NOT stored",
+            ),
+            SecretStoreError::Unavailable(msg) => ApiError::unavailable(format!(
+                "secret-store unavailable: {msg}; secret was NOT stored"
+            )),
+            SecretStoreError::AlreadyExists(msg) => ApiError::already_exists(msg),
+            SecretStoreError::BadRequest(msg) => ApiError::bad_request(msg),
+            SecretStoreError::NotFound(msg) => ApiError::Internal {
+                detail: format!("unexpected NotFound from secret-store on POST: {msg}"),
+            },
+        })?;
+
+    audit_event(
+        &op,
+        "create",
+        "secret",
+        format!("{service}/{name}"),
+        &format!(
+            "tenant={tenant:?} kind={kind:?} created={created} overwrite={overwrite}",
+            kind = body.kind,
+            created = resp.created,
+            overwrite = body.overwrite,
+        ),
+    );
+
+    let mut response = (StatusCode::CREATED, Json(resp)).into_response();
+    response.headers_mut().insert(
+        LOCATION,
+        HeaderValue::from_str(&format!("/admin/api/v1/secrets/{service}/{name}"))
+            .expect("service and name are ascii-safe after require_name"),
+    );
+    Ok(response)
+}
+
+async fn delete_secret(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((service, name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant = tenant_header(&headers)?;
+    let service = require_name("service", &service)?;
+    let name = require_name("name", &name)?;
+    let op = operator(&headers);
+
+    state
+        .secret_store
+        .delete_secret(&tenant, &service, &name)
+        .await
+        .map_err(|err| match err {
+            SecretStoreError::Disabled => ApiError::unavailable(
+                "secret-store is disabled (break-glass); secret was NOT deleted",
+            ),
+            SecretStoreError::Unavailable(msg) => ApiError::unavailable(format!(
+                "secret-store unavailable: {msg}; secret was NOT deleted"
+            )),
+            SecretStoreError::NotFound(_) => {
+                ApiError::not_found("secret", format!("{service}/{name}"))
+            }
+            SecretStoreError::BadRequest(msg) => ApiError::bad_request(msg),
+            SecretStoreError::AlreadyExists(msg) => ApiError::Internal {
+                detail: format!("unexpected AlreadyExists from secret-store on DELETE: {msg}"),
+            },
+        })?;
+
+    audit_event(
+        &op,
+        "delete",
+        "secret",
+        format!("{service}/{name}"),
+        &format!("tenant={tenant:?}"),
+    );
+
     Ok(StatusCode::NO_CONTENT)
 }
 
