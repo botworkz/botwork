@@ -287,7 +287,7 @@ impl SecretStoreClient {
 
 // ── wire types ─────────────────────────────────────────────────────
 
-/// Request body for `PUT /secrets` on the backend.
+/// Request body for `POST /secrets` on the backend.
 #[derive(Debug, Serialize)]
 pub struct PutSecretRequest {
     pub tenant: String,
