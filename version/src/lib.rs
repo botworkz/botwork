@@ -39,8 +39,8 @@ fn format_full(version: &str, git_sha: &str) -> String {
     if git_sha.is_empty() {
         version.to_string()
     } else {
-        let short_len = git_sha.len().min(7);
-        format!("{version} (sha {})", &git_sha[..short_len])
+        let short_sha: String = git_sha.chars().take(7).collect();
+        format!("{version} (sha {short_sha})")
     }
 }
 
