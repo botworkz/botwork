@@ -18,6 +18,7 @@ axum = "0.7"
 # (validate_one for plugin POST/PUT, ValidationError -> ApiError).
 botwork-admin-core = { path = "../admin-core" }
 botwork-entity = { path = "../db/entity" }
+botwork-version = { path = "../version" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 regex = "1"
 # Live-state coupling against control-plane (RFE #106 PR3). reqwest

@@ -1,11 +1,22 @@
+use std::io::Write;
+
 use thiserror::Error;
 
 use crate::{bootstrap, mcp_probe, ps};
 
 pub fn dispatch(args: Vec<String>) -> Result<i32, CliError> {
+    dispatch_with_writer(args, std::io::stdout())
+}
+
+fn dispatch_with_writer<W: Write>(args: Vec<String>, mut writer: W) -> Result<i32, CliError> {
     match args.get(1).map(String::as_str) {
         None | Some("-h") | Some("--help") => {
             print_usage();
+            Ok(0)
+        }
+        Some("version") | Some("--version") | Some("-V") => {
+            writeln!(writer, "botwork-tools {}", botwork_version::full())
+                .expect("failed to write version output");
             Ok(0)
         }
         Some("ps") => {
@@ -65,6 +76,7 @@ fn print_usage() {
     println!("Usage: botwork-tools <SUBCOMMAND>");
     println!();
     println!("Available subcommands:");
+    println!("  version    Print the botwork-tools build version");
     println!("  ps         List running botwork sessions");
     println!("  bootstrap  Apply a bootstrap.yaml through admin-api");
     println!("  mcp-probe  Probe an MCP image and generate / verify / describe its labels");
@@ -74,7 +86,7 @@ fn print_usage() {
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through admin-api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
+    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botwork-tools build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through admin-api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
     UnknownSubcommand(String),
     #[error(transparent)]
     Ps(#[from] ps::PsError),
@@ -85,6 +97,25 @@ impl CliError {
         match self {
             Self::UnknownSubcommand(_) => 2,
             Self::Ps(err) => err.exit_code(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_with_writer;
+
+    #[test]
+    fn version_queries_print_the_shared_version() {
+        for flag in ["version", "--version", "-V"] {
+            let mut output = Vec::new();
+            let args = vec!["botwork-tools".to_string(), flag.to_string()];
+            let code = dispatch_with_writer(args, &mut output).expect("dispatch ok");
+            assert_eq!(code, 0);
+            assert_eq!(
+                String::from_utf8(output).expect("utf8"),
+                format!("botwork-tools {}\n", botwork_version::full())
+            );
         }
     }
 }

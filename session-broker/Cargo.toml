@@ -19,6 +19,7 @@ base64 = "0.22"
 # new write-through warnings via the structured filter rather than the
 # bespoke log_info path.
 botwork-entity = { path = "../db/entity" }
+botwork-version = { path = "../version" }
 chrono = { version = "0.4", features = ["clock"] }
 envoy-proto = { git = "https://github.com/phlax/envoy-proto-rs", tag = "v0.0.1" }
 http-body-util = "0.1"

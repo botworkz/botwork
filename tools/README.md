@@ -9,6 +9,8 @@ botwork-tools <SUBCOMMAND>
 ```
 
 Currently implemented subcommands:
+- `version` - print the shared botwork release version baked into the
+  binary.
 - `ps` - list running `mcp_session_*` containers with bound agent,
   plugin, and age. Reads session metadata from session-broker's
   admin `GET /sessions` endpoint
