@@ -36,7 +36,8 @@ const BIN_NAME: &str = "botwork-migration";
 fn handle_version_flag(args: &[String], mut writer: impl Write) -> Option<i32> {
     match args.get(1).map(String::as_str) {
         Some("--version") | Some("-V") => {
-            writeln!(writer, "{BIN_NAME} {}", botwork_version::full()).expect("write version");
+            writeln!(writer, "{BIN_NAME} {}", botwork_version::full())
+                .expect("failed to write version output");
             Some(0)
         }
         _ => None,

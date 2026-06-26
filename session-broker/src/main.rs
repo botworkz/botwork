@@ -6,7 +6,7 @@ fn handle_version_flag(args: &[String], mut writer: impl Write) -> Option<i32> {
     match args.get(1).map(String::as_str) {
         Some("--version") | Some("-V") => {
             writeln!(writer, "botwork-session-broker {}", botwork_version::full())
-                .expect("write version");
+                .expect("failed to write version output");
             Some(0)
         }
         _ => None,

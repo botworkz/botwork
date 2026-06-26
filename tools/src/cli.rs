@@ -15,7 +15,8 @@ fn dispatch_with_writer<W: Write>(args: Vec<String>, mut writer: W) -> Result<i3
             Ok(0)
         }
         Some("version") | Some("--version") | Some("-V") => {
-            writeln!(writer, "botwork-tools {}", botwork_version::full()).expect("write version");
+            writeln!(writer, "botwork-tools {}", botwork_version::full())
+                .expect("failed to write version output");
             Ok(0)
         }
         Some("ps") => {

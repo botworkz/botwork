@@ -32,11 +32,15 @@ pub const GIT_SHA: &str = match option_env!("BOTWORK_GIT_SHA") {
 /// `"<VERSION> (sha <short>)"` where `<short>` is the first 7 chars
 /// of GIT_SHA (or the whole thing if shorter).
 pub fn full() -> String {
-    if GIT_SHA.is_empty() {
-        VERSION.to_string()
+    format_full(VERSION, GIT_SHA)
+}
+
+fn format_full(version: &str, git_sha: &str) -> String {
+    if git_sha.is_empty() {
+        version.to_string()
     } else {
-        let short_len = GIT_SHA.len().min(7);
-        format!("{VERSION} (sha {})", &GIT_SHA[..short_len])
+        let short_len = git_sha.len().min(7);
+        format!("{version} (sha {})", &git_sha[..short_len])
     }
 }
 
@@ -63,8 +67,9 @@ mod tests {
 
     #[test]
     fn full_with_git_sha_uses_short_form() {
-        let short_len = "abcdef0123".len().min(7);
-        let formatted = format!("{VERSION} (sha {})", &"abcdef0123"[..short_len]);
-        assert_eq!(formatted, format!("{VERSION} (sha abcdef0)"));
+        assert_eq!(
+            format_full(VERSION, "abcdef0123"),
+            format!("{VERSION} (sha abcdef0)")
+        );
     }
 }
