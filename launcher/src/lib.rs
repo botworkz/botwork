@@ -30,10 +30,16 @@ pub use config::PREFIX;
 pub use server::AppState;
 pub use validate::Validators;
 
+pub const VERSION: &str = include_str!("../../VERSION").trim_ascii();
+
+pub fn version_string() -> String {
+    botwork_version::format_full(VERSION, botwork_version::GIT_SHA)
+}
+
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run() -> Result<(), String> {
-    eprintln!("{PREFIX} botwork-launcher {}", botwork_version::full());
+    eprintln!("{PREFIX} botwork-launcher {}", version_string());
     let config = Config::from_env()?;
     let validators = Validators::new(&config.image_allowlist_regex)
         .map_err(|err| format!("invalid BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX: {err}"))?;

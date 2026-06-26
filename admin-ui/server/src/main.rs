@@ -18,11 +18,16 @@ use tracing_subscriber::EnvFilter;
 
 const PREFIX: &str = "[admin-ui]";
 const BIN_NAME: &str = "botwork-admin-ui-server";
+const VERSION: &str = include_str!("../../../VERSION").trim_ascii();
+
+fn version_string() -> String {
+    botwork_version::format_full(VERSION, botwork_version::GIT_SHA)
+}
 
 fn handle_version_flag(args: &[String], mut writer: impl Write) -> Option<i32> {
     match args.get(1).map(String::as_str) {
         Some("--version") | Some("-V") => {
-            writeln!(writer, "{BIN_NAME} {}", botwork_version::full())
+            writeln!(writer, "{BIN_NAME} {}", version_string())
                 .expect("failed to write version output");
             Some(0)
         }
@@ -56,7 +61,7 @@ async fn main() -> ExitCode {
         .with_env_filter(filter)
         .with_target(false)
         .init();
-    info!("{PREFIX} {BIN_NAME} {}", botwork_version::full());
+    info!("{PREFIX} {BIN_NAME} {}", version_string());
 
     let bind = bind_from_env();
     let app = build_router();
@@ -83,7 +88,7 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_version_flag, BIN_NAME};
+    use super::{handle_version_flag, version_string, BIN_NAME};
 
     #[test]
     fn version_flags_print_the_shared_version() {
@@ -93,7 +98,7 @@ mod tests {
             assert_eq!(handle_version_flag(&args, &mut output), Some(0));
             assert_eq!(
                 String::from_utf8(output).expect("utf8"),
-                format!("{BIN_NAME} {}\n", botwork_version::full())
+                format!("{BIN_NAME} {}\n", version_string())
             );
         }
     }

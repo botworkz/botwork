@@ -1,55 +1,60 @@
-//! Compile-time pin of the repo's VERSION file. Single source of truth
-//! for every binary's `--version` output, every startup log line, and
-//! every protocol `clientInfo.version` slot.
+//! Shared version-string formatter for the botwork ecosystem.
 //!
-//! The release version lives in /VERSION at the workspace root. This
-//! crate is the only consumer of that file via include_str!, so a stale
-//! per-crate Cargo.toml version (everything in the workspace ships as
-//! `version = "0.0.0"`) cannot drift from the release.
+//! This crate does NOT pin the release version itself. Each consumer
+//! supplies its own version string (typically via `include_str!` on
+//! the consumer's own `/VERSION` file at the workspace root). The
+//! crate provides:
 //!
-//! GIT_SHA is sourced from BOTWORK_GIT_SHA at compile time. It's empty
-//! in local-dev builds; CI populates it from $GITHUB_SHA via the
-//! container builds + release-binaries job. On a dev/pre-release
-//! VERSION (anything containing a `-`, e.g. `0.4.0-dev`) `full()`
-//! emits `<VERSION>+<short-sha>`; on a clean release it emits bare
-//! `<VERSION>`.
+//! * [`GIT_SHA`] — compile-time pin of `BOTWORK_GIT_SHA`. Common to
+//!   every consumer in the ecosystem because the env var name is the
+//!   shared contract CI sets on every build.
+//! * [`format_full`] — the canonical `<VERSION>[+<short-sha>]` formatter.
+//!
+//! ## Usage from a consumer's `main.rs`
+//!
+//! ```ignore
+//! const VERSION: &str = include_str!("../../VERSION").trim_ascii();
+//!
+//! fn version_string() -> String {
+//!     botwork_version::format_full(VERSION, botwork_version::GIT_SHA)
+//! }
+//! ```
+//!
+//! ## Formatter contract
+//!
+//! Dev/pre-release versions (anything containing a `-`, e.g.
+//! `0.4.0-dev`, `1.0.0-rc1`) get `+<short-sha>` appended when
+//! `GIT_SHA` is non-empty. Clean releases (e.g. `0.3.15`) and any
+//! version with an empty `GIT_SHA` return the bare version. The
+//! short sha is the first 7 characters of `GIT_SHA`.
+//!
+//! This matches the [semver build metadata](https://semver.org/#spec-item-10)
+//! shape, and the dev-vs-clean predicate is identical to the one
+//! `.github/workflows/ci.yml`'s publish gate uses (`*-*`).
 
-/// Raw contents of /VERSION at compile time. May contain a trailing
-/// newline; consumers should use [`VERSION`] (the trimmed form).
-const VERSION_RAW: &str = include_str!("../../VERSION");
-
-/// Release version (trimmed contents of /VERSION). E.g. "0.3.15" or
-/// "0.4.0-dev".
-pub const VERSION: &str = VERSION_RAW.trim_ascii();
-
-/// Git sha baked in at build time via BOTWORK_GIT_SHA. Empty in local
-/// builds where the env var is unset at compile time.
+/// Git sha baked in at build time via `BOTWORK_GIT_SHA`. Empty when
+/// the env var was unset at compile time (local-dev builds).
 pub const GIT_SHA: &str = match option_env!("BOTWORK_GIT_SHA") {
     Some(s) => s,
     None => "",
 };
 
-/// Canonical one-liner for `--version` output and startup log lines.
-/// On a dev/pre-release VERSION (contains `-`), returns
-/// `"<VERSION>+<short-sha>"` when GIT_SHA is non-empty. Otherwise
-/// returns bare `"<VERSION>"`.
-pub fn full() -> String {
-    format_full(VERSION, GIT_SHA)
-}
-
-fn format_full(version: &str, git_sha: &str) -> String {
+/// Canonical `<VERSION>[+<short-sha>]` formatter — see module docs.
+///
+/// `version` is the consumer-supplied release string (typically from
+/// `include_str!` on the consumer's `/VERSION`). `git_sha` is
+/// typically [`GIT_SHA`] but is parameterised so callers and tests
+/// can drive it explicitly.
+pub fn format_full(version: &str, git_sha: &str) -> String {
     let is_dev = version.contains('-');
     if is_dev && !git_sha.is_empty() {
         let short_sha: String = git_sha.chars().take(7).collect();
         format!("{version}+{short_sha}")
     } else {
-        // Clean release: NEVER append sha. The release VERSION is the
-        // identity; appending a sha would make the same VERSION render
-        // differently across rebuilds, which defeats the point.
-        //
-        // Local-dev (BOTWORK_GIT_SHA unset): also bare. We don't have a
-        // sha to append, and `0.4.0-dev` on a developer laptop is fine
-        // as-is.
+        // Clean release OR no sha: bare version. We never append a
+        // sha to a clean release — the release VERSION is the
+        // identity, and the same VERSION rendering differently
+        // across rebuilds defeats the point.
         version.to_string()
     }
 }
@@ -59,39 +64,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_is_trimmed_and_non_empty() {
-        assert!(!VERSION.is_empty(), "VERSION must not be empty");
-        assert_eq!(VERSION, VERSION.trim(), "VERSION must be trimmed");
-        assert!(
-            !VERSION.contains('\n'),
-            "VERSION must not contain a newline"
+    fn dev_with_sha_appends_short_sha() {
+        assert_eq!(format_full("0.4.0-dev", "abcdef0123"), "0.4.0-dev+abcdef0");
+        assert_eq!(
+            format_full("1.0.0-rc1", "1234567abcdef"),
+            "1.0.0-rc1+1234567"
         );
     }
 
     #[test]
-    fn full_without_git_sha_is_just_version() {
-        if GIT_SHA.is_empty() {
-            assert_eq!(full(), VERSION);
-        }
+    fn clean_release_never_appends_sha() {
+        assert_eq!(format_full("0.3.15", "abcdef0123"), "0.3.15");
+        assert_eq!(format_full("1.0.0", "deadbeef"), "1.0.0");
     }
 
     #[test]
-    fn full_with_git_sha_uses_short_form() {
-        assert_eq!(format_full("0.4.0-dev", "abcdef0123"), "0.4.0-dev+abcdef0");
-        assert_eq!(format_full("0.3.15", "abcdef0123"), "0.3.15");
+    fn dev_without_sha_is_bare() {
         assert_eq!(format_full("0.4.0-dev", ""), "0.4.0-dev");
+    }
+
+    #[test]
+    fn clean_release_without_sha_is_bare() {
         assert_eq!(format_full("0.3.15", ""), "0.3.15");
+    }
+
+    #[test]
+    fn short_sha_uses_all_of_it_when_under_seven_chars() {
         assert_eq!(format_full("0.4.0-dev", "abc"), "0.4.0-dev+abc");
     }
 
     #[test]
-    fn dev_version_predicate_uses_hyphen() {
-        // Pin the same predicate the ci.yml publish gate uses:
-        // pre-release/dev versions contain a hyphen.
-        assert!("0.4.0-dev".contains('-'));
-        assert!("0.4.0-rc1".contains('-'));
-        assert!("0.4.0-beta2".contains('-'));
-        assert!(!"0.4.0".contains('-'));
-        assert!(!"0.3.15".contains('-'));
+    fn dev_predicate_matches_publish_gate() {
+        // Pin against ci.yml's `[[ "${raw}" == *-* ]]` predicate.
+        // The crate's dev detection is `version.contains('-')`; same
+        // semantics, both must stay in lockstep.
+        for dev in ["0.4.0-dev", "0.4.0-rc1", "0.4.0-beta2", "1.0.0-alpha.1"] {
+            assert_eq!(
+                format_full(dev, "abcdef0"),
+                format!("{dev}+abcdef0"),
+                "dev predicate failed for {dev}"
+            );
+        }
+        for clean in ["0.4.0", "1.2.3", "10.20.30"] {
+            assert_eq!(
+                format_full(clean, "abcdef0"),
+                clean.to_string(),
+                "clean-release predicate failed for {clean}"
+            );
+        }
     }
 }
