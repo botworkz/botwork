@@ -69,6 +69,9 @@ COPY launcher/ ./launcher/
 COPY tools/ ./tools/
 COPY Cargo.toml Cargo.lock ./
 
+ARG BOTWORK_GIT_SHA=""
+ENV BOTWORK_GIT_SHA=${BOTWORK_GIT_SHA}
+
 # Build the WASM bundle. trunk writes into admin-ui/wasm/dist/, which
 # is the path `include_dir!` resolves at the server cargo build below.
 # Then build the server binary; it embeds admin-ui/wasm/dist/ as a side
