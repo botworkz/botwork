@@ -221,7 +221,7 @@ pub fn handshake(url: &str, deadline: Instant) -> Result<ProbeResult, ProbeError
                 "capabilities": {},
                 "clientInfo": {
                     "name": "botwork-tools-mcp-probe",
-                    "version": botwork_version::VERSION,
+                    "version": crate::VERSION,
                 }
             }
         }),

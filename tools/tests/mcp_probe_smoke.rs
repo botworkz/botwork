@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 use botwork_admin_core::package::{Isolation, PackageFileEntry, SpillEntry, SpillMode};
 use botwork_tools::mcp_probe::compose::compose;
 use botwork_tools::mcp_probe::probe::handshake;
-use botwork_version::VERSION;
+use botwork_tools::VERSION;
 
 /// Spin a fake MCP server on a random local port. Returns the URL
 /// the probe should hit + the JoinHandle (kept alive for the test
