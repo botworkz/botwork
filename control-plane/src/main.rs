@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,17 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const PREFIX: &str = "[control-plane]";
+const BIN_NAME: &str = "botwork-control-plane";
+
+fn handle_version_flag(args: &[String], mut writer: impl Write) -> Option<i32> {
+    match args.get(1).map(String::as_str) {
+        Some("--version") | Some("-V") => {
+            writeln!(writer, "{BIN_NAME} {}", botwork_version::full()).expect("write version");
+            Some(0)
+        }
+        _ => None,
+    }
+}
 
 fn http_bind_from_env() -> String {
     // SECURITY: control-plane v0 has no caller authentication. The trust
@@ -103,11 +115,17 @@ fn recovery_disabled_from_env() -> bool {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = handle_version_flag(&args, std::io::stdout()) {
+        std::process::exit(code);
+    }
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .init();
+    info!("{PREFIX} {BIN_NAME} {}", botwork_version::full());
 
     // Build the store first; recovery seeds INTO it before the HTTP
     // and xDS servers start accepting requests. AppState holds the
@@ -241,4 +259,22 @@ async fn main() {
     // leak.
     drop(db);
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_version_flag, BIN_NAME};
+
+    #[test]
+    fn version_flags_print_the_shared_version() {
+        for flag in ["--version", "-V"] {
+            let mut output = Vec::new();
+            let args = vec![BIN_NAME.to_string(), flag.to_string()];
+            assert_eq!(handle_version_flag(&args, &mut output), Some(0));
+            assert_eq!(
+                String::from_utf8(output).expect("utf8"),
+                format!("{BIN_NAME} {}\n", botwork_version::full())
+            );
+        }
+    }
 }

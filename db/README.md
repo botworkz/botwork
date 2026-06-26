@@ -397,6 +397,8 @@ docker run --rm \
   botwork/db-migrate:local
 ```
 
+Version probe: `botwork-migration --version` (or `-V`).
+
 The container runs as the broker uid (1100), per the workspace
 convention, and exits as soon as `Migrator::up` returns. systemd
 `Type=oneshot` on the `botwork-db-migrate.service` unit picks up the

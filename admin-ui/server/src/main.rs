@@ -8,6 +8,7 @@
 //! There is no DB connection and no upstream — the server is a
 //! glorified static-file responder with one liveness probe.
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use botwork_admin_ui_server::build_router;
@@ -16,6 +17,17 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 const PREFIX: &str = "[admin-ui]";
+const BIN_NAME: &str = "botwork-admin-ui-server";
+
+fn handle_version_flag(args: &[String], mut writer: impl Write) -> Option<i32> {
+    match args.get(1).map(String::as_str) {
+        Some("--version") | Some("-V") => {
+            writeln!(writer, "{BIN_NAME} {}", botwork_version::full()).expect("write version");
+            Some(0)
+        }
+        _ => None,
+    }
+}
 
 fn bind_from_env() -> String {
     // SECURITY: admin-ui has no in-process authentication in v0.
@@ -33,11 +45,17 @@ fn bind_from_env() -> String {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = handle_version_flag(&args, std::io::stdout()) {
+        return ExitCode::from(code as u8);
+    }
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .init();
+    info!("{PREFIX} {BIN_NAME} {}", botwork_version::full());
 
     let bind = bind_from_env();
     let app = build_router();
@@ -60,4 +78,22 @@ async fn main() -> ExitCode {
         return ExitCode::from(5);
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_version_flag, BIN_NAME};
+
+    #[test]
+    fn version_flags_print_the_shared_version() {
+        for flag in ["--version", "-V"] {
+            let mut output = Vec::new();
+            let args = vec![BIN_NAME.to_string(), flag.to_string()];
+            assert_eq!(handle_version_flag(&args, &mut output), Some(0));
+            assert_eq!(
+                String::from_utf8(output).expect("utf8"),
+                format!("{BIN_NAME} {}\n", botwork_version::full())
+            );
+        }
+    }
 }

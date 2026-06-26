@@ -98,6 +98,8 @@ docker run --rm --name botwork-admin-api \
   botwork/admin-api:local
 ```
 
+Version probe: `botwork-admin-api --version` (or `-V`).
+
 This is what the `botwork-admin-api.service` systemd unit (lives in
 `botworkz/vm`) runs.
 

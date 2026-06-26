@@ -331,6 +331,7 @@ spawn fails with a 5xx so operators can fix vault state explicitly.
 
 ## Environment variables
 
+- Version probe: `botwork-session-broker --version` (or `-V`).
 - `BOTWORK_SESSION_BROKER_ADMIN_ADDR` (default `0.0.0.0:9002`).
 - `BOTWORK_SESSION_BROKER_GRPC_ADDR` (default `0.0.0.0:9001`).
 - `BOTWORK_LAUNCHER_SOCKET_PATH` (default `/run/botwork/launcher.sock`).

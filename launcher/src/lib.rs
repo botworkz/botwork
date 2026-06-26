@@ -33,6 +33,7 @@ pub use validate::Validators;
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run() -> Result<(), String> {
+    eprintln!("{PREFIX} botwork-launcher {}", botwork_version::full());
     let config = Config::from_env()?;
     let validators = Validators::new(&config.image_allowlist_regex)
         .map_err(|err| format!("invalid BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX: {err}"))?;

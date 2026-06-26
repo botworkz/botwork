@@ -41,6 +41,7 @@ use tokio::task::JoinHandle;
 use botwork_admin_core::package::{Isolation, PackageFileEntry, SpillEntry, SpillMode};
 use botwork_tools::mcp_probe::compose::compose;
 use botwork_tools::mcp_probe::probe::handshake;
+use botwork_version::VERSION;
 
 /// Spin a fake MCP server on a random local port. Returns the URL
 /// the probe should hit + the JoinHandle (kept alive for the test
@@ -100,6 +101,14 @@ async fn handle_request(req: Request<Incoming>) -> Response<Full<Bytes>> {
     let env: JsonValue = serde_json::from_slice(&bytes).unwrap_or(JsonValue::Null);
     let method = env.get("method").and_then(JsonValue::as_str).unwrap_or("");
     let id = env.get("id").cloned().unwrap_or(JsonValue::Null);
+
+    if method == "initialize" {
+        assert_eq!(
+            env.pointer("/params/clientInfo/version")
+                .and_then(JsonValue::as_str),
+            Some(VERSION)
+        );
+    }
 
     let body: JsonValue = match method {
         "initialize" => json!({

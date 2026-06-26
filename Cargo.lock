@@ -413,6 +413,7 @@ dependencies = [
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
+ "botwork-version",
  "chrono",
  "http",
  "regex",
@@ -449,6 +450,7 @@ name = "botwork-admin-ui-server"
 version = "0.0.0"
 dependencies = [
  "axum 0.7.9",
+ "botwork-version",
  "http",
  "include_dir",
  "mime_guess",
@@ -505,6 +507,7 @@ dependencies = [
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
+ "botwork-version",
  "chrono",
  "http",
  "http-body-util",
@@ -537,6 +540,7 @@ dependencies = [
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
+ "botwork-version",
  "chrono",
  "envoy-proto",
  "futures-core",
@@ -583,6 +587,7 @@ dependencies = [
 name = "botwork-launcher"
 version = "0.0.0"
 dependencies = [
+ "botwork-version",
  "bytes",
  "http-body-util",
  "hyper",
@@ -602,6 +607,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "botwork-entity",
+ "botwork-version",
  "sea-orm",
  "sea-orm-migration",
  "testcontainers",
@@ -620,6 +626,7 @@ dependencies = [
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
+ "botwork-version",
  "chrono",
  "envoy-proto",
  "http",
@@ -652,6 +659,7 @@ name = "botwork-tools"
 version = "0.0.0"
 dependencies = [
  "botwork-admin-core",
+ "botwork-version",
  "chrono",
  "http-body-util",
  "hyper",
@@ -667,6 +675,10 @@ dependencies = [
  "uuid",
  "wiremock",
 ]
+
+[[package]]
+name = "botwork-version"
+version = "0.0.0"
 
 [[package]]
 name = "bumpalo"

@@ -31,6 +31,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1"
 botwork-entity = { path = "../entity" }
+botwork-version = { path = "../../version" }
 sea-orm-migration = { version = "1.1.20", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",

@@ -13,6 +13,7 @@ members = [
     "launcher",
     "session-broker",
     "tools",
+    "version",
 ]
 
 # Default set for bare `cargo build` / `cargo test` (no `--workspace`).
@@ -33,6 +34,7 @@ default-members = [
     "launcher",
     "session-broker",
     "tools",
+    "version",
 ]
 
 # Workspace-wide lint policy. Inherited by every member crate via
