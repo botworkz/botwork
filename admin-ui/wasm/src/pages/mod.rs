@@ -8,6 +8,10 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use leptos_shadcn_alert::{Alert, AlertDescription, AlertVariant};
+use leptos_shadcn_card::{Card, CardContent, CardHeader, CardTitle};
+use leptos_shadcn_skeleton::Skeleton;
+use leptos_shadcn_table::Table;
 
 use crate::api;
 
@@ -44,10 +48,16 @@ pub fn AsyncView<T: Clone + Send + Sync + 'static, IV: IntoView + 'static>(
 ) -> impl IntoView {
     view! {
         {move || match state.get() {
-            Async::Loading => view! { <p class="loading">"Loading…"</p> }.into_any(),
+            Async::Loading => view! {
+                <div class="py-2">
+                    <Skeleton class="h-8 w-full" />
+                </div>
+            }.into_any(),
             Async::Loaded(v) => children(v).into_any(),
             Async::Failed(err) => view! {
-                <p class="error">"Error: " {err.message().to_string()}</p>
+                <Alert variant=AlertVariant::Destructive>
+                    <AlertDescription>{format!("Error: {}", err.message())}</AlertDescription>
+                </Alert>
             }.into_any(),
         }}
     }
@@ -63,10 +73,11 @@ pub fn AsyncView<T: Clone + Send + Sync + 'static, IV: IntoView + 'static>(
 pub fn render_dependents(deps: &serde_json::Value) -> AnyView {
     let arr = deps.as_array().cloned().unwrap_or_default();
     if arr.is_empty() {
-        return view! { <p class="muted">"(no dependent details returned)"</p> }.into_any();
+        return view! { <p class="text-sm text-muted-foreground">"(no dependent details returned)"</p> }
+            .into_any();
     }
     view! {
-        <ul class="dependents">
+        <ul class="space-y-2 rounded-md border border-border bg-muted/40 p-3 text-sm">
             {arr.into_iter().map(|item| {
                 let kind = item.get("kind").and_then(|v| v.as_str())
                     .unwrap_or("?").to_string();
@@ -75,10 +86,10 @@ pub fn render_dependents(deps: &serde_json::Value) -> AnyView {
                 let id = item.get("id").and_then(|v| v.as_str())
                     .unwrap_or("?").to_string();
                 view! {
-                    <li>
+                    <li class="flex flex-wrap gap-2">
                         <strong>{kind}</strong>
                         " " {name} " "
-                        <code class="muted">{id}</code>
+                        <code class="text-muted-foreground">{id}</code>
                     </li>
                 }
             }).collect_view()}
@@ -92,11 +103,11 @@ pub fn render_dependents(deps: &serde_json::Value) -> AnyView {
 #[component]
 pub fn NotFound() -> impl IntoView {
     view! {
-        <article class="page">
-            <h1>"Not found"</h1>
-            <p>"The page you requested does not exist."</p>
+        <article class="space-y-3">
+            <h1 class="text-2xl font-semibold tracking-tight">"Not found"</h1>
+            <p class="text-muted-foreground">"The page you requested does not exist."</p>
             <p>
-                <a href={crate::ui_path!("/")}>"Back to dashboard"</a>
+                <a class="text-primary hover:underline" href={crate::ui_path!("/")}>"Back to dashboard"</a>
             </p>
         </article>
     }
@@ -158,61 +169,44 @@ pub fn Dashboard() -> impl IntoView {
     });
 
     view! {
-        <article class="page">
-            <h1>"Dashboard"</h1>
-            <p class="lede">
+        <article class="space-y-6">
+            <h1 class="text-3xl font-semibold tracking-tight">"Dashboard"</h1>
+            <p class="text-muted-foreground">
                 "Operator-facing view of the botwork stack. \
                  Sidebar links each entity; this page rolls up \
                  the headline counts."
             </p>
 
-            <section class="counts">
-                <h2>"Entity counts"</h2>
-                <dl>
-                    <dt>"Tenants"</dt>
-                    <dd>
-                        <AsyncView
-                            state=tenants
-                            children=Box::new(|n| view! { <span>{n}</span> })
-                        />
-                    </dd>
-                    <dt>"Workspaces"</dt>
-                    <dd>
-                        <AsyncView
-                            state=workspaces
-                            children=Box::new(|n| view! { <span>{n}</span> })
-                        />
-                    </dd>
-                    <dt>"Plugins"</dt>
-                    <dd>
-                        <AsyncView
-                            state=plugins
-                            children=Box::new(|n| view! { <span>{n}</span> })
-                        />
-                    </dd>
-                    <dt>"Bindings"</dt>
-                    <dd>
-                        <AsyncView
-                            state=bindings
-                            children=Box::new(|n| view! { <span>{n}</span> })
-                        />
-                    </dd>
-                    <dt>"Sessions"</dt>
-                    <dd>
-                        <AsyncView
-                            state=sessions
-                            children=Box::new(|n| view! { <span>{n}</span> })
-                        />
-                    </dd>
-                    <dt>"Workers"</dt>
-                    <dd>
-                        <AsyncView
-                            state=workers
-                            children=Box::new(|n| view! { <span>{n}</span> })
-                        />
-                    </dd>
-                </dl>
-            </section>
+            <Card>
+                <CardHeader>
+                    <CardTitle>"Entity counts"</CardTitle>
+                </CardHeader>
+                <CardContent>
+                    <dl class="grid grid-cols-[1fr_auto] gap-y-3 text-sm">
+                        <dt class="text-muted-foreground">"Tenants"</dt>
+                        <dd><AsyncView state=tenants children=Box::new(|n| view! { <span>{n}</span> }) /></dd>
+                        <dt class="text-muted-foreground">"Workspaces"</dt>
+                        <dd><AsyncView state=workspaces children=Box::new(|n| view! { <span>{n}</span> }) /></dd>
+                        <dt class="text-muted-foreground">"Plugins"</dt>
+                        <dd><AsyncView state=plugins children=Box::new(|n| view! { <span>{n}</span> }) /></dd>
+                        <dt class="text-muted-foreground">"Bindings"</dt>
+                        <dd><AsyncView state=bindings children=Box::new(|n| view! { <span>{n}</span> }) /></dd>
+                        <dt class="text-muted-foreground">"Sessions"</dt>
+                        <dd><AsyncView state=sessions children=Box::new(|n| view! { <span>{n}</span> }) /></dd>
+                        <dt class="text-muted-foreground">"Workers"</dt>
+                        <dd><AsyncView state=workers children=Box::new(|n| view! { <span>{n}</span> }) /></dd>
+                    </dl>
+                </CardContent>
+            </Card>
         </article>
+    }
+}
+
+#[component]
+pub fn PageTable(children: Children) -> impl IntoView {
+    view! {
+        <Table class="overflow-x-auto">
+            <table class="w-full caption-bottom text-sm">{children()}</table>
+        </Table>
     }
 }

@@ -32,6 +32,7 @@
 # every transitive .deb on top adds churn without a real win.
 
 ARG BINARY_SOURCE=source
+ARG TAILWINDCSS_VERSION=3.4.17
 
 FROM rust:1.90-slim-bookworm AS rust-toolchain
 
@@ -40,15 +41,22 @@ FROM rust:1.90-slim-bookworm AS rust-toolchain
 # so cross-project upgrades are mechanical. `cargo install --locked`
 # uses the trunk crate's Cargo.lock for reproducibility.
 FROM rust-toolchain AS trunk-toolchain
+ARG TAILWINDCSS_VERSION
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         git \
         pkg-config \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add wasm32-unknown-unknown \
-    && cargo install trunk --version 0.21.5 --locked
+    && cargo install trunk --version 0.21.5 --locked \
+    && curl -fsSL \
+        "https://github.com/tailwindlabs/tailwindcss/releases/download/v${TAILWINDCSS_VERSION}/tailwindcss-linux-x64" \
+        -o /usr/local/bin/tailwindcss \
+    && chmod +x /usr/local/bin/tailwindcss \
+    && tailwindcss --help >/dev/null
 
 FROM trunk-toolchain AS build-source
 WORKDIR /build
