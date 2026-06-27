@@ -1,24 +1,28 @@
 //! HTTP handlers for the embedded ui bundle.
 //!
-//! v0 surface: `/healthz` and `/admin/*`. See `lib.rs` for the
-//! full route table + deploy posture.
+//! # Routes (Phase 2 reshape — botworkz/space#311)
 //!
-//! The bundle is pulled from `ui/wasm/dist/` at compile time
-//! via [`include_dir!`]. The path is workspace-relative *to this
-//! crate's manifest*, so the build flow is:
+//! * `GET /healthz` — liveness probe. Returns `{ "status": "ok" }`.
+//! * `GET /login` and `GET /login/` — serve the SPA shell from the
+//!   embedded `dist/index.html`. The SPA client-side router handles
+//!   the login page at this path.
+//! * `GET /static/*` — serve named assets from the embedded `dist/`
+//!   with the correct `Content-Type`. This prefix is exclusively for
+//!   static assets; the ingress envoy routes it here directly.
+//! * `GET /{tenant}` and `GET /{tenant}/` — serve the SPA shell.
+//!   The tenant name is a client-side router parameter; the server
+//!   does not validate it (envoy's ext_authz is the gate).
+//! * `GET /{tenant}/*` — deep links inside a tenant's SPA shell
+//!   fall back to `index.html` so a hard reload keeps working.
 //!
-//! 1. `trunk build --release` in `ui/wasm/` populates
-//!    `ui/wasm/dist/` with `index.html`, the wasm-bindgen JS
-//!    loader, and the `.wasm` blob.
-//! 2. `cargo build --release -p botwork-ui-server` inlines
-//!    that directory into the binary.
-//! 3. The runtime container has no filesystem dependency.
+//! `/admin/*` is **not** served here — that URL space is retired in
+//! Phase 2. The ingress envoy no longer routes it to this service.
 //!
-//! If `dist/` is missing or empty at compile time the build still
-//! succeeds (include_dir is silent about empty inputs), but the
-//! resulting binary serves only `/healthz` — every `/admin/*` path
-//! 404s. The integration test `tests/integration.rs` asserts that
-//! `index.html` is actually present so this failure mode is loud
+//! The bundle is pulled from `ui/wasm/dist/` at compile time via
+//! [`include_dir!`]. If `dist/` is missing or empty at compile time
+//! the build still succeeds but the resulting binary serves only
+//! `/healthz` — every SPA path 404s. The integration test asserts
+//! that `index.html` is actually present so this failure mode is loud
 //! in CI, not a runtime mystery.
 
 use axum::body::Body;
@@ -37,10 +41,7 @@ const PREFIX: &str = "[ui]";
 /// `ui/server/`; up one level and across into `wasm/dist/`.
 ///
 /// If this path doesn't exist at compile time the macro produces an
-/// empty `Dir`, and only `/healthz` will respond. The CI image build
-/// runs `trunk build --release` before `cargo build`, so the
-/// production binary always has a populated bundle. Local dev should
-/// use `trunk serve` (loopback :8080) rather than this server.
+/// empty `Dir`, and only `/healthz` will respond.
 static BUNDLE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../wasm/dist");
 
 #[derive(Debug, Serialize)]
@@ -52,22 +53,39 @@ async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, Json(HealthBody { status: "ok" }))
 }
 
-/// Serve `/admin/` and `/admin/index.html` from the embedded
-/// `dist/index.html`.
+/// Serve `index.html` for the login page and tenant SPA shells.
 async fn index() -> Response {
     serve_path("index.html")
 }
 
-/// Serve any other file from the embedded `dist/`.
+/// Serve named assets from the embedded `dist/` bundle.
+///
+/// Path comes in as the part after `/static/`. Falls back to
+/// `index.html` for unknown paths (for future static-routed SPA
+/// deep links, though in practice `/static/*` should only ever
+/// receive real asset requests).
+async fn static_asset(Path(rest): Path<String>) -> Response {
+    let trimmed = rest.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return serve_path("index.html");
+    }
+    if BUNDLE.get_file(trimmed).is_some() {
+        serve_path(trimmed)
+    } else {
+        debug!("{PREFIX} static fallback to index.html for {trimmed}");
+        serve_path("index.html")
+    }
+}
+
+/// Serve any file from the embedded `dist/` bundle for tenant-scoped
+/// deep links.
 ///
 /// Unknown paths fall back to `index.html` so a deep-linked
-/// client-side route reload (`/admin/tenants/abc` → browser
-/// requests `/admin/tenants/abc` from the server, server has no
-/// such file, returns the SPA shell, SPA router takes over) works
-/// without server-side knowledge of the route table.
-async fn asset(Path(rest): Path<String>) -> Response {
-    // Strip a leading slash so `BUNDLE.get_file("foo/bar")` (no
-    // leading slash) matches what trunk emits.
+/// client-side route reload (`/{tenant}/workspaces/abc` → browser
+/// requests that path from the server, server has no such file,
+/// returns the SPA shell, SPA router takes over) works without
+/// server-side knowledge of the route table.
+async fn tenant_asset(Path((_tenant, rest)): Path<(String, String)>) -> Response {
     let trimmed = rest.trim_start_matches('/');
     if trimmed.is_empty() {
         return serve_path("index.html");
@@ -81,10 +99,7 @@ async fn asset(Path(rest): Path<String>) -> Response {
 }
 
 /// Build a Response for a single embedded file. Returns 404 when
-/// the file isn't present in `dist/` — only used from `asset` for
-/// files the asset handler already verified, and from `index` for
-/// the well-known `index.html` (so a 404 here means trunk hasn't
-/// been run, and we want the loud failure).
+/// the file isn't present in `dist/`.
 fn serve_path(rel: &str) -> Response {
     let Some(file) = BUNDLE.get_file(rel) else {
         return (
@@ -97,8 +112,6 @@ fn serve_path(rel: &str) -> Response {
     let mut response = Response::new(Body::from(file.contents()));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        // mime is `&'static` in the common case but always parses
-        // back from its own string form.
         HeaderValue::from_str(mime.essence_str())
             .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
@@ -110,7 +123,14 @@ fn serve_path(rel: &str) -> Response {
 pub fn build_router() -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/admin/", get(index))
-        .route("/admin/index.html", get(index))
-        .route("/admin/*rest", get(asset))
+        // Login page — serves SPA shell; client-side router handles login UI.
+        .route("/login", get(index))
+        .route("/login/", get(index))
+        // Static assets under /static/*.
+        .route("/static/*rest", get(static_asset))
+        // Tenant SPA shell: /{tenant} and /{tenant}/ serve index.html.
+        // /{tenant}/* deep links also fall back to index.html via tenant_asset.
+        .route("/:tenant", get(index))
+        .route("/:tenant/", get(index))
+        .route("/:tenant/*rest", get(tenant_asset))
 }

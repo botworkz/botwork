@@ -21,6 +21,8 @@ use crate::ui_path;
 
 #[component]
 pub fn List() -> impl IntoView {
+    let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let query = use_query_map();
     // Seed `agent_session_id` filter from the URL so the sessions
     // detail page's "Workers for this session" link works as a
@@ -37,6 +39,7 @@ pub fn List() -> impl IntoView {
     });
 
     let refetch = move || {
+        let t = tenant();
         let live_val = match live_filter.get_untracked().as_str() {
             "true" => Some(true),
             "false" => Some(false),
@@ -46,10 +49,12 @@ pub fn List() -> impl IntoView {
         let agent_opt = if agent.is_empty() { None } else { Some(agent) };
         spawn_local(async move {
             let a = agent_opt.as_deref();
-            set_state.set(match api::list_session_workers(a, None, live_val).await {
-                Ok(r) => Async::Loaded(r),
-                Err(err) => Async::Failed(err),
-            });
+            set_state.set(
+                match api::list_session_workers(&t, a, None, live_val).await {
+                    Ok(r) => Async::Loaded(r),
+                    Err(err) => Async::Failed(err),
+                },
+            );
         });
     };
 
@@ -184,13 +189,14 @@ pub fn List() -> impl IntoView {
 #[component]
 pub fn Detail() -> impl IntoView {
     let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let id = move || params.read().get("id").unwrap_or_default();
     let (state, set_state) = signal::<Async<api::SessionWorker>>(Async::Loading);
 
     Effect::new(move |_| {
         let id_val = id();
         spawn_local(async move {
-            set_state.set(match api::get_session_worker(&id_val).await {
+            set_state.set(match api::get_session_worker(&tenant(), &id_val).await {
                 Ok(w) => Async::Loaded(w),
                 Err(err) => Async::Failed(err),
             });

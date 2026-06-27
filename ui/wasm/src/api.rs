@@ -58,8 +58,8 @@ pub const OPERATOR: &str = "ui";
 
 /// Base path the ui talks to. Same-origin by construction:
 /// the ui bundle is served from `/admin/` and the ingress
-/// envoy routes `/admin/api/*` to api.
-pub const API_BASE: &str = "/admin/api/v1";
+/// envoy routes `/api/*` to api (Phase 2 reshape — botworkz/space#311).
+pub const API_BASE: &str = "/api";
 
 /// Wire-shape for every list endpoint. `items` is serialised verbatim
 /// from the entity model; `total` is the row count after filtering
@@ -242,7 +242,6 @@ pub struct Workspace {
 
 #[derive(Debug, Serialize)]
 pub struct WorkspaceCreate {
-    pub tenant_id: String,
     pub name: String,
 }
 
@@ -253,24 +252,35 @@ pub struct WorkspaceUpdate {
 }
 
 /// List workspaces, optionally filtered by parent tenant.
-pub async fn list_workspaces(tenant_id: Option<&str>) -> Result<ListResponse<Workspace>, ApiError> {
-    let url = match tenant_id {
-        Some(tid) => format!("{API_BASE}/workspaces?tenant_id={tid}"),
-        None => format!("{API_BASE}/workspaces"),
-    };
+pub async fn list_workspaces(tenant: &str) -> Result<ListResponse<Workspace>, ApiError> {
+    let url = format!("{API_BASE}/tenant/{tenant}/workspaces");
     get_json(&url).await
 }
 
-pub async fn get_workspace(id: &str) -> Result<Workspace, ApiError> {
-    get_json(&format!("{API_BASE}/workspaces/{id}")).await
+pub async fn get_workspace(tenant: &str, id: &str) -> Result<Workspace, ApiError> {
+    get_json(&format!("{API_BASE}/tenant/{tenant}/workspaces/{id}")).await
 }
 
-pub async fn create_workspace(body: &WorkspaceCreate) -> Result<Workspace, ApiError> {
-    send_json("POST", &format!("{API_BASE}/workspaces"), Some(body)).await
+pub async fn create_workspace(tenant: &str, body: &WorkspaceCreate) -> Result<Workspace, ApiError> {
+    send_json(
+        "POST",
+        &format!("{API_BASE}/tenant/{tenant}/workspaces"),
+        Some(body),
+    )
+    .await
 }
 
-pub async fn update_workspace(id: &str, body: &WorkspaceUpdate) -> Result<Workspace, ApiError> {
-    send_json("PUT", &format!("{API_BASE}/workspaces/{id}"), Some(body)).await
+pub async fn update_workspace(
+    tenant: &str,
+    id: &str,
+    body: &WorkspaceUpdate,
+) -> Result<Workspace, ApiError> {
+    send_json(
+        "PUT",
+        &format!("{API_BASE}/tenant/{tenant}/workspaces/{id}"),
+        Some(body),
+    )
+    .await
 }
 
 /// Workspace delete CASCADEs to bindings + agent_sessions; if the
@@ -278,8 +288,8 @@ pub async fn update_workspace(id: &str, body: &WorkspaceUpdate) -> Result<Worksp
 /// terminates any live sessions before committing. Failure modes:
 /// `503 unavailable` (control-plane unreachable mid-cascade) — the
 /// DB is rolled back, UI should retry.
-pub async fn delete_workspace(id: &str) -> Result<(), ApiError> {
-    send_no_content(&format!("{API_BASE}/workspaces/{id}")).await
+pub async fn delete_workspace(tenant: &str, id: &str) -> Result<(), ApiError> {
+    send_no_content(&format!("{API_BASE}/tenant/{tenant}/workspaces/{id}")).await
 }
 
 // ── plugin ─────────────────────────────────────────────────────────
@@ -408,10 +418,11 @@ pub struct WorkspacePluginUpdate {
 
 /// List bindings, optionally filtered by workspace + plugin.
 pub async fn list_workspace_plugins(
+    tenant: &str,
     workspace_id: Option<&str>,
     plugin_id: Option<&str>,
 ) -> Result<ListResponse<WorkspacePlugin>, ApiError> {
-    let mut url = format!("{API_BASE}/workspace_plugins");
+    let mut url = format!("{API_BASE}/tenant/{tenant}/workspace_plugins");
     let mut sep = '?';
     if let Some(wid) = workspace_id {
         url.push(sep);
@@ -426,29 +437,37 @@ pub async fn list_workspace_plugins(
 }
 
 pub async fn get_workspace_plugin(
+    tenant: &str,
     workspace_id: &str,
     plugin_id: &str,
 ) -> Result<WorkspacePlugin, ApiError> {
     get_json(&format!(
-        "{API_BASE}/workspace_plugins/{workspace_id}/{plugin_id}"
+        "{API_BASE}/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}"
     ))
     .await
 }
 
 pub async fn create_workspace_plugin(
+    tenant: &str,
     body: &WorkspacePluginCreate,
 ) -> Result<WorkspacePlugin, ApiError> {
-    send_json("POST", &format!("{API_BASE}/workspace_plugins"), Some(body)).await
+    send_json(
+        "POST",
+        &format!("{API_BASE}/tenant/{tenant}/workspace_plugins"),
+        Some(body),
+    )
+    .await
 }
 
 pub async fn update_workspace_plugin(
+    tenant: &str,
     workspace_id: &str,
     plugin_id: &str,
     body: &WorkspacePluginUpdate,
 ) -> Result<WorkspacePlugin, ApiError> {
     send_json(
         "PUT",
-        &format!("{API_BASE}/workspace_plugins/{workspace_id}/{plugin_id}"),
+        &format!("{API_BASE}/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}"),
         Some(body),
     )
     .await
@@ -457,9 +476,13 @@ pub async fn update_workspace_plugin(
 /// Binding delete goes through the live-state gate against
 /// control-plane. Failure modes: `503 unavailable` if control-plane
 /// is unreachable (the DB is rolled back, UI should retry).
-pub async fn delete_workspace_plugin(workspace_id: &str, plugin_id: &str) -> Result<(), ApiError> {
+pub async fn delete_workspace_plugin(
+    tenant: &str,
+    workspace_id: &str,
+    plugin_id: &str,
+) -> Result<(), ApiError> {
     send_no_content(&format!(
-        "{API_BASE}/workspace_plugins/{workspace_id}/{plugin_id}"
+        "{API_BASE}/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}"
     ))
     .await
 }
@@ -488,17 +511,12 @@ pub struct AgentSession {
 /// `agent_session::state` module constants (active / grace /
 /// inactive / teardown_requested / purged) verbatim.
 pub async fn list_agent_sessions(
-    tenant_id: Option<&str>,
+    tenant: &str,
     workspace_id: Option<&str>,
     state: Option<&str>,
 ) -> Result<ListResponse<AgentSession>, ApiError> {
-    let mut url = format!("{API_BASE}/agent_sessions");
+    let mut url = format!("{API_BASE}/tenant/{tenant}/agent_sessions");
     let mut sep = '?';
-    if let Some(tid) = tenant_id {
-        url.push(sep);
-        url.push_str(&format!("tenant_id={tid}"));
-        sep = '&';
-    }
     if let Some(wid) = workspace_id {
         url.push(sep);
         url.push_str(&format!("workspace_id={wid}"));
@@ -511,8 +529,8 @@ pub async fn list_agent_sessions(
     get_json(&url).await
 }
 
-pub async fn get_agent_session(id: &str) -> Result<AgentSession, ApiError> {
-    get_json(&format!("{API_BASE}/agent_sessions/{id}")).await
+pub async fn get_agent_session(tenant: &str, id: &str) -> Result<AgentSession, ApiError> {
+    get_json(&format!("{API_BASE}/tenant/{tenant}/agent_sessions/{id}")).await
 }
 
 // ── session_worker (read-only) ────────────────────────────────────
@@ -540,11 +558,12 @@ pub struct SessionWorker {
 /// filters to `reaped_at IS NULL`, `Some(false)` to `IS NOT NULL`,
 /// `None` doesn't constrain.
 pub async fn list_session_workers(
+    tenant: &str,
     agent_session_id: Option<&str>,
     plugin_id: Option<&str>,
     live: Option<bool>,
 ) -> Result<ListResponse<SessionWorker>, ApiError> {
-    let mut url = format!("{API_BASE}/session_workers");
+    let mut url = format!("{API_BASE}/tenant/{tenant}/session_workers");
     let mut sep = '?';
     if let Some(aid) = agent_session_id {
         url.push(sep);
@@ -563,8 +582,53 @@ pub async fn list_session_workers(
     get_json(&url).await
 }
 
-pub async fn get_session_worker(id: &str) -> Result<SessionWorker, ApiError> {
-    get_json(&format!("{API_BASE}/session_workers/{id}")).await
+pub async fn get_session_worker(tenant: &str, id: &str) -> Result<SessionWorker, ApiError> {
+    get_json(&format!("{API_BASE}/tenant/{tenant}/session_workers/{id}")).await
+}
+
+// ── auth ─────────────────────────────────────────────────────────
+
+/// Response body from `GET /api/auth/whoami` (auth-broker contract).
+///
+/// Returns `None` if the request returns 401 (unauthenticated).
+/// Other errors are silently treated as unauthenticated for the
+/// purposes of the boot-time redirect check.
+#[derive(Debug, Deserialize)]
+struct WhoamiResponse {
+    pub tenant: String,
+}
+
+/// Probe `GET /api/auth/whoami` and return the tenant name if the
+/// request has a valid active cap (cookie or bearer).  Returns `None`
+/// on 401 or any transport error so callers can treat it as "not
+/// authenticated".
+pub async fn whoami() -> Option<String> {
+    get_json::<WhoamiResponse>("/api/auth/whoami")
+        .await
+        .ok()
+        .map(|r| r.tenant)
+}
+
+/// Issue `POST /api/auth/logout` to evict the active cap + clear the
+/// `botwork_cap` cookie.  Returns `Ok(())` on 200/204 or any
+/// successful response; caller should redirect to `/login` regardless
+/// of the return value (the cookie is cleared server-side).
+pub async fn logout() -> Result<(), String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("POST");
+    let req = web_sys::Request::new_with_str_and_init("/api/auth/logout", &opts)
+        .map_err(|e| format!("{e:?}"))?;
+    let resp: web_sys::Response = JsFuture::from(window.fetch_with_request(&req))
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .dyn_into()
+        .map_err(|e| format!("{e:?}"))?;
+    if resp.ok() {
+        Ok(())
+    } else {
+        Err(format!("logout HTTP {}", resp.status()))
+    }
 }
 
 // ── transport ───────────────────────────────────────────────────

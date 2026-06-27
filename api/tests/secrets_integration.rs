@@ -11,6 +11,12 @@
 //!
 //! Test bodies do NOT log or assert on `value_b64` — the secret
 //! value is opaque at this layer and must never appear in CI output.
+//!
+//! Phase 2 reshape (botworkz/space#311): secrets endpoints moved from
+//! `/admin/api/v1/secrets[...]` to `/api/tenant/{tenant}/secrets[...]`.
+//! Tenant comes from the URL path; the `x-botwork-tenant` header must
+//! match the path tenant (auth-broker invariant). Missing/mismatched
+//! header → 403 `cross_tenant_forbidden`. Body schema is unchanged.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -169,7 +175,7 @@ async fn create_secret_happy_path() {
         .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/api/v1/secrets", server.base))
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -195,14 +201,11 @@ async fn create_secret_happy_path() {
     assert_eq!(body["stored"], "github.com/pat");
     assert_eq!(body["created"], true);
 
-    // Location header must be present and NOT contain the tenant.
-    assert_eq!(location, "/admin/api/v1/secrets/github/pat");
-    assert!(
-        !location.contains("phlax"),
-        "tenant must not appear in Location URL"
-    );
+    // Phase 2: Location header carries the tenant in the URL path.
+    assert_eq!(location, "/api/tenant/phlax/secrets/github/pat");
 
-    // Verify wiremock saw a request with tenant in body (not URL).
+    // Verify wiremock saw a request with tenant in body (unchanged
+    // wire contract between api and the secret-store backend).
     let reqs = mock.received_requests().await.unwrap_or_default();
     assert_eq!(reqs.len(), 1);
     let sent: serde_json::Value =
@@ -214,9 +217,12 @@ async fn create_secret_happy_path() {
     assert!(sent.get("value_b64").is_some());
 }
 
+/// Phase 2: tenant is the URL path segment; the `x-botwork-tenant`
+/// header must be present AND match. A missing header on a
+/// tenant-scoped endpoint returns 403 `cross_tenant_forbidden`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_secret_missing_tenant_header() {
-    // No wiremock needed — validation is api-local and no
+    // No wiremock needed — auth check is api-local and no
     // request should reach the backend.
     let client = SecretStoreClient::with_endpoint("http://127.0.0.1:1");
     let Some(server) = spawn_server(client).await else {
@@ -225,7 +231,7 @@ async fn create_secret_missing_tenant_header() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/api/v1/secrets", server.base))
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
         // deliberately no x-botwork-tenant header
         .json(&json!({
             "service": "github",
@@ -237,16 +243,9 @@ async fn create_secret_missing_tenant_header() {
         .await
         .expect("POST");
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "bad_request");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("x-botwork-tenant"),
-        "error message should mention the missing header"
-    );
+    assert_eq!(body["error"], "cross_tenant_forbidden");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -268,7 +267,7 @@ async fn create_secret_already_exists() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/api/v1/secrets", server.base))
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -302,7 +301,7 @@ async fn create_secret_backend_unavailable() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/api/v1/secrets", server.base))
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -337,7 +336,7 @@ async fn create_secret_backend_disabled() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/api/v1/secrets", server.base))
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -363,8 +362,7 @@ async fn create_secret_backend_disabled() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_secret_bad_service_name() {
-    // Validation is api-local (require_name regex). The backend
-    // must NOT receive a request.
+    // Validation is api-local. The backend must NOT receive a request.
     let mock = MockServer::start().await;
     // No stub mounted — any request reaching the mock would be
     // unexpected and wiremock would return 404.
@@ -376,10 +374,11 @@ async fn create_secret_bad_service_name() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/admin/api/v1/secrets", server.base))
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
-            "service": "Bad Name!",
+            // forward slash → path traversal class; require_secret_component rejects.
+            "service": "bad/name",
             "name": "pat",
             "kind": "token",
             "value_b64": "dG9rZW4="
@@ -400,6 +399,39 @@ async fn create_secret_bad_service_name() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_secret_rejects_path_traversal_component() {
+    let mock = MockServer::start().await;
+    let client = SecretStoreClient::with_endpoint(mock.uri());
+    let Some(server) = spawn_server(client).await else {
+        eprintln!("IGNORED create_secret_rejects_path_traversal_component: docker not reachable");
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .header("x-botwork-tenant", "phlax")
+        .json(&json!({
+            "service": "../etc/passwd",
+            "name": "pat",
+            "kind": "token",
+            "value_b64": "dG9rZW4="
+        }))
+        .send()
+        .await
+        .expect("POST");
+
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"], "validation_failed");
+
+    let reqs = mock.received_requests().await.unwrap_or_default();
+    assert!(
+        reqs.is_empty(),
+        "backend should not receive a request when validation fails"
+    );
+}
+
 // ── delete_secret ───────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -413,6 +445,8 @@ async fn delete_secret_happy_path() {
         eprintln!("IGNORED delete_secret_happy_path: docker not reachable");
         return;
     };
+    // Wire contract with the backend is unchanged: tenant still goes as
+    // a query param to the backend, regardless of how the api receives it.
     Mock::given(method("DELETE"))
         .and(path("/secrets/github/pat"))
         .and(query_param("tenant", "phlax"))
@@ -422,7 +456,10 @@ async fn delete_secret_happy_path() {
         .await;
 
     let resp = reqwest::Client::new()
-        .delete(format!("{}/admin/api/v1/secrets/github/pat", server.base))
+        .delete(format!(
+            "{}/api/tenant/phlax/secrets/github/pat",
+            server.base
+        ))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -453,7 +490,10 @@ async fn delete_secret_not_found() {
     };
 
     let resp = reqwest::Client::new()
-        .delete(format!("{}/admin/api/v1/secrets/github/pat", server.base))
+        .delete(format!(
+            "{}/api/tenant/phlax/secrets/github/pat",
+            server.base
+        ))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -464,9 +504,12 @@ async fn delete_secret_not_found() {
     assert_eq!(body["error"], "not_found");
 }
 
+/// Phase 2: a missing `x-botwork-tenant` header on the tenant-scoped
+/// secrets endpoint returns 403 `cross_tenant_forbidden`, same as
+/// every other tenant-scoped route.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_secret_missing_tenant_header() {
-    // No backend call expected — tenant_header check is first.
+    // No backend call expected — the consistency check is first.
     let client = SecretStoreClient::with_endpoint("http://127.0.0.1:1");
     let Some(server) = spawn_server(client).await else {
         eprintln!("IGNORED delete_secret_missing_tenant_header: docker not reachable");
@@ -474,20 +517,16 @@ async fn delete_secret_missing_tenant_header() {
     };
 
     let resp = reqwest::Client::new()
-        .delete(format!("{}/admin/api/v1/secrets/github/pat", server.base))
+        .delete(format!(
+            "{}/api/tenant/phlax/secrets/github/pat",
+            server.base
+        ))
         // deliberately no x-botwork-tenant header
         .send()
         .await
         .expect("DELETE");
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "bad_request");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("x-botwork-tenant"),
-        "error message should mention the missing header"
-    );
+    assert_eq!(body["error"], "cross_tenant_forbidden");
 }
