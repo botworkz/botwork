@@ -1,8 +1,10 @@
 # botwork-ui
 
-`botwork-ui` is the operator-facing Leptos client that sits
-in front of `botwork-api`. See [RFE #106](https://github.com/botworkz/botwork/issues/106)
-for the API design context.
+`botwork-ui` is the operator-facing Leptos client that sits in front of
+`botwork-api`. See [RFE #106](https://github.com/botworkz/botwork/issues/106) for
+the API design context and
+[botworkz/space#311](https://github.com/botworkz/space/issues/311)
+for the Phase 2 URL reshape that this crate implements.
 
 This directory is **two crates and a trunk project**:
 
@@ -22,7 +24,7 @@ ui/
     ├── Cargo.toml
     ├── src/
     │   ├── lib.rs        ← module docs + build_router export
-    │   ├── handler.rs    ← include_dir! + /healthz, /admin/*
+    │   ├── handler.rs    ← include_dir! + /healthz, /login, /{tenant}/*
     │   └── main.rs       ← env-driven bind + axum::serve
     └── tests/
         └── integration.rs
@@ -31,44 +33,72 @@ ui/
 ## Why two crates?
 
 * `wasm/` targets `wasm32-unknown-unknown`. It depends on
-  `leptos`/`wasm-bindgen`/`web-sys` and cannot be built for the
-  host. It is excluded from `[workspace.default-members]` so plain
-  `cargo build` / `cargo test` at the repo root skip it; CI exercises
-  it explicitly with `--target wasm32-unknown-unknown` and via
-  `trunk build`.
-* `server/` targets the native host. It depends on `axum` and
-  `include_dir`, pulls `wasm/dist/` into the binary at compile time,
-  and produces a distroless container symmetric with `api`.
+  `leptos`/`wasm-bindgen`/`web-sys` and cannot be built for the host. It is
+  excluded from `[workspace.default-members]` so plain `cargo build` / `cargo
+  test` at the repo root skip it; CI exercises it explicitly with
+  `--target wasm32-unknown-unknown` and via `trunk build`.
+* `server/` targets the native host. It depends on `axum` and `include_dir`,
+  pulls `wasm/dist/` into the binary at compile time, and produces a distroless
+  container symmetric with `api`.
 
-Splitting them is the only way to keep `cargo check --workspace`
-honest on the host: a single crate that both compiles to wasm AND
-links against tokio multi-thread is impossible. Two crates with
-disjoint dependency graphs is the standard Leptos-CSR layout (see
-`botworkz/gander`'s `gander-chat` for the same split, just without
-the embedding server).
+## UI surface (Phase 2)
 
-## UI surface
+### Server routes (`server/`)
 
-* `wasm/`: full operator UI with routed entity pages:
-  * Tenants / Workspaces / Plugins / Bindings: full CRUD.
-  * Sessions / Workers: read-only list + detail.
-  * Dashboard: aggregate counts across all entities.
-* `server/`:
-  * `GET /healthz` — `{ "status": "ok" }`. Liveness probe for
-    systemd + goss.
-  * `GET /admin/` and `GET /admin/index.html` — the trunk-emitted
-    SPA shell from the embedded bundle.
-  * `GET /admin/*path` — any other file from the embedded bundle,
-    falling back to `index.html` so client-side router deep links
-    survive a hard reload.
+| Path | Behaviour |
+|------|-----------|
+| `GET /healthz` | `{ "status": "ok" }` — liveness probe |
+| `GET /login` | SPA shell (login page) |
+| `GET /static/*` | Static assets from embedded bundle |
+| `GET /{tenant}` | SPA shell (redirects to `/{tenant}/` client-side) |
+| `GET /{tenant}/` | SPA shell |
+| `GET /{tenant}/*rest` | SPA shell (deep-link fallback for client-side router) |
 
-`/admin/api/*` is **not** served here. In production the ingress
-envoy routes that prefix to `admin_api:9400`; in the dev loop the
-trunk dev server proxies it (see `wasm/Trunk.toml`).
+**Deleted in Phase 2:** `/admin/*` and `/admin/index.html`. No compat shim.
+
+### Client-side routes (`wasm/`)
+
+| Path | Page |
+|------|------|
+| `/login` | Login form — tenant + password; `POST /api/auth/login`; on success navigates to `/{tenant}/` |
+| `/{tenant}/` | Dashboard — aggregate counts |
+| `/{tenant}/workspaces` | Workspace list + create |
+| `/{tenant}/workspaces/{id}` | Workspace detail + edit + delete |
+| `/{tenant}/bindings` | Workspace-plugin binding list + create |
+| `/{tenant}/bindings/{wid}/{pid}` | Binding detail + edit + delete |
+| `/{tenant}/sessions` | Agent session list (read-only) |
+| `/{tenant}/sessions/{id}` | Session detail |
+| `/{tenant}/workers` | Session worker list (read-only) |
+| `/{tenant}/workers/{id}` | Worker detail |
+
+**Deleted in Phase 2:** `/admin/*` client routes. The tenant is now a first-class
+router parameter in every page component.
+
+## Login flow
+
+1. On app boot, `/api/auth/whoami` is probed. If it returns 200, the `{tenant}`
+   from the response is used to navigate to `/{tenant}/`. If it returns 401,
+   the router redirects to `/login`.
+2. The login page POSTs `{ tenant, password }` JSON to `POST /api/auth/login`
+   (implemented in `botwork-extra`'s auth-broker, proxied by envoy). On success
+   the browser receives an HttpOnly `botwork_cap` cookie and JSON `{ bearer,
+   tenant, lease_id, expires_at }`. The SPA navigates to `/{tenant}/`.
+3. The logout button (top nav, visible when authenticated) POSTs to
+   `POST /api/auth/logout`. The cap cookie is cleared server-side and the SPA
+   navigates to `/login`.
+
+Cookie name: `botwork_cap`. All fetch calls use `credentials: 'include'` so the
+browser attaches the cookie automatically.
+
+## API calls
+
+All tenant-scoped API calls target `/api/tenant/{tenant}/*` where `{tenant}`
+is extracted from the current URL params. The SPA never embeds the tenant in
+request bodies. See `wasm/src/api.rs` for the full call surface.
 
 ## Build
 
-You'll need `trunk` and the wasm32 target installed on your dev box:
+You'll need `trunk` and the wasm32 target:
 
 ```bash
 cargo install trunk --version 0.21.5 --locked
@@ -82,7 +112,6 @@ Then:
 
 ```bash
 # 1. Build the WASM bundle into ui/wasm/dist/
-#    (Trunk pre_build hook runs Tailwind automatically)
 cd ui/wasm
 trunk build --release
 
@@ -94,22 +123,13 @@ cargo build --release -p botwork-ui-server
 ./target/release/botwork-ui-server
 ```
 
-The container image runs steps 1+2 in one multi-stage Dockerfile and
-the runtime stage carries only the final binary plus libgcc_s:
-
-```bash
-earthly +ui-image
-# or
-docker build -t botwork/ui:local -f ui/Dockerfile .
-```
-
 ## Dev loop
 
 Live-reload, no docker required:
 
 ```bash
 # Terminal 1 — api against a local postgres
-export BOTWORK_DATABASE_URL=postgres://botwork:smoke@127.0.0.1/botwork
+export BOTWORK_DATABASE_URL=******127.0.0.1/botwork
 cargo run -p botwork-api
 
 # Terminal 2 — trunk dev server with HMR + proxy
@@ -117,59 +137,29 @@ cd ui/wasm
 trunk serve
 ```
 
-Open `http://127.0.0.1:8080/`. The browser fetches
-`/admin/api/v1/health` → trunk dev server proxies to
-`127.0.0.1:9400/admin/api/v1/health`. No CORS. Edit Rust source →
-trunk rebuilds wasm, re-runs Tailwind via hook, browser reloads.
-
-## Styling
-
-`ui/wasm` now uses Tailwind CSS + `leptos-shadcn-*` component
-crates (pinned versions in `wasm/Cargo.toml`). The Tailwind input is
-`wasm/input.css`, with shadcn-style CSS variable tokens and dark mode
-enabled by default via `class="dark"` on `<body>` in `wasm/index.html`.
-
-## Production invocation pattern
-
-Mirrors the other broker units (added in the vm-side companion PR):
-
-```bash
-docker run --rm --name botwork-ui \
-  --network botwork-internal --network-alias admin_ui \
-  --user 1100:1100 \
-  botwork/ui:local
-```
-
-Version probe: `botwork-ui-server --version` (or `-V`).
-
-Operator reach (once the vm-side companion lands):
-
-```
-browser  ──TLS──>  envoy (ingress)
-                     │
-                     ├── /admin/api/*  → admin_api:9400 (JSON)
-                     └── /admin/*      → admin_ui:9500  (bundle)
-```
+Open `http://127.0.0.1:8080/`. Trunk proxies `/api/*` to `127.0.0.1:9400`.
 
 ## Trust posture
 
-Same as every other broker: docker network is the trust boundary.
-No `--publish`. ext_authz at envoy fronts both `/admin/*` and
-`/admin/api/*`; ui itself is credless.
+docker network is the trust boundary. No `--publish`. envoy fronts
+`/{tenant}/*` and `/login`; ext_authz at envoy fronts `/api/*`.
+The SPA is credless — it piggybacks the `botwork_cap` cookie or
+uses a bearer from local state.
 
 ## Environment variables
 
-- `BOTWORK_UI_BIND` (default: `0.0.0.0:9500`) — bind address.
-  **Do not** add a port publish for this service.
-- `RUST_LOG` — standard `tracing-subscriber` filter; defaults to `info`.
+- `BOTWORK_UI_BIND` (default: `0.0.0.0:9500`) — bind address (never published).
+- `RUST_LOG` — tracing-subscriber filter; defaults to `info`.
 
 ## Exit codes
 
 | Code | Meaning                                                              |
 |------|----------------------------------------------------------------------|
 | 0    | normal exit (currently unreachable — `axum::serve` runs forever).    |
-| 4    | Failed to bind `BOTWORK_UI_BIND`.                              |
-| 5    | `axum::serve` returned an error (transport / shutdown failure).      |
+| 4    | Failed to bind `BOTWORK_UI_BIND`.                                    |
+| 5    | `axum::serve` returned an error.                                     |
 
-(No exit codes 2/3 because ui has no DB connection — those
-slots are reserved by convention with api.)
+## References
+
+- [botworkz/space#311](https://github.com/botworkz/space/issues/311) — Phase 2 URL reshape
+- [RFE #106](https://github.com/botworkz/botwork/issues/106) — original admin-api RFE
