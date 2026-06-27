@@ -1,142 +1,127 @@
 # botwork-api
 
 `botwork-api` is the HTTP+JSON CRUD service on top of
-`botwork-entity`. It is the future writer of the persistence layer
-that today is owned by the `botwork-bootstrap` boot oneshot.
+`botwork-entity`. It is the writer of the persistence layer
+that bootstraps tenant/workspace/plugin/binding state.
 
 See [RFE #106](https://github.com/botworkz/botwork/issues/106) for the
-design context. PR1 landed the service-shaped scaffolding + a single
-health endpoint; PR2 (this PR) adds read-side endpoints for all four
-entities and extracts the per-entry validators into a shared
-`botwork-api-core` crate. The write endpoints (POST/PUT/DELETE,
-delete-guards, xDS coupling) land in PR3.
+original design context. Phase 2 of
+[botworkz/space#311](https://github.com/botworkz/space/issues/311)
+retired the `/admin/api/v1/*` URL space in favour of the path-borne
+tenant layout described below.
 
-## What ships post-PR3
+## Route table (Phase 2)
 
 ```text
-GET /admin/api/v1/health                            -> { status, db }
+GET /api/health                                          → { status, db }   (unauthed)
 
-GET /admin/api/v1/tenants                           -> { items: [...], total }
-POST /admin/api/v1/tenants                          -> 201 Tenant + Location
-GET /admin/api/v1/tenants/{id}                      -> Tenant
-PUT /admin/api/v1/tenants/{id}                      -> 200 Tenant
-DELETE /admin/api/v1/tenants/{id}                   -> 204 / 409
+# Admin-gated (requires x-botwork-admin: true from auth-broker)
+GET  /api/tenants                                        → { items: [...], total }
+POST /api/tenants                                        → 201 Tenant + Location
+GET  /api/tenants/{id}                                   → Tenant
+PUT  /api/tenants/{id}                                   → 200 Tenant
+DELETE /api/tenants/{id}                                 → 204 / 409
 
-GET /admin/api/v1/workspaces                        -> { items: [...], total }
-    ?tenant_id=<uuid>                                  (optional filter)
-GET /admin/api/v1/workspaces/{id}                   -> Workspace
-POST /admin/api/v1/workspaces                       -> 201 Workspace + Location
-PUT /admin/api/v1/workspaces/{id}                   -> 200 Workspace
-DELETE /admin/api/v1/workspaces/{id}                -> 204
+GET  /api/plugins                                        → { items: [...], total }
+GET  /api/plugins/{id}                                   → Plugin
+POST /api/plugins                                        → 201 Plugin + Location
+PUT  /api/plugins/{id}                                   → 200 Plugin
+DELETE /api/plugins/{id}                                 → 204 / 409
 
-GET /admin/api/v1/plugins                           -> { items: [...], total }
-GET /admin/api/v1/plugins/{id}                      -> Plugin
-POST /admin/api/v1/plugins                          -> 201 Plugin + Location
-PUT /admin/api/v1/plugins/{id}                      -> 200 Plugin
-DELETE /admin/api/v1/plugins/{id}                   -> 204 / 409
+# Tenant-scoped (path tenant must match x-botwork-tenant header from auth-broker)
+GET  /api/tenant/{tenant}/workspaces                     → { items: [...], total }
+POST /api/tenant/{tenant}/workspaces                     → 201 Workspace + Location
+GET  /api/tenant/{tenant}/workspaces/{id}                → Workspace
+PUT  /api/tenant/{tenant}/workspaces/{id}                → 200 Workspace
+DELETE /api/tenant/{tenant}/workspaces/{id}              → 204
 
-GET /admin/api/v1/workspace_plugins                 -> { items: [...], total }
-    ?workspace_id=<uuid>&plugin_id=<uuid>              (optional filters)
-GET /admin/api/v1/workspace_plugins/{wid}/{pid}     -> WorkspacePlugin
-POST /admin/api/v1/workspace_plugins                -> 201 WorkspacePlugin
-PUT /admin/api/v1/workspace_plugins/{wid}/{pid}     -> 200 WorkspacePlugin
-DELETE /admin/api/v1/workspace_plugins/{wid}/{pid}  -> 204
+GET  /api/tenant/{tenant}/workspace_plugins              → { items: [...], total }
+    ?workspace_id=<uuid>&plugin_id=<uuid>                  (optional filters)
+GET  /api/tenant/{tenant}/workspace_plugins/{wid}/{pid}  → WorkspacePlugin
+POST /api/tenant/{tenant}/workspace_plugins              → 201 WorkspacePlugin
+PUT  /api/tenant/{tenant}/workspace_plugins/{wid}/{pid}  → 200 WorkspacePlugin
+DELETE /api/tenant/{tenant}/workspace_plugins/{wid}/{pid}→ 204
 
-POST /admin/api/v1/secrets                          -> 201 { stored, created } + Location
-DELETE /admin/api/v1/secrets/{service}/{name}       -> 204 / 404
+GET  /api/tenant/{tenant}/agent_sessions                 → { items: [...], total }
+    ?state=active|reaped&live=true|false                   (optional filters)
+GET  /api/tenant/{tenant}/agent_sessions/{id}            → AgentSession
+
+GET  /api/tenant/{tenant}/session_workers                → { items: [...], total }
+    ?live=true|false&agent_session_id=<uuid>               (optional filters)
+GET  /api/tenant/{tenant}/session_workers/{id}           → SessionWorker
+
+POST /api/tenant/{tenant}/secrets                        → 201 { stored, created } + Location
+DELETE /api/tenant/{tenant}/secrets/{service}/{name}     → 204 / 404
 ```
 
-Plus the unchanged infrastructure from PR1:
+**Deleted in Phase 2:** the entire `/admin/api/v1/*` route space is gone. There
+is no compat shim. This is a "ships together or not at all" cut per [space#311].
 
-* the container image (`botwork/api:local`, distroless,
-  uid 1100, same posture as config-broker);
-* the `Earthfile` + release workflow entries that build
-  and push it alongside the other broker images;
-* an end-to-end CI smoke that spins postgres + db-migrate + api
-  on a throwaway docker network and curls `/admin/api/v1/health` from
-  a sibling client container.
+**Not handled here:** `/api/auth/{login,logout,whoami}` — these are proxied to
+`botwork-extra`'s auth-broker by envoy and never reach this service.
 
-### Response shapes
+## Path-borne tenant contract
+
+All tenant-scoped endpoints (`/api/tenant/{tenant}/*`) enforce:
+
+1. **`x-botwork-tenant` header must be present** — injected by auth-broker after
+   validating the bearer/cookie. Absent = 403 `cross_tenant_forbidden`.
+2. **`x-botwork-tenant` value must match the URL `{tenant}` segment** — prevents
+   cross-tenant access even if a misbehaving proxy sets the wrong header.
+   Mismatch = 403 `cross_tenant_forbidden`.
+3. **`x-botwork-admin: true` gates admin-only routes** — tenant list/mutations
+   and plugin list/mutations. Absent = 403 `admin_required`.
+
+This replaces the old "trust `x-botwork-tenant` verbatim" posture. The path IS
+the identity; the header IS the authority; they must agree.
+
+## Name validation
+
+Tenant, workspace, and plugin names are validated by `botwork-api-core::names`:
+
+- **Regex:** `^[A-Za-z0-9_-]{1,63}$`
+- **Reserved (tenant-scope v1):** `["admin", "api", "auth", "static", "stats", "logs"]`
+- **Case-sensitive storage**, **normalised-unique** — `Phlax` blocks creating `phlax`
+- Create endpoints return:
+  - `400 invalid_name` — name fails regex or length constraint
+  - `400 reserved_name` — name is in the reserved list (tenant scope)
+  - `409 already_exists` — normalised name already taken
+
+The canonical source of the regex and reserved list is
+`botwork-extra/auth-broker/src/grammar.rs`. `api-core` vendors it; see
+`api-core/README.md`.
+
+## Response shapes
 
 * **Success body** — entity model serialised verbatim via SeaORM's
   derived `Serialize`. List endpoints wrap the body in
-  `{ "items": [...], "total": N }` so pagination
-  (`?limit=&offset=`, `next_cursor`) can land later as a pure-additive
-  change.
-* **Error envelope** (mirrors config-broker / control-plane):
+  `{ "items": [...], "total": N }`.
+* **Error envelope:**
 
   ```json
   { "error": "<machine code>", "message": "<human detail>" }
   ```
 
-  v0 emits `not_found`, `bad_request`, `internal`. PR3 adds
-  `conflict` (delete-guard hit) and `precondition_failed` (optimistic
-  lock lost).
-
-### Hitting it from on the VM
-
-Once api is running on the deployed VM, the service is reachable
-inside the docker network by alias. The simplest curl from the VM host
-is via a one-shot client container on the same network:
-
-```bash
-# From an SSH session on the VM:
-docker run --rm --network botwork-internal curlimages/curl:8.10.1 \
-  http://admin_api:9400/admin/api/v1/tenants
-# -> {"items":[{"id":"...","name":"phlax","created_at":"...","updated_at":"..."}],"total":1}
-```
-
-No host port is published. LAN exposure waits on the overlay
-extending ext_authz to recognise an admin scope on `/admin/api/*`
-(see RFE #106 § "Trust posture").
-
-## Trust posture
-
-* **No caller authentication in v0.** Same posture as config-broker
-  and control-plane: the trust boundary is the docker network
-  (`botwork-internal`), and the listener port (`9400`) is never
-  `--publish`ed.
-* The future operator-facing exposure comes from the ingress envoy
-  adding an `/admin/api/*` route in front of the existing
-  `envoy.filters.http.ext_authz` seam. api itself stays
-  credless and reads `x-botwork-tenant` (and, when the overlay adds
-  it, `x-botwork-role`) verbatim from the request.
-* Secrets endpoints follow the same posture as the rest:
-  `x-botwork-tenant` is set by envoy ext_authz and trusted as the
-  secret's scope; api does no further authz. The tenant is
-  read from the header, **never** from the URL path — this is by
-  design and matches the rest of api.
+  Error codes: `not_found`, `bad_request`, `invalid_name`, `reserved_name`,
+  `cross_tenant_forbidden`, `admin_required`, `conflict`, `precondition_failed`,
+  `internal`, `unavailable`.
 
 ## Secret store coupling
 
-The secrets write endpoints (`POST /admin/api/v1/secrets`,
-`DELETE /admin/api/v1/secrets/{service}/{name}`) do not store
-secrets in postgres. They forward to a dedicated `secret_store`
-backend service over the `botwork-internal` docker network.
+The secrets write endpoints (`POST /api/tenant/{tenant}/secrets`,
+`DELETE /api/tenant/{tenant}/secrets/{service}/{name}`) forward to a
+dedicated `secret_store` backend service. The tenant comes from the URL
+path (no `tenant` field in the request body — that was dropped in Phase 2).
 
-The backend is not part of `botwork` — composition is provided by
-deployment (see `botworkz/space`). From api's perspective the
-backend is anonymous: it could be a cocoon-vault adapter, an HSM
-proxy, or a test stub. The wire contract is a small, stable HTTP
-seam:
+The wire contract:
 
 * `POST   /secrets` — body `{ tenant, service, name, kind, value_b64, ... }`
-* `DELETE /secrets/{service}/{name}?tenant={tenant}` — tenant as
-  query param, never in the path
+* `DELETE /secrets/{service}/{name}?tenant={tenant}`
 
-**Failure semantics:**
+**Failure semantics:** 503 on backend unavailability, 409 propagated on duplicate,
+404 propagated on missing delete.
 
-* `BOTWORK_API_DISABLE_SECRET_STORE=1` (break-glass) —
-  api returns 503 immediately with a message that names the
-  flag. No request reaches the backend.
-* Transport failure / backend 5xx — api returns 503
-  `unavailable` with "secret-store unavailable" in the message. The
-  secret was NOT stored.
-* Backend 409 — propagated as 409 `already_exists` (use
-  `overwrite: true` to replace).
-* Backend 404 on delete — propagated as 404 `not_found`.
-* Backend 400 — propagated as 400 `bad_request` (bad base64, unknown
-  kind, etc. — the backend is the authority on what is well-formed).
+Break-glass: `BOTWORK_API_DISABLE_SECRET_STORE=1`.
 
 ## Production invocation pattern
 
@@ -149,33 +134,15 @@ docker run --rm --name botwork-api \
   botwork/api:local
 ```
 
-Version probe: `botwork-api --version` (or `-V`).
-
-This is what the `botwork-api.service` systemd unit (lives in
-`botworkz/vm`) runs.
-
 ## Environment variables
 
-- `BOTWORK_DATABASE_URL` (required) — postgres URL in the canonical
-  `postgres://botwork:<password>@postgres/botwork` shape. Same env the
-  rest of the persistence-aware consumers use.
-- `BOTWORK_API_BIND` (default: `0.0.0.0:9400`) — bind address.
-  The default is intentional: in the supported deployment api
-  runs on the `botwork-internal` docker network with the `admin_api`
-  alias, and its port is **never** published to the host. The docker
-  network is the trust boundary, not the bind address. **Do not** add
-  a port publish for this service.
+- `BOTWORK_DATABASE_URL` (required) — postgres URL.
+- `BOTWORK_API_BIND` (default: `0.0.0.0:9400`) — bind address (never published).
 - `BOTWORK_CONTROL_PLANE_ENDPOINT` (default: `http://control_plane:9300`) —
-  live-state ack target. Break-glass:
-  `BOTWORK_API_DISABLE_LIVE_GATE=1` bypasses control-plane
-  coupling. Not for production use.
-- `BOTWORK_SECRET_STORE_ENDPOINT` (default: `http://secret_store:9500`) —
-  secret-store backend endpoint. See "Secret store coupling" below.
-- `BOTWORK_API_DISABLE_SECRET_STORE` (default unset) — break-glass;
-  all secret writes return 503 immediately with a clear message. Not
-  for production use.
-- `RUST_LOG` — standard `tracing-subscriber` filter; defaults to
-  `info`.
+  live-state ack target. Break-glass: `BOTWORK_API_DISABLE_LIVE_GATE=1`.
+- `BOTWORK_SECRET_STORE_ENDPOINT` (default: `http://secret_store:9500`).
+- `BOTWORK_API_DISABLE_SECRET_STORE` — break-glass; secrets return 503.
+- `RUST_LOG` — tracing-subscriber filter; defaults to `info`.
 
 ## Exit codes
 
@@ -184,33 +151,22 @@ This is what the `botwork-api.service` systemd unit (lives in
 | 0    | normal exit (currently unreachable — `axum::serve` runs forever).    |
 | 2    | `BOTWORK_DATABASE_URL` is not set.                                   |
 | 3    | Connection to postgres failed.                                       |
-| 4    | Failed to bind `BOTWORK_API_BIND`.                             |
-| 5    | `axum::serve` returned an error (transport / shutdown failure).      |
-
-systemd's `Restart=always` on `botwork-api.service` picks up any
-non-zero exit and retries.
+| 4    | Failed to bind `BOTWORK_API_BIND`.                                   |
+| 5    | `axum::serve` returned an error.                                     |
 
 ## Test posture
 
-Same rails as `db/`, `bootstrap/`, and `config-broker/`:
-[`testcontainers`](https://crates.io/crates/testcontainers) stays
-under `[dev-dependencies]` (enforced by
-`db/migration/tests/testcontainers_isolation.rs`) and no test reads
-`BOTWORK_DATABASE_URL` (enforced by
-`db/migration/tests/no_env_leakage.rs`).
+Integration tests in `tests/integration.rs` spin a real postgres via
+`testcontainers`, apply the fixture bootstrap.yaml, and exercise all
+endpoints including cross-tenant denial, name validation rejection, and
+admin-gating. Requires Docker. Run with:
 
-The integration test `tests/integration.rs` spins a real postgres,
-runs `Migrator::up`, applies a fixture `bootstrap.yaml` (1 tenant,
-1 workspace, 2 plugins, 2 bindings with one carrying a `config:`
-blob) via `botwork_bootstrap::apply`, binds the router on a random
-local port, and exercises every read endpoint plus the
-list-with-filter shape. End-to-end production-path proof lives in
-`.github/workflows/ci.yml` (the `api` smoke step).
+```bash
+cargo test -p botwork-api
+```
 
-## Container image
+## References
 
-`botwork/api:local`, built from `api/Dockerfile`.
-
-Distroless `base-nossl-debian12:nonroot` runtime, same posture as
-config-broker / control-plane. Built by `earthly +api-image`
-from the repo root (or by `docker build -f api/Dockerfile .`).
+- [botworkz/space#311](https://github.com/botworkz/space/issues/311) — Phase 2 design (canonical decision doc)
+- [RFE #106](https://github.com/botworkz/botwork/issues/106) — original admin-api RFE
+- [RFE #175](https://github.com/botworkz/botwork/issues/175) — api/ui rename

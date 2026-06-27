@@ -3,7 +3,7 @@
 //! `botwork-ui-wasm` — Leptos CSR client for the operator-facing
 //! admin panel.
 //!
-//! # PR3 shape (RFE #106)
+//! # Phase 2 shape (botworkz/space#311)
 //!
 //! Builds on PR2's tenant scaffold by wiring the remaining five
 //! entities end-to-end:
@@ -33,83 +33,75 @@ pub mod api;
 pub mod layout;
 pub mod pages;
 
-/// URL prefix the ui SPA is mounted under.
+/// URL prefix the ui SPA is mounted under (Phase 2 reshape).
 ///
-/// **Three places must agree on this string:**
+/// After botworkz/space#311 Phase 2, the SPA moves from `/admin/*` to
+/// `/{tenant}/*`. The tenant is a first-class route param rather than
+/// a global; the login page lives at `/login`.
+///
+/// **Three places must agree:**
 ///
 /// 1. `<Router base=…>` below in [`App`].
-/// 2. `public_url = "/admin/"` in `wasm/Trunk.toml`.
-/// 3. The ingress envoy `/admin/*` route (lives in `botworkz/space`).
+/// 2. `public_url` in `wasm/Trunk.toml` (must match server route root).
+/// 3. The ingress envoy route table (lives in `botworkz/space`).
 ///
-/// **Why we spell it into every router-relative href.** `leptos_router`
-/// *does not* prepend `<Router base>` to hrefs that start with `/` —
-/// see `use_resolved_path` in the `leptos_router` source. With the
-/// router mounted at `/admin`, a literal `<A href="/tenants">` renders
-/// verbatim, the router's click handler sees a path that isn't inside
-/// `/admin/*`, and the browser does a full-page navigation to
-/// `/tenants` — which the ingress envoy treats as MCP traffic
-/// (catch-all route → ext_authz → 401). The links appear dead.
+/// `UI_BASE` is empty (`""`) because the SPA now mounts at the root
+/// `/` and uses `/{tenant}/…` sub-paths rather than a fixed prefix.
+/// The `/login` path is outside any tenant prefix and is served
+/// directly.
 ///
-/// Use the [`ui_path!`] macro at every router-relative href site;
-/// it handles both the literal and `format!`-style flavours.
-pub const UI_BASE: &str = "/admin";
+/// See [`ui_path!`] for constructing paths.
+pub const UI_BASE: &str = "";
 
 /// Build a router-absolute URL for the ui SPA. See [`UI_BASE`]
-/// for why every router-relative href has to be prefix-spelled.
+/// for the rationale.
 ///
-/// Two flavours, mirroring `concat!` and `format!`:
+/// Two flavours:
 ///
-/// * `ui_path!("/tenants/new")` → `&'static str =
-///   "/admin/tenants/new"`. Evaluates at compile time; no per-render
-///   allocation. Use this at `<A href=…>` sites.
-/// * `ui_path!("/tenants/{}", id)` → `String =
-///   "/admin/tenants/<id>"`. Evaluates at runtime; takes the same
-///   format-args as `format!`. Use this for dynamic links and for
-///   `use_navigate()` calls.
-///
-/// The `"/admin"` literal is intentionally duplicated against
-/// [`UI_BASE`] here: `concat!` only accepts literal strings, not
-/// `const &str`. The pair lives in the same module so the duplication
-/// is trivial to audit if [`UI_BASE`] ever changes — and the
-/// `ui_base_matches_macro` test in this crate fails loudly if they
-/// drift.
+/// * `ui_path!("/login")` → `&'static str = "/login"`. Compile-time.
+/// * `ui_path!("/{}", tenant)` → `String = "/<tenant>"`. Runtime.
 #[macro_export]
 macro_rules! ui_path {
     ($lit:literal) => {
-        concat!("/admin", $lit)
+        concat!("", $lit)
     };
     ($fmt:literal, $($arg:tt)*) => {
-        format!(concat!("/admin", $fmt), $($arg)*)
+        format!(concat!("", $fmt), $($arg)*)
     };
 }
 
 /// Root component.
 ///
-/// Mounts the router. Routes that exist in the route table but
-/// haven't been built yet 404 cleanly via the catch-all; nothing
-/// magic about "stub" pages — every entity is now real.
+/// Mounts the router. The SPA is rooted at `/` (Phase 2 reshape).
+///
+/// Route structure:
+///
+/// * `/login` — login page. Renders without the tenant shell.
+/// * `/{tenant}/*` — all tenant-scoped pages rendered inside [`layout::Shell`].
+///
+/// The tenant shell (sidebar + header) is a nested layout scoped to
+/// `/:tenant` routes; `/login` sits outside and renders full-screen.
 #[component]
 pub fn App() -> impl IntoView {
-    use leptos_router::components::{Route, Router, Routes};
+    use leptos_router::components::{Outlet, ParentRoute, Route, Router, Routes};
     use leptos_router::path;
 
     view! {
-        // `base` must match [`UI_BASE`]; see the docstring there for
-        // why this string is repeated in four places (Router base,
-        // UI_BASE const, ui_path! macro, Trunk.toml `public_url`).
-        <Router base="/admin">
-            <layout::Shell>
-                <Routes fallback=|| view! { <pages::NotFound /> }>
-                    <Route path=path!("/") view=pages::Dashboard />
+        // Router mounts at root — no `/admin` prefix in Phase 2.
+        // UI_BASE is "" — see the docstring there for the rationale.
+        <Router base="">
+            <Routes fallback=|| view! { <pages::NotFound /> }>
+                // Login page — renders full-screen, outside the tenant shell.
+                <Route path=path!("/login") view=pages::Login />
 
-                    // Tenants (PR2 carry-over).
-                    <Route path=path!("/tenants") view=pages::tenants::List />
-                    <Route path=path!("/tenants/new") view=pages::tenants::Create />
-                    <Route path=path!("/tenants/:id") view=pages::tenants::Detail />
-                    <Route path=path!("/tenants/:id/edit") view=pages::tenants::Edit />
-                    <Route path=path!("/tenants/:id/delete") view=pages::tenants::DeleteConfirm />
+                // Tenant-scoped routes: /{tenant}/...
+                // Shell wraps all children via Outlet; tenant is a route param.
+                <ParentRoute
+                    path=path!("/:tenant")
+                    view=|| view! { <layout::Shell><Outlet /></layout::Shell> }
+                >
+                    <Route path=path!("") view=pages::Dashboard />
 
-                    // Workspaces.
                     <Route path=path!("/workspaces") view=pages::workspaces::List />
                     <Route path=path!("/workspaces/new") view=pages::workspaces::Create />
                     <Route path=path!("/workspaces/:id") view=pages::workspaces::Detail />
@@ -119,7 +111,7 @@ pub fn App() -> impl IntoView {
                         view=pages::workspaces::DeleteConfirm
                     />
 
-                    // Plugins.
+                    // Plugins (global, admin-managed).
                     <Route path=path!("/plugins") view=pages::plugins::List />
                     <Route path=path!("/plugins/new") view=pages::plugins::Create />
                     <Route path=path!("/plugins/:id") view=pages::plugins::Detail />
@@ -149,8 +141,8 @@ pub fn App() -> impl IntoView {
                     // Workers (read-only).
                     <Route path=path!("/workers") view=pages::workers::List />
                     <Route path=path!("/workers/:id") view=pages::workers::Detail />
-                </Routes>
-            </layout::Shell>
+                </ParentRoute>
+            </Routes>
         </Router>
     }
 }
@@ -174,34 +166,33 @@ mod tests {
     // `&'static str` for the literal form, this `const` binding would
     // fail to compile. That's the property `<A href=ui_path!(…)>`
     // sites rely on (no per-render allocation), so we pin it here.
-    const _STATIC_NEW: &str = ui_path!("/tenants/new");
+    const _STATIC_NEW: &str = ui_path!("/workspaces/new");
     const _STATIC_ROOT: &str = ui_path!("/");
     const _STATIC_EMPTY: &str = ui_path!("");
 
     #[test]
     fn literal_prepends_admin_prefix() {
-        assert_eq!(ui_path!("/"), "/admin/");
-        assert_eq!(ui_path!("/tenants"), "/admin/tenants");
-        assert_eq!(ui_path!("/tenants/new"), "/admin/tenants/new");
+        assert_eq!(ui_path!("/"), "/");
+        assert_eq!(ui_path!("/workspaces"), "/workspaces");
+        assert_eq!(ui_path!("/workspaces/new"), "/workspaces/new");
     }
 
     #[test]
     fn format_prepends_admin_prefix() {
         let id = "abc-123";
-        assert_eq!(ui_path!("/tenants/{}", id), "/admin/tenants/abc-123");
-        assert_eq!(ui_path!("/bindings/{}/{}", "w", "p"), "/admin/bindings/w/p");
+        assert_eq!(ui_path!("/workspaces/{}", id), "/workspaces/abc-123");
+        assert_eq!(ui_path!("/bindings/{}/{}", "w", "p"), "/bindings/w/p");
         assert_eq!(
             ui_path!("/workers?agent_session_id={}", id),
-            "/admin/workers?agent_session_id=abc-123"
+            "/workers?agent_session_id=abc-123"
         );
     }
 
     #[test]
     fn ui_base_matches_macro() {
-        // The two have to agree. `concat!("/admin", "")` is just
-        // `"/admin"`, which is `UI_BASE`. If a future refactor moves
-        // UI_BASE off `/admin`, the `ui_path!` macro body still has
-        // to change in lockstep — this test fails when it doesn't.
+        // UI_BASE is "" and ui_path!("") is concat!("", "") = "".
+        // Both must stay in sync — if UI_BASE changes, the macro body
+        // changes with it.
         assert_eq!(UI_BASE, ui_path!(""));
     }
 }

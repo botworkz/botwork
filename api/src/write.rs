@@ -53,6 +53,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, post, put};
 use axum::{Json, Router};
+use botwork_api_core::names::{normalise_name, validate_plugin_name, validate_tenant_name, validate_workspace_name};
 use botwork_api_core::plugin_spec::{validate_one, RawPluginEntry};
 use botwork_entity::{plugin, tenant, workspace, workspace_plugin};
 use chrono::{DateTime, Utc};
@@ -67,32 +68,120 @@ use uuid::Uuid;
 
 use crate::control_plane::{outcome_summary, terminate_live_sessions, GateError};
 use crate::handler::{
-    bad_request, operator, parse_body, tenant_header, ApiError, ApiErrorExt, AppState, PREFIX,
+    bad_request, check_tenant_consistency, operator, parse_body, require_admin,
+    resolve_tenant_id, ApiError, ApiErrorExt, AppState, PREFIX,
 };
 use crate::secret_store::{PutSecretRequest, SecretStoreError};
 
-// ── shared name regex ──────────────────────────────────────────────
+// ── name validation helpers ───────────────────────────────────────
+//
+// Delegates to `botwork-api-core::names` which vendors the canonical
+// grammar from `botwork-extra/auth-broker/src/grammar.rs`.
+// see api-core/src/names.rs for the full spec.
 
-// Mirrors the regex everyone else in the workspace uses (config-broker,
-// control-plane, api-core for plugin names). Pulled into a function
-// rather than a `const` so the OnceLock-cached compiled form is shared
-// across handlers.
-fn name_re() -> &'static regex::Regex {
-    use std::sync::OnceLock;
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"^[a-z][a-z0-9-]{0,30}$").expect("valid name regex"))
+/// Case-insensitive uniqueness check: returns true if any tenant
+/// whose LOWER(name) == normalised already exists.
+/// `exclude_id` skips the current row (for rename-to-self on PUT).
+async fn tenant_name_taken(
+    db: &impl sea_orm::ConnectionTrait,
+    normalised: &str,
+    exclude_id: Option<uuid::Uuid>,
+) -> Result<bool, ApiError> {
+    use sea_orm::{FromQueryResult, Statement};
+
+    #[derive(FromQueryResult)]
+    struct Row { cnt: i64 }
+
+    let backend = db.get_database_backend();
+    let (sql, values): (&str, Vec<sea_orm::Value>) = match exclude_id {
+        None => (
+            "SELECT COUNT(*) AS cnt FROM tenant WHERE LOWER(name) = $1",
+            vec![normalised.into()],
+        ),
+        Some(id) => (
+            "SELECT COUNT(*) AS cnt FROM tenant WHERE LOWER(name) = $1 AND id != $2",
+            vec![normalised.into(), id.into()],
+        ),
+    };
+    let stmt = Statement::from_sql_and_values(backend, sql, values);
+    let row = Row::find_by_statement(stmt)
+        .one(db)
+        .await
+        .map_err(|err| ApiError::Internal { detail: format!("db: {err}") })?;
+    Ok(row.map(|r| r.cnt > 0).unwrap_or(false))
 }
 
-fn require_name(field: &'static str, value: &str) -> Result<String, ApiError> {
+/// Case-insensitive uniqueness check for workspace names within a tenant.
+/// `(tenant_id, LOWER(name))` must be unique.
+async fn workspace_name_taken(
+    db: &impl sea_orm::ConnectionTrait,
+    tenant_id: uuid::Uuid,
+    normalised: &str,
+    exclude_id: Option<uuid::Uuid>,
+) -> Result<bool, ApiError> {
+    use sea_orm::{FromQueryResult, Statement};
+
+    #[derive(FromQueryResult)]
+    struct Row { cnt: i64 }
+
+    let backend = db.get_database_backend();
+    let (sql, values): (&str, Vec<sea_orm::Value>) = match exclude_id {
+        None => (
+            "SELECT COUNT(*) AS cnt FROM workspace WHERE tenant_id = $1 AND LOWER(name) = $2",
+            vec![tenant_id.into(), normalised.into()],
+        ),
+        Some(id) => (
+            "SELECT COUNT(*) AS cnt FROM workspace WHERE tenant_id = $1 AND LOWER(name) = $2 AND id != $3",
+            vec![tenant_id.into(), normalised.into(), id.into()],
+        ),
+    };
+    let stmt = Statement::from_sql_and_values(backend, sql, values);
+    let row = Row::find_by_statement(stmt)
+        .one(db)
+        .await
+        .map_err(|err| ApiError::Internal { detail: format!("db: {err}") })?;
+    Ok(row.map(|r| r.cnt > 0).unwrap_or(false))
+}
+
+/// Case-insensitive uniqueness check for plugin names (global).
+async fn plugin_name_taken(
+    db: &impl sea_orm::ConnectionTrait,
+    normalised: &str,
+    exclude_id: Option<uuid::Uuid>,
+) -> Result<bool, ApiError> {
+    use sea_orm::{FromQueryResult, Statement};
+
+    #[derive(FromQueryResult)]
+    struct Row { cnt: i64 }
+
+    let backend = db.get_database_backend();
+    let (sql, values): (&str, Vec<sea_orm::Value>) = match exclude_id {
+        None => (
+            "SELECT COUNT(*) AS cnt FROM plugin WHERE LOWER(name) = $1",
+            vec![normalised.into()],
+        ),
+        Some(id) => (
+            "SELECT COUNT(*) AS cnt FROM plugin WHERE LOWER(name) = $1 AND id != $2",
+            vec![normalised.into(), id.into()],
+        ),
+    };
+    let stmt = Statement::from_sql_and_values(backend, sql, values);
+    let row = Row::find_by_statement(stmt)
+        .one(db)
+        .await
+        .map_err(|err| ApiError::Internal { detail: format!("db: {err}") })?;
+    Ok(row.map(|r| r.cnt > 0).unwrap_or(false))
+}
+
+
+/// Basic non-empty validation for secret service/name components.
+/// The secret-store backend is the authority on the full set of rules;
+/// this is just a frontend sanity check to reject obviously-bad inputs.
+fn require_secret_component(field: &str, value: &str) -> Result<String, ApiError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ApiError::validation_failed(format!(
             "{field} must be a non-blank string"
-        )));
-    }
-    if !name_re().is_match(trimmed) {
-        return Err(ApiError::validation_failed(format!(
-            "{field} must match ^[a-z][a-z0-9-]{{0,30}}$ (got {trimmed:?})"
         )));
     }
     Ok(trimmed.to_string())
@@ -133,35 +222,41 @@ fn audit_event(op: &str, verb: &str, entity: &str, id: impl std::fmt::Display, e
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        // tenant
-        .route("/admin/api/v1/tenants", post(create_tenant))
-        .route("/admin/api/v1/tenants/:id", put(update_tenant))
-        .route("/admin/api/v1/tenants/:id", delete(delete_tenant))
-        // workspace
-        .route("/admin/api/v1/workspaces", post(create_workspace))
-        .route("/admin/api/v1/workspaces/:id", put(update_workspace))
-        .route("/admin/api/v1/workspaces/:id", delete(delete_workspace))
-        // plugin
-        .route("/admin/api/v1/plugins", post(create_plugin))
-        .route("/admin/api/v1/plugins/:id", put(update_plugin))
-        .route("/admin/api/v1/plugins/:id", delete(delete_plugin))
-        // workspace_plugin (composite PK)
+        // Admin-gated tenant CRUD.
+        .route("/api/tenants", post(create_tenant))
+        .route("/api/tenants/:id", put(update_tenant))
+        .route("/api/tenants/:id", delete(delete_tenant))
+        // Admin-gated plugin CRUD (plugins are globally shared resources).
+        .route("/api/plugins", post(create_plugin))
+        .route("/api/plugins/:id", put(update_plugin))
+        .route("/api/plugins/:id", delete(delete_plugin))
+        // Tenant-scoped workspace CRUD.
+        .route("/api/tenant/:tenant/workspaces", post(create_workspace))
         .route(
-            "/admin/api/v1/workspace_plugins",
+            "/api/tenant/:tenant/workspaces/:id",
+            put(update_workspace),
+        )
+        .route(
+            "/api/tenant/:tenant/workspaces/:id",
+            delete(delete_workspace),
+        )
+        // Tenant-scoped binding CRUD.
+        .route(
+            "/api/tenant/:tenant/workspace_plugins",
             post(create_workspace_plugin),
         )
         .route(
-            "/admin/api/v1/workspace_plugins/:workspace_id/:plugin_id",
+            "/api/tenant/:tenant/workspace_plugins/:workspace_id/:plugin_id",
             put(update_workspace_plugin),
         )
         .route(
-            "/admin/api/v1/workspace_plugins/:workspace_id/:plugin_id",
+            "/api/tenant/:tenant/workspace_plugins/:workspace_id/:plugin_id",
             delete(delete_workspace_plugin),
         )
-        // secrets
-        .route("/admin/api/v1/secrets", post(create_secret))
+        // Tenant-scoped secrets.
+        .route("/api/tenant/:tenant/secrets", post(create_secret))
         .route(
-            "/admin/api/v1/secrets/:service/:name",
+            "/api/tenant/:tenant/secrets/:service/:name",
             delete(delete_secret),
         )
 }
@@ -186,22 +281,19 @@ async fn create_tenant(
     headers: HeaderMap,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&headers)?;
     let body: TenantCreate = parse_body(raw_body)?;
-    let name = require_name("name", &body.name)?;
+    let name = body.name.trim().to_string();
+    // Validate format (regex) and reserved-name list.
+    validate_tenant_name(&name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
-    // Preflight uniqueness so we emit a clean 409 rather than relying
-    // on the underlying unique-constraint violation to bubble through
-    // as Internal 500. The schema's `UNIQUE(name)` index is the
-    // backstop, not the gate.
-    if tenant::Entity::find()
-        .filter(tenant::Column::Name.eq(&name))
-        .one(state.db.as_ref())
-        .await?
-        .is_some()
-    {
+    // Case-insensitive uniqueness: normalise_name lowercases so
+    // "Phlax" blocks "phlax" / "PHLAX" from being created.
+    let normalised = normalise_name(&name);
+    if tenant_name_taken(state.db.as_ref(), &normalised, None).await? {
         return Err(ApiError::already_exists(format!(
-            "tenant '{name}' already exists"
+            "tenant with name {name:?} already exists (case-insensitive)"
         )));
     }
 
@@ -221,7 +313,7 @@ async fn create_tenant(
     let mut response = (StatusCode::CREATED, Json(row)).into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/admin/api/v1/tenants/{id}")).expect("uuid is ascii"),
+        HeaderValue::from_str(&format!("/api/tenants/{id}")).expect("uuid is ascii"),
     );
     Ok(response)
 }
@@ -232,9 +324,11 @@ async fn update_tenant(
     Path(id): Path<String>,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&headers)?;
     let body: TenantUpdate = parse_body(raw_body)?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid tenant id", err))?;
-    let name = require_name("name", &body.name)?;
+    let name = body.name.trim().to_string();
+    validate_tenant_name(&name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
     let tx = state.db.begin().await?;
@@ -244,17 +338,13 @@ async fn update_tenant(
         .or_not_found("tenant", format!("no tenant with id {id}"))?;
     check_lock(&body.if_unmodified_since, &live.updated_at, "tenant")?;
 
-    // Re-check uniqueness against any OTHER tenant with the same name
-    // (allow rename-to-self).
-    if live.name != name
-        && tenant::Entity::find()
-            .filter(tenant::Column::Name.eq(&name))
-            .one(&tx)
-            .await?
-            .is_some()
-    {
+    // Case-insensitive uniqueness: check no OTHER tenant has the same
+    // normalised name. The exclude_id skips the current tenant so a
+    // rename to a different capitalisation of the same name is allowed.
+    let normalised = normalise_name(&name);
+    if tenant_name_taken(&tx, &normalised, Some(live.id)).await? {
         return Err(ApiError::already_exists(format!(
-            "tenant '{name}' already exists"
+            "tenant with name {name:?} already exists (case-insensitive)"
         )));
     }
 
@@ -281,6 +371,7 @@ async fn delete_tenant(
     Path(id): Path<String>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&headers)?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid tenant id", err))?;
     let op = operator(&headers);
 
@@ -335,7 +426,6 @@ async fn delete_tenant(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkspaceCreate {
-    tenant_id: Uuid,
     name: String,
 }
 
@@ -349,36 +439,23 @@ struct WorkspaceUpdate {
 async fn create_workspace(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Path(tenant_name): Path<String>,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    check_tenant_consistency(&headers, &tenant_name)?;
     let body: WorkspaceCreate = parse_body(raw_body)?;
-    let name = require_name("name", &body.name)?;
+    let name = body.name.trim().to_string();
+    validate_workspace_name(&name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
-    // Verify the parent tenant exists. This catches typos before the
-    // FK violation does and gives a cleaner error.
-    if tenant::Entity::find_by_id(body.tenant_id)
-        .one(state.db.as_ref())
-        .await?
-        .is_none()
-    {
-        return Err(ApiError::validation_failed(format!(
-            "tenant_id {} does not reference an existing tenant",
-            body.tenant_id
-        )));
-    }
+    // Resolve tenant name to UUID (path-borne tenant is the source of truth).
+    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
 
-    // Business-key uniqueness: (tenant_id, name).
-    if workspace::Entity::find()
-        .filter(workspace::Column::TenantId.eq(body.tenant_id))
-        .filter(workspace::Column::Name.eq(&name))
-        .one(state.db.as_ref())
-        .await?
-        .is_some()
-    {
+    // Case-insensitive uniqueness within the tenant: (tenant_id, LOWER(name)).
+    let normalised = normalise_name(&name);
+    if workspace_name_taken(state.db.as_ref(), tenant_id, &normalised, None).await? {
         return Err(ApiError::already_exists(format!(
-            "workspace '{name}' already exists under tenant {}",
-            body.tenant_id
+            "workspace with name {name:?} already exists under tenant {tenant_name:?} (case-insensitive)"
         )));
     }
 
@@ -386,7 +463,7 @@ async fn create_workspace(
     let now = Utc::now();
     let row = workspace::ActiveModel {
         id: Set(id),
-        tenant_id: Set(body.tenant_id),
+        tenant_id: Set(tenant_id),
         name: Set(name.clone()),
         created_at: Set(now),
         updated_at: Set(now),
@@ -399,12 +476,13 @@ async fn create_workspace(
         "create",
         "workspace",
         row.id,
-        &format!("tenant_id={} name={name:?}", body.tenant_id),
+        &format!("tenant={tenant_name:?} name={name:?}"),
     );
     let mut response = (StatusCode::CREATED, Json(row)).into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/admin/api/v1/workspaces/{id}")).expect("uuid is ascii"),
+        HeaderValue::from_str(&format!("/api/tenant/{tenant_name}/workspaces/{id}"))
+            .expect("tenant_name and uuid are ascii-safe"),
     );
     Ok(response)
 }
@@ -412,33 +490,36 @@ async fn create_workspace(
 async fn update_workspace(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path((tenant_name, id)): Path<(String, String)>,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    check_tenant_consistency(&headers, &tenant_name)?;
     let body: WorkspaceUpdate = parse_body(raw_body)?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid workspace id", err))?;
-    let name = require_name("name", &body.name)?;
+    let name = body.name.trim().to_string();
+    validate_workspace_name(&name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
+    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
     let tx = state.db.begin().await?;
     let live = workspace::Entity::find_by_id(id)
         .one(&tx)
         .await?
         .or_not_found("workspace", format!("no workspace with id {id}"))?;
+    // Ownership check.
+    if live.tenant_id != tenant_id {
+        return Err(ApiError::not_found(
+            "workspace",
+            format!("no workspace with id {id} under tenant {tenant_name:?}"),
+        ));
+    }
     check_lock(&body.if_unmodified_since, &live.updated_at, "workspace")?;
 
-    // (tenant_id, name) uniqueness on rename.
-    if live.name != name
-        && workspace::Entity::find()
-            .filter(workspace::Column::TenantId.eq(live.tenant_id))
-            .filter(workspace::Column::Name.eq(&name))
-            .one(&tx)
-            .await?
-            .is_some()
-    {
+    // Case-insensitive uniqueness on rename: exclude current workspace.
+    let normalised = normalise_name(&name);
+    if workspace_name_taken(&tx, tenant_id, &normalised, Some(live.id)).await? {
         return Err(ApiError::already_exists(format!(
-            "workspace '{name}' already exists under tenant {}",
-            live.tenant_id
+            "workspace with name {name:?} already exists under tenant {tenant_name:?} (case-insensitive)"
         )));
     }
 
@@ -449,24 +530,33 @@ async fn update_workspace(
     let row = active.update(&tx).await?;
     tx.commit().await?;
 
-    audit_event(&op, "update", "workspace", id, &format!("name={name:?}"));
+    audit_event(&op, "update", "workspace", id, &format!("tenant={tenant_name:?} name={name:?}"));
     Ok((StatusCode::OK, Json(row)))
 }
 
 async fn delete_workspace(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path((tenant_name, id)): Path<(String, String)>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    check_tenant_consistency(&headers, &tenant_name)?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid workspace id", err))?;
     let op = operator(&headers);
 
+    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
     let tx = state.db.begin().await?;
     let live = workspace::Entity::find_by_id(id)
         .one(&tx)
         .await?
         .or_not_found("workspace", format!("no workspace with id {id}"))?;
+    // Ownership check.
+    if live.tenant_id != tenant_id {
+        return Err(ApiError::not_found(
+            "workspace",
+            format!("no workspace with id {id} under tenant {tenant_name:?}"),
+        ));
+    }
     if let Some(lock) = q.if_unmodified_since {
         check_lock(&lock, &live.updated_at, "workspace")?;
     }
@@ -619,19 +709,19 @@ async fn create_plugin(
     headers: HeaderMap,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&headers)?;
     let body: PluginBody = parse_body(raw_body)?;
     let raw = json_to_raw_plugin(body)?;
     let validated = validate_one(&raw)?; // 422 on rule break
+    // Additionally validate against the Phase 2 name grammar.
+    validate_plugin_name(&validated.name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
-    if plugin::Entity::find()
-        .filter(plugin::Column::Name.eq(&validated.name))
-        .one(state.db.as_ref())
-        .await?
-        .is_some()
-    {
+    // Case-insensitive uniqueness check.
+    let normalised = normalise_name(&validated.name);
+    if plugin_name_taken(state.db.as_ref(), &normalised, None).await? {
         return Err(ApiError::already_exists(format!(
-            "plugin '{}' already exists",
+            "plugin with name {:?} already exists (case-insensitive)",
             validated.name
         )));
     }
@@ -668,7 +758,7 @@ async fn create_plugin(
     let mut response = (StatusCode::CREATED, Json(row)).into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/admin/api/v1/plugins/{id}")).expect("uuid is ascii"),
+        HeaderValue::from_str(&format!("/api/plugins/{id}")).expect("uuid is ascii"),
     );
     Ok(response)
 }
@@ -679,6 +769,7 @@ async fn update_plugin(
     Path(id): Path<String>,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&headers)?;
     let body: PluginUpdateBody = parse_body(raw_body)?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid plugin id", err))?;
     let op = operator(&headers);
@@ -706,15 +797,13 @@ async fn update_plugin(
         .or_not_found("plugin", format!("no plugin with id {id}"))?;
     check_lock(&if_unmodified_since, &live.updated_at, "plugin")?;
 
-    if live.name != validated.name
-        && plugin::Entity::find()
-            .filter(plugin::Column::Name.eq(&validated.name))
-            .one(&tx)
-            .await?
-            .is_some()
-    {
+    // Additionally validate plugin name against Phase 2 grammar.
+    validate_plugin_name(&validated.name).map_err(ApiError::from)?;
+    // Case-insensitive uniqueness on rename: exclude current plugin.
+    let normalised = normalise_name(&validated.name);
+    if plugin_name_taken(&tx, &normalised, Some(live.id)).await? {
         return Err(ApiError::already_exists(format!(
-            "plugin '{}' already exists",
+            "plugin with name {:?} already exists (case-insensitive)",
             validated.name
         )));
     }
@@ -743,6 +832,7 @@ async fn delete_plugin(
     Path(id): Path<String>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&headers)?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid plugin id", err))?;
     let op = operator(&headers);
 
@@ -878,8 +968,10 @@ async fn resolve_triple(
 async fn create_workspace_plugin(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Path(tenant_name): Path<String>,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    check_tenant_consistency(&headers, &tenant_name)?;
     let body: WorkspacePluginCreate = parse_body(raw_body)?;
     let op = operator(&headers);
 
@@ -944,10 +1036,10 @@ async fn create_workspace_plugin(
     response.headers_mut().insert(
         LOCATION,
         HeaderValue::from_str(&format!(
-            "/admin/api/v1/workspace_plugins/{}/{}",
+            "/api/tenant/{tenant_name}/workspace_plugins/{}/{}",
             body.workspace_id, body.plugin_id
         ))
-        .expect("uuid is ascii"),
+        .expect("tenant_name and uuid are ascii-safe"),
     );
     Ok(response)
 }
@@ -955,9 +1047,10 @@ async fn create_workspace_plugin(
 async fn update_workspace_plugin(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((workspace_id, plugin_id)): Path<(String, String)>,
+    Path((tenant_name, workspace_id, plugin_id)): Path<(String, String, String)>,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    check_tenant_consistency(&headers, &tenant_name)?;
     let body: WorkspacePluginUpdate = parse_body(raw_body)?;
     let workspace_id = Uuid::from_str(&workspace_id)
         .map_err(|err| bad_request("invalid workspace_id path param", err))?;
@@ -1034,9 +1127,10 @@ async fn update_workspace_plugin(
 async fn delete_workspace_plugin(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((workspace_id, plugin_id)): Path<(String, String)>,
+    Path((tenant_name, workspace_id, plugin_id)): Path<(String, String, String)>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    check_tenant_consistency(&headers, &tenant_name)?;
     let workspace_id = Uuid::from_str(&workspace_id)
         .map_err(|err| bad_request("invalid workspace_id path param", err))?;
     let plugin_id = Uuid::from_str(&plugin_id)
@@ -1113,12 +1207,13 @@ struct SecretCreate {
 async fn create_secret(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Path(tenant): Path<String>,
     Json(raw_body): Json<JsonValue>,
 ) -> Result<impl IntoResponse, ApiError> {
+    check_tenant_consistency(&headers, &tenant)?;
     let body: SecretCreate = parse_body(raw_body)?;
-    let tenant = tenant_header(&headers)?;
-    let service = require_name("service", &body.service)?;
-    let name = require_name("name", &body.name)?;
+    let service = require_secret_component("service", &body.service)?;
+    let name = require_secret_component("name", &body.name)?;
     // kind and value_b64 are opaque to api — the backend is the
     // authority on what kinds it accepts and whether the base64 decodes.
     let op = operator(&headers);
@@ -1168,8 +1263,8 @@ async fn create_secret(
     let mut response = (StatusCode::CREATED, Json(resp)).into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/admin/api/v1/secrets/{service}/{name}"))
-            .expect("service and name are ascii-safe after require_name"),
+        HeaderValue::from_str(&format!("/api/tenant/{tenant}/secrets/{service}/{name}"))
+            .expect("tenant, service and name are ascii-safe"),
     );
     Ok(response)
 }
@@ -1177,11 +1272,11 @@ async fn create_secret(
 async fn delete_secret(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((service, name)): Path<(String, String)>,
+    Path((tenant, service, name)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let tenant = tenant_header(&headers)?;
-    let service = require_name("service", &service)?;
-    let name = require_name("name", &name)?;
+    check_tenant_consistency(&headers, &tenant)?;
+    let service = require_secret_component("service", &service)?;
+    let name = require_secret_component("name", &name)?;
     let op = operator(&headers);
 
     state

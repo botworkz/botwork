@@ -15,7 +15,10 @@ use leptos_shadcn_table::Table;
 
 use crate::api;
 
+use leptos_router::hooks::use_params_map;
+
 pub mod bindings;
+pub mod login;
 pub mod plugins;
 pub mod sessions;
 pub mod tenants;
@@ -98,6 +101,9 @@ pub fn render_dependents(deps: &serde_json::Value) -> AnyView {
     .into_any()
 }
 
+/// Re-exported from [`login`] for routing ergonomics.
+pub use login::Login;
+
 /// Catch-all 404 — rendered when the router has no match for the
 /// current path.
 #[component]
@@ -122,7 +128,9 @@ pub fn NotFound() -> impl IntoView {
 /// later if needed.
 #[component]
 pub fn Dashboard() -> impl IntoView {
-    let (tenants, set_tenants) = signal::<Async<usize>>(Async::Loading);
+    let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
+
     let (workspaces, set_workspaces) = signal::<Async<usize>>(Async::Loading);
     let (plugins, set_plugins) = signal::<Async<usize>>(Async::Loading);
     let (bindings, set_bindings) = signal::<Async<usize>>(Async::Loading);
@@ -130,14 +138,12 @@ pub fn Dashboard() -> impl IntoView {
     let (workers, set_workers) = signal::<Async<usize>>(Async::Loading);
 
     Effect::new(move |_| {
+        let t = tenant();
+        let t2 = t.clone();
+        let t3 = t.clone();
+        let t4 = t.clone();
         spawn_local(async move {
-            set_tenants.set(match api::list_tenants().await {
-                Ok(r) => Async::Loaded(r.total),
-                Err(err) => Async::Failed(err),
-            });
-        });
-        spawn_local(async move {
-            set_workspaces.set(match api::list_workspaces(None).await {
+            set_workspaces.set(match api::list_workspaces(&t).await {
                 Ok(r) => Async::Loaded(r.total),
                 Err(err) => Async::Failed(err),
             });
@@ -149,19 +155,19 @@ pub fn Dashboard() -> impl IntoView {
             });
         });
         spawn_local(async move {
-            set_bindings.set(match api::list_workspace_plugins(None, None).await {
+            set_bindings.set(match api::list_workspace_plugins(&t2, None, None).await {
                 Ok(r) => Async::Loaded(r.total),
                 Err(err) => Async::Failed(err),
             });
         });
         spawn_local(async move {
-            set_sessions.set(match api::list_agent_sessions(None, None, None).await {
+            set_sessions.set(match api::list_agent_sessions(&t3, None, None).await {
                 Ok(r) => Async::Loaded(r.total),
                 Err(err) => Async::Failed(err),
             });
         });
         spawn_local(async move {
-            set_workers.set(match api::list_session_workers(None, None, None).await {
+            set_workers.set(match api::list_session_workers(&t4, None, None, None).await {
                 Ok(r) => Async::Loaded(r.total),
                 Err(err) => Async::Failed(err),
             });
@@ -172,9 +178,8 @@ pub fn Dashboard() -> impl IntoView {
         <article class="space-y-6">
             <h1 class="text-3xl font-semibold tracking-tight">"Dashboard"</h1>
             <p class="text-muted-foreground">
-                "Operator-facing view of the botwork stack. \
-                 Sidebar links each entity; this page rolls up \
-                 the headline counts."
+                "Tenant: " <strong>{move || tenant()}</strong>
+                " — entity counts for this tenant."
             </p>
 
             <Card>
@@ -183,8 +188,6 @@ pub fn Dashboard() -> impl IntoView {
                 </CardHeader>
                 <CardContent>
                     <dl class="grid grid-cols-[1fr_auto] gap-y-3 text-sm">
-                        <dt class="text-muted-foreground">"Tenants"</dt>
-                        <dd><AsyncView state=tenants children=Box::new(|n| view! { <span>{n}</span> }) /></dd>
                         <dt class="text-muted-foreground">"Workspaces"</dt>
                         <dd><AsyncView state=workspaces children=Box::new(|n| view! { <span>{n}</span> }) /></dd>
                         <dt class="text-muted-foreground">"Plugins"</dt>
