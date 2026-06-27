@@ -53,7 +53,9 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, post, put};
 use axum::{Json, Router};
-use botwork_api_core::names::{normalise_name, validate_plugin_name, validate_tenant_name, validate_workspace_name};
+use botwork_api_core::names::{
+    normalise_name, validate_plugin_name, validate_tenant_name, validate_workspace_name,
+};
 use botwork_api_core::plugin_spec::{validate_one, RawPluginEntry};
 use botwork_entity::{plugin, tenant, workspace, workspace_plugin};
 use chrono::{DateTime, Utc};
@@ -68,8 +70,8 @@ use uuid::Uuid;
 
 use crate::control_plane::{outcome_summary, terminate_live_sessions, GateError};
 use crate::handler::{
-    bad_request, check_tenant_consistency, operator, parse_body, require_admin,
-    resolve_tenant_id, ApiError, ApiErrorExt, AppState, PREFIX,
+    bad_request, check_tenant_consistency, operator, parse_body, require_admin, resolve_tenant_id,
+    ApiError, ApiErrorExt, AppState, PREFIX,
 };
 use crate::secret_store::{PutSecretRequest, SecretStoreError};
 
@@ -90,9 +92,13 @@ async fn tenant_name_taken(
     use sea_orm::{FromQueryResult, Statement};
 
     #[derive(FromQueryResult)]
-    struct Row { cnt: i64 }
+    struct Row {
+        cnt: i64,
+    }
 
     let backend = db.get_database_backend();
+    // Intentionally parameterised: `normalised` is operator-supplied input and
+    // must never be interpolated into SQL text.
     let (sql, values): (&str, Vec<sea_orm::Value>) = match exclude_id {
         None => (
             "SELECT COUNT(*) AS cnt FROM tenant WHERE LOWER(name) = $1",
@@ -107,7 +113,9 @@ async fn tenant_name_taken(
     let row = Row::find_by_statement(stmt)
         .one(db)
         .await
-        .map_err(|err| ApiError::Internal { detail: format!("db: {err}") })?;
+        .map_err(|err| ApiError::Internal {
+            detail: format!("db: {err}"),
+        })?;
     Ok(row.map(|r| r.cnt > 0).unwrap_or(false))
 }
 
@@ -122,9 +130,13 @@ async fn workspace_name_taken(
     use sea_orm::{FromQueryResult, Statement};
 
     #[derive(FromQueryResult)]
-    struct Row { cnt: i64 }
+    struct Row {
+        cnt: i64,
+    }
 
     let backend = db.get_database_backend();
+    // Intentionally parameterised: `normalised` is operator-supplied input and
+    // must never be interpolated into SQL text.
     let (sql, values): (&str, Vec<sea_orm::Value>) = match exclude_id {
         None => (
             "SELECT COUNT(*) AS cnt FROM workspace WHERE tenant_id = $1 AND LOWER(name) = $2",
@@ -139,7 +151,9 @@ async fn workspace_name_taken(
     let row = Row::find_by_statement(stmt)
         .one(db)
         .await
-        .map_err(|err| ApiError::Internal { detail: format!("db: {err}") })?;
+        .map_err(|err| ApiError::Internal {
+            detail: format!("db: {err}"),
+        })?;
     Ok(row.map(|r| r.cnt > 0).unwrap_or(false))
 }
 
@@ -152,9 +166,13 @@ async fn plugin_name_taken(
     use sea_orm::{FromQueryResult, Statement};
 
     #[derive(FromQueryResult)]
-    struct Row { cnt: i64 }
+    struct Row {
+        cnt: i64,
+    }
 
     let backend = db.get_database_backend();
+    // Intentionally parameterised: `normalised` is operator-supplied input and
+    // must never be interpolated into SQL text.
     let (sql, values): (&str, Vec<sea_orm::Value>) = match exclude_id {
         None => (
             "SELECT COUNT(*) AS cnt FROM plugin WHERE LOWER(name) = $1",
@@ -169,10 +187,11 @@ async fn plugin_name_taken(
     let row = Row::find_by_statement(stmt)
         .one(db)
         .await
-        .map_err(|err| ApiError::Internal { detail: format!("db: {err}") })?;
+        .map_err(|err| ApiError::Internal {
+            detail: format!("db: {err}"),
+        })?;
     Ok(row.map(|r| r.cnt > 0).unwrap_or(false))
 }
-
 
 /// Basic non-empty validation for secret service/name components.
 /// The secret-store backend is the authority on the full set of rules;
@@ -182,6 +201,19 @@ fn require_secret_component(field: &str, value: &str) -> Result<String, ApiError
     if trimmed.is_empty() {
         return Err(ApiError::validation_failed(format!(
             "{field} must be a non-blank string"
+        )));
+    }
+    // Sanity-bound the input before the backend sees it. The backend is
+    // authoritative on full grammar; this blocks obvious traversal/null-byte
+    // patterns and unbounded component size.
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\0')
+        || trimmed.starts_with('.')
+        || trimmed.len() > 128
+    {
+        return Err(ApiError::validation_failed(format!(
+            "{field} contains forbidden characters or is too long"
         )));
     }
     Ok(trimmed.to_string())
@@ -232,10 +264,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/plugins/:id", delete(delete_plugin))
         // Tenant-scoped workspace CRUD.
         .route("/api/tenant/:tenant/workspaces", post(create_workspace))
-        .route(
-            "/api/tenant/:tenant/workspaces/:id",
-            put(update_workspace),
-        )
+        .route("/api/tenant/:tenant/workspaces/:id", put(update_workspace))
         .route(
             "/api/tenant/:tenant/workspaces/:id",
             delete(delete_workspace),
@@ -299,6 +328,8 @@ async fn create_tenant(
 
     let id = Uuid::new_v4();
     let now = Utc::now();
+    // Store the un-normalised name (preserve case); uniqueness is enforced
+    // separately via LOWER(name) checks.
     let row = tenant::ActiveModel {
         id: Set(id),
         name: Set(name.clone()),
@@ -350,6 +381,8 @@ async fn update_tenant(
 
     let now = Utc::now();
     let mut active: tenant::ActiveModel = live.into();
+    // Store the un-normalised name (preserve case); uniqueness is enforced
+    // separately via LOWER(name) checks.
     active.name = Set(name.clone());
     active.updated_at = Set(now);
     let row = active.update(&tx).await?;
@@ -461,6 +494,8 @@ async fn create_workspace(
 
     let id = Uuid::new_v4();
     let now = Utc::now();
+    // Store the un-normalised name (preserve case); uniqueness is enforced
+    // separately via LOWER(name) checks.
     let row = workspace::ActiveModel {
         id: Set(id),
         tenant_id: Set(tenant_id),
@@ -525,12 +560,20 @@ async fn update_workspace(
 
     let now = Utc::now();
     let mut active: workspace::ActiveModel = live.into();
+    // Store the un-normalised name (preserve case); uniqueness is enforced
+    // separately via LOWER(name) checks.
     active.name = Set(name.clone());
     active.updated_at = Set(now);
     let row = active.update(&tx).await?;
     tx.commit().await?;
 
-    audit_event(&op, "update", "workspace", id, &format!("tenant={tenant_name:?} name={name:?}"));
+    audit_event(
+        &op,
+        "update",
+        "workspace",
+        id,
+        &format!("tenant={tenant_name:?} name={name:?}"),
+    );
     Ok((StatusCode::OK, Json(row)))
 }
 
@@ -713,7 +756,7 @@ async fn create_plugin(
     let body: PluginBody = parse_body(raw_body)?;
     let raw = json_to_raw_plugin(body)?;
     let validated = validate_one(&raw)?; // 422 on rule break
-    // Additionally validate against the Phase 2 name grammar.
+                                         // Additionally validate against the Phase 2 name grammar.
     validate_plugin_name(&validated.name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
@@ -728,6 +771,8 @@ async fn create_plugin(
 
     let id = Uuid::new_v4();
     let now = Utc::now();
+    // Store the un-normalised name (preserve case); uniqueness is enforced
+    // separately via LOWER(name) checks.
     let row = plugin::ActiveModel {
         id: Set(id),
         name: Set(validated.name.clone()),
@@ -810,6 +855,8 @@ async fn update_plugin(
 
     let now = Utc::now();
     let mut active: plugin::ActiveModel = live.into();
+    // Store the un-normalised name (preserve case); uniqueness is enforced
+    // separately via LOWER(name) checks.
     active.name = Set(validated.name.clone());
     active.image = Set(validated.image);
     active.port = Set(i32::from(validated.port));

@@ -126,6 +126,9 @@ pub fn NotFound() -> impl IntoView {
 /// today (4-figure rows max in any realistic deployment); the
 /// `total` field is the natural seam for swapping in cached counts
 /// later if needed.
+///
+/// Tenant count is intentionally absent here: tenants are an admin-only
+/// surface and belong in a future admin dashboard, not tenant-scoped UI.
 #[component]
 pub fn Dashboard() -> impl IntoView {
     let params = use_params_map();
@@ -167,10 +170,12 @@ pub fn Dashboard() -> impl IntoView {
             });
         });
         spawn_local(async move {
-            set_workers.set(match api::list_session_workers(&t4, None, None, None).await {
-                Ok(r) => Async::Loaded(r.total),
-                Err(err) => Async::Failed(err),
-            });
+            set_workers.set(
+                match api::list_session_workers(&t4, None, None, None).await {
+                    Ok(r) => Async::Loaded(r.total),
+                    Err(err) => Async::Failed(err),
+                },
+            );
         });
     });
 

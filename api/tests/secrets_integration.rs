@@ -400,6 +400,39 @@ async fn create_secret_bad_service_name() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_secret_rejects_path_traversal_component() {
+    let mock = MockServer::start().await;
+    let client = SecretStoreClient::with_endpoint(mock.uri());
+    let Some(server) = spawn_server(client).await else {
+        eprintln!("IGNORED create_secret_rejects_path_traversal_component: docker not reachable");
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .header("x-botwork-tenant", "phlax")
+        .json(&json!({
+            "service": "../etc/passwd",
+            "name": "pat",
+            "kind": "token",
+            "value_b64": "dG9rZW4="
+        }))
+        .send()
+        .await
+        .expect("POST");
+
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"], "validation_failed");
+
+    let reqs = mock.received_requests().await.unwrap_or_default();
+    assert!(
+        reqs.is_empty(),
+        "backend should not receive a request when validation fails"
+    );
+}
+
 // ── delete_secret ───────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

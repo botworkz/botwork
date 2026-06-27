@@ -53,15 +53,15 @@ pub mod names;
 pub mod package;
 pub mod plugin_spec;
 
-pub use names::{
-    normalise_name, validate_plugin_name, validate_tenant_name, validate_workspace_name,
-    NameError, NAME_REGEX_STR, RESERVED_TENANT_NAMES,
-};
 pub use config::{
     BootstrapConfig, BootstrapConfigRaw, LoadError, TenantEntry, TenantRaw, WorkspaceEntry,
     WorkspacePluginEntry, WorkspacePluginRaw, WorkspaceRaw,
 };
 pub use error::ValidationError;
+pub use names::{
+    normalise_name, validate_plugin_name, validate_tenant_name, validate_workspace_name, NameError,
+    NAME_REGEX, RESERVED_TENANT_NAMES,
+};
 pub use package::{
     validate_package, Isolation, PackageFileEntry, SpillEntry, SpillMode, ValidatedPackage,
     DEFAULT_PACKAGE_PATH,

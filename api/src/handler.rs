@@ -219,14 +219,13 @@ impl From<ValidationError> for ApiError {
     }
 }
 
-
 impl From<NameError> for ApiError {
     fn from(err: NameError) -> Self {
         match err {
-            NameError::InvalidFormat { .. } => Self::InvalidName {
+            NameError::Invalid => Self::InvalidName {
                 detail: err.to_string(),
             },
-            NameError::Reserved { .. } => Self::ReservedName {
+            NameError::Reserved => Self::ReservedName {
                 detail: err.to_string(),
             },
         }
@@ -399,6 +398,10 @@ pub(crate) fn check_tenant_consistency(
     headers: &HeaderMap,
     path_tenant: &str,
 ) -> Result<(), ApiError> {
+    // Validate the path segment before any header match so malformed or
+    // reserved names fail at parser level (400) rather than falling through
+    // to DB lookup paths.
+    botwork_api_core::names::validate_tenant_name(path_tenant).map_err(ApiError::from)?;
     let header_tenant = headers
         .get(TENANT_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -444,7 +447,9 @@ pub(crate) async fn resolve_tenant_id(
         .one(db)
         .await?
         .map(|t| t.id)
-        .ok_or_else(|| ApiError::not_found("tenant", format!("no tenant with name {tenant_name:?}")))
+        .ok_or_else(|| {
+            ApiError::not_found("tenant", format!("no tenant with name {tenant_name:?}"))
+        })
 }
 
 // ── JSON body parse helper with envelope-shaped errors ─────────────

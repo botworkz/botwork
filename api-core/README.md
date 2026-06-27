@@ -40,7 +40,7 @@ use botwork_api_core::names::{
     validate_plugin_name,    // → Ok(()) or Err(NameError::Invalid)
     normalise_name,          // → lowercase; used for uniqueness checks
     NameError,
-    NAME_REGEX_STR,
+    NAME_REGEX,
     RESERVED_TENANT_NAMES,
 };
 ```

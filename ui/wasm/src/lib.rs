@@ -56,6 +56,9 @@ pub const UI_BASE: &str = "";
 /// Build a router-absolute URL for the ui SPA. See [`UI_BASE`]
 /// for the rationale.
 ///
+/// Kept as a macro (rather than inlining strings everywhere) so a future
+/// SPA re-prefix remains a one-line change.
+///
 /// Two flavours:
 ///
 /// * `ui_path!("/login")` → `&'static str = "/login"`. Compile-time.
@@ -63,10 +66,10 @@ pub const UI_BASE: &str = "";
 #[macro_export]
 macro_rules! ui_path {
     ($lit:literal) => {
-        concat!("", $lit)
+        $lit
     };
     ($fmt:literal, $($arg:tt)*) => {
-        format!(concat!("", $fmt), $($arg)*)
+        format!($fmt, $($arg)*)
     };
 }
 
@@ -190,9 +193,7 @@ mod tests {
 
     #[test]
     fn ui_base_matches_macro() {
-        // UI_BASE is "" and ui_path!("") is concat!("", "") = "".
-        // Both must stay in sync — if UI_BASE changes, the macro body
-        // changes with it.
+        // UI_BASE is "" and ui_path!("") is "".
         assert_eq!(UI_BASE, ui_path!(""));
     }
 }

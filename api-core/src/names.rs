@@ -1,6 +1,13 @@
 //! Tenant, workspace, and plugin name validation.
 //!
-//! # Canonical source
+//! # CANONICAL SOURCE
+//!
+//! This file MUST stay byte-for-byte identical to
+//! `botwork-extra/auth-broker/src/grammar.rs`.
+//!
+//! The previous sync was broken by an agent-driven variant rename
+//! (`InvalidFormat { name }` / `Reserved { name }` drift). On the next
+//! sync, copy upstream verbatim and do not rename symbols.
 //!
 //! **DO NOT EDIT the grammar constants or validation logic independently.**
 //! This file is vendored from `botwork-extra/auth-broker/src/grammar.rs`.
@@ -44,18 +51,17 @@
 use std::sync::OnceLock;
 
 use regex::Regex;
-use thiserror::Error;
 
 /// The regex every valid name must satisfy.
 ///
 /// Maximum 63 characters, ASCII alphanumeric plus `_` and `-`. No leading-
 /// character constraint (a digit or `_` or `-` at position 0 is permitted).
-pub const NAME_REGEX_STR: &str = r"^[A-Za-z0-9_-]{1,63}$";
+pub const NAME_REGEX: &str = r"^[A-Za-z0-9_-]{1,63}$";
 
-/// Compiled form of [`NAME_REGEX_STR`]; initialised once per process.
+/// Compiled form of [`NAME_REGEX`]; initialised once per process.
 pub fn name_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(NAME_REGEX_STR).expect("NAME_REGEX_STR is a valid regex"))
+    RE.get_or_init(|| Regex::new(NAME_REGEX).expect("NAME_REGEX is a valid regex"))
 }
 
 /// Names that are unconditionally reserved at **tenant** scope.
@@ -65,23 +71,16 @@ pub fn name_regex() -> &'static Regex {
 ///
 /// Workspaces and plugins share the regex but currently have no entries in
 /// their reserved lists; distinct lists may grow in a future version.
-pub const RESERVED_TENANT_NAMES: &[&str] =
-    &["admin", "api", "auth", "static", "stats", "logs"];
+pub const RESERVED_TENANT_NAMES: &[&str] = &["admin", "api", "auth", "static", "stats", "logs"];
 
 /// Errors returned by the name-validation functions.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NameError {
-    /// The name does not match `^[A-Za-z0-9_-]{1,63}$`.
-    #[error(
-        "invalid name {name:?}: must match ^[A-Za-z0-9_-]{{1,63}}$ \
-         (max 63 chars, ASCII alphanumeric / underscore / hyphen)"
-    )]
-    InvalidFormat { name: String },
+    #[error("name does not match {NAME_REGEX}")]
+    Invalid,
 
-    /// The normalised form of the name appears in the reserved list for
-    /// this scope.
-    #[error("name {name:?} is reserved and cannot be used for this resource")]
-    Reserved { name: String },
+    #[error("tenant name is reserved")]
+    Reserved,
 }
 
 /// Validate a proposed **tenant** name.
@@ -93,9 +92,7 @@ pub fn validate_tenant_name(name: &str) -> Result<(), NameError> {
     validate_format(name)?;
     let normalised = normalise_name(name);
     if RESERVED_TENANT_NAMES.iter().any(|&r| r == normalised) {
-        return Err(NameError::Reserved {
-            name: name.to_string(),
-        });
+        return Err(NameError::Reserved);
     }
     Ok(())
 }
@@ -136,9 +133,7 @@ fn validate_format(name: &str) -> Result<(), NameError> {
     if name_regex().is_match(name) {
         Ok(())
     } else {
-        Err(NameError::InvalidFormat {
-            name: name.to_string(),
-        })
+        Err(NameError::Invalid)
     }
 }
 
@@ -174,60 +169,32 @@ mod tests {
     #[test]
     fn rejects_64_chars() {
         let name = "a".repeat(64);
-        assert_eq!(
-            validate_tenant_name(&name),
-            Err(NameError::InvalidFormat { name: name.clone() })
-        );
+        assert_eq!(validate_tenant_name(&name), Err(NameError::Invalid));
     }
 
     #[test]
     fn rejects_empty() {
-        assert_eq!(
-            validate_tenant_name(""),
-            Err(NameError::InvalidFormat {
-                name: "".to_string()
-            })
-        );
+        assert_eq!(validate_tenant_name(""), Err(NameError::Invalid));
     }
 
     #[test]
     fn rejects_dot() {
-        assert_eq!(
-            validate_tenant_name("foo.bar"),
-            Err(NameError::InvalidFormat {
-                name: "foo.bar".to_string()
-            })
-        );
+        assert_eq!(validate_tenant_name("foo.bar"), Err(NameError::Invalid));
     }
 
     #[test]
     fn rejects_at() {
-        assert_eq!(
-            validate_tenant_name("@@foo"),
-            Err(NameError::InvalidFormat {
-                name: "@@foo".to_string()
-            })
-        );
+        assert_eq!(validate_tenant_name("@@foo"), Err(NameError::Invalid));
     }
 
     #[test]
     fn rejects_space() {
-        assert_eq!(
-            validate_tenant_name("foo bar"),
-            Err(NameError::InvalidFormat {
-                name: "foo bar".to_string()
-            })
-        );
+        assert_eq!(validate_tenant_name("foo bar"), Err(NameError::Invalid));
     }
 
     #[test]
     fn rejects_slash() {
-        assert_eq!(
-            validate_tenant_name("foo/bar"),
-            Err(NameError::InvalidFormat {
-                name: "foo/bar".to_string()
-            })
-        );
+        assert_eq!(validate_tenant_name("foo/bar"), Err(NameError::Invalid));
     }
 
     // ── reserved names (tenant scope) ──────────────────────────────────────
@@ -237,9 +204,7 @@ mod tests {
         for &r in RESERVED_TENANT_NAMES {
             assert_eq!(
                 validate_tenant_name(r),
-                Err(NameError::Reserved {
-                    name: r.to_string()
-                }),
+                Err(NameError::Reserved),
                 "expected '{r}' to be reserved"
             );
         }
@@ -247,36 +212,11 @@ mod tests {
 
     #[test]
     fn rejects_reserved_in_any_case() {
-        assert_eq!(
-            validate_tenant_name("Admin"),
-            Err(NameError::Reserved {
-                name: "Admin".to_string()
-            })
-        );
-        assert_eq!(
-            validate_tenant_name("ADMIN"),
-            Err(NameError::Reserved {
-                name: "ADMIN".to_string()
-            })
-        );
-        assert_eq!(
-            validate_tenant_name("API"),
-            Err(NameError::Reserved {
-                name: "API".to_string()
-            })
-        );
-        assert_eq!(
-            validate_tenant_name("Auth"),
-            Err(NameError::Reserved {
-                name: "Auth".to_string()
-            })
-        );
-        assert_eq!(
-            validate_tenant_name("STATIC"),
-            Err(NameError::Reserved {
-                name: "STATIC".to_string()
-            })
-        );
+        assert_eq!(validate_tenant_name("Admin"), Err(NameError::Reserved));
+        assert_eq!(validate_tenant_name("ADMIN"), Err(NameError::Reserved));
+        assert_eq!(validate_tenant_name("API"), Err(NameError::Reserved));
+        assert_eq!(validate_tenant_name("Auth"), Err(NameError::Reserved));
+        assert_eq!(validate_tenant_name("STATIC"), Err(NameError::Reserved));
     }
 
     #[test]
