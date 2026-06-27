@@ -1,7 +1,7 @@
 //! Apply a parsed [`BootstrapConfig`] to a [`DatabaseConnection`].
 //!
 //! All operations are idempotent upserts. There is no delete path —
-//! removing rows is admin-api territory, not boot-time territory.
+//! removing rows is api territory, not boot-time territory.
 //!
 //! The whole apply is wrapped in a single transaction. Either the boot
 //! sees the full new state of bootstrap.yaml or it sees the previous
@@ -19,9 +19,9 @@ use uuid::Uuid;
 
 use botwork_entity::{plugin, tenant, workspace, workspace_plugin};
 
-use botwork_admin_core::plugin_spec::ValidatedPlugin;
+use botwork_api_core::plugin_spec::ValidatedPlugin;
 
-use botwork_admin_core::BootstrapConfig;
+use botwork_api_core::BootstrapConfig;
 
 use crate::error::BootstrapError;
 

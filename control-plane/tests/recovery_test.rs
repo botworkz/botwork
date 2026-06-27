@@ -293,7 +293,7 @@ async fn recovery_includes_grace_state_excludes_inactive_and_purged() {
 
     // Five sessions across every lifecycle state. The JOIN must
     // surface only ACTIVE + GRACE; the other three are addressable in
-    // admin-api but not by envoy (no live container backing them).
+    // api but not by envoy (no live container backing them).
     let states = [
         ("agent-active", agent_session::state::ACTIVE, true),
         ("agent-grace", agent_session::state::GRACE, true),

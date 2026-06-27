@@ -283,7 +283,7 @@ request.
   binary exits 2 if unset. In production it is rendered by
   `botwork-db-init.service` into `/var/lib/botwork-db/secret.env` and
   surfaced to the unit via `EnvironmentFile=`. Same shape every
-  other DB-bound consumer (config-broker, admin-api, session-broker)
+  other DB-bound consumer (config-broker, api, session-broker)
   uses.
 - `BOTWORK_CONTROL_PLANE_BIND` (default: `0.0.0.0:9300`) — HTTP bind
   address (session intake/read surface). The default is intentional:

@@ -24,7 +24,7 @@
 //! * `created_at` / `updated_at` defaults are `CURRENT_TIMESTAMP`
 //!   server-side; nothing rust-side has to populate them. `updated_at`
 //!   triggers are not added in v0 — the only writers are bootstrap +
-//!   future admin-api, both can set it explicitly.
+//!   future api, both can set it explicitly.
 
 use sea_orm_migration::{prelude::*, schema::*};
 
@@ -179,7 +179,7 @@ impl MigrationTrait for Migration {
             .await?;
 
         // Reverse-direction lookup: "where is plugin X used?" used by
-        // future admin-api delete-guards. PK gives us (workspace_id, ...)
+        // future api delete-guards. PK gives us (workspace_id, ...)
         // for free; this index gives us (plugin_id, ...) for free.
         manager
             .create_index(

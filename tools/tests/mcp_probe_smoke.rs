@@ -38,7 +38,7 @@ use serde_json::{json, Value as JsonValue};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-use botwork_admin_core::package::{Isolation, PackageFileEntry, SpillEntry, SpillMode};
+use botwork_api_core::package::{Isolation, PackageFileEntry, SpillEntry, SpillMode};
 use botwork_tools::mcp_probe::compose::compose;
 use botwork_tools::mcp_probe::probe::handshake;
 use botwork_tools::VERSION;
@@ -222,8 +222,8 @@ async fn compose_pipeline_against_in_process_server() {
     assert!(probe.resources.is_empty());
     assert!(probe.prompts.is_empty());
 
-    let pkg = botwork_admin_core::package::validate_package(&minimal_package())
-        .expect("package validates");
+    let pkg =
+        botwork_api_core::package::validate_package(&minimal_package()).expect("package validates");
     let labels = compose(&pkg, &probe).expect("compose");
 
     // Spot-check the full pipeline — schema version, tool count,

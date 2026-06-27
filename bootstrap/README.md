@@ -13,7 +13,7 @@ design context. v0 schema is documented in `db/README.md`.
 ## Lifetime
 
 Bootstrap is **deliberately throwaway**. The plan is for the future
-admin-api to own the entity lifecycle (create/update/delete via
+api to own the entity lifecycle (create/update/delete via
 authenticated HTTP, with audit + validation). When that lands, this
 crate goes away. The convention is to keep the surface narrow so the
 deletion is mechanical:
@@ -21,7 +21,7 @@ deletion is mechanical:
 * one config file, one shape;
 * one subcommand-less binary;
 * no clever "reconciliation": delete-on-diff is out of scope; v0
-  only upserts. Removing rows requires the admin-api.
+  only upserts. Removing rows requires the api.
 
 ## `bootstrap.yaml` shape
 
@@ -147,7 +147,7 @@ no test reads `BOTWORK_DATABASE_URL`. The integration test
    expected per-table update counts.
 
 Post-#127 there is no bootstrap container any more; the equivalent
-end-to-end production-path proof now lives in admin-api's smoke test
-(invoked by the `admin-api` job in `.github/workflows/ci.yml`), which
+end-to-end production-path proof now lives in api's smoke test
+(invoked by the `api` job in `.github/workflows/ci.yml`), which
 exercises the same `apply()` library function via the `botwork-tools
 bootstrap` CLI.

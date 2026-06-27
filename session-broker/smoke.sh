@@ -17,7 +17,7 @@ set -euo pipefail
 
 # RFE #105 PR2: session-broker became a DB consumer. It now
 # fail-fasts on a missing BOTWORK_DATABASE_URL the same way
-# config-broker / bootstrap / admin-api do, so the container
+# config-broker / bootstrap / api do, so the container
 # smoke flips from "boot it and grep the bind log" to "boot
 # it without env and grep the fail-fast error" — the
 # symmetric shape config-broker's smoke uses.

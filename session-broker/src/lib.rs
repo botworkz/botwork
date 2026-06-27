@@ -299,7 +299,7 @@ pub async fn run() -> Result<(), String> {
 
     // RFE #105 PR2: connect to postgres and build the agent_session
     // write-through handle. Same env contract as config-broker /
-    // bootstrap / admin-api — `BOTWORK_DATABASE_URL` is required in
+    // bootstrap / api — `BOTWORK_DATABASE_URL` is required in
     // production and is rendered into the systemd unit by the
     // `EnvironmentFile=/var/lib/botwork-db/secret.env` line.
     //

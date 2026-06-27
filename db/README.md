@@ -67,7 +67,7 @@ The full `sea-orm-migration` operator CLI surface
 (`status` / `down` / `fresh` / `refresh` / `reset`) is intentionally NOT
 exposed here in v0 — see `src/main.rs` and RFE #97 (out-of-scope) for
 the reasoning. It comes back as a feature-gated second binary once
-production needs an operator surface that exists outside admin-api.
+production needs an operator surface that exists outside api.
 
 ## Schema (v0)
 
@@ -143,7 +143,7 @@ collision.
 
 `PRIMARY KEY (workspace_id, plugin_id)` is the natural binding key.
 A reverse-direction index `ix_workspace_plugin_plugin (plugin_id)`
-exists for the future admin-api "where is plugin X used?" query.
+exists for the future api "where is plugin X used?" query.
 
 #### `plugin_image_facet` (RFE #146)
 
@@ -240,7 +240,7 @@ grows.
   tears down its bindings in the same statement.
 * **`workspace_plugin.plugin_id` → `plugin.id` ON DELETE RESTRICT.**
   A plugin in use anywhere must be disabled everywhere before it can
-  be removed. The future admin-api's "delete plugin" surface walks the
+  be removed. The future api's "delete plugin" surface walks the
   reverse-index and refuses the operation if any bindings still point
   at it.
 * **`opaque_password_file.tenant_id` → `tenant.id` ON DELETE CASCADE**

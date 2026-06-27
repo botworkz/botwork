@@ -28,7 +28,7 @@
 //!   off the image and may legitimately exist before a `plugin` row
 //!   does (the catalog upserter ingests every loaded image; the
 //!   `plugin` row only appears once an operator binds it via
-//!   bootstrap / admin-api). The (plugin_name, image_config_sha)
+//!   bootstrap / api). The (plugin_name, image_config_sha)
 //!   UNIQUE keeps duplicates out; the future pointer-repoint step
 //!   joins by name.
 //! * `image_ref text NOT NULL` — the resolved image reference

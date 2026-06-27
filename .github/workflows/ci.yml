@@ -22,9 +22,9 @@
 #      `--no-cache`. The bytes pushed to GHCR are the bytes CI smoke-
 #      tested.
 #
-# Workspace-only crates (admin-core, db/entity, launcher, tools,
-# admin-ui/wasm) stay covered by the workspace-wide `rust.yml`; the
-# explicit wasm32 build for `botwork-admin-ui-wasm` lives there too.
+# Workspace-only crates (api-core, db/entity, launcher, tools,
+# ui/wasm) stay covered by the workspace-wide `rust.yml`; the
+# explicit wasm32 build for `botwork-ui-wasm` lives there too.
 #
 # The bump-VERSION-after-release job has split into its own
 # `bump.yml` (triggered by `release: [published]`) so this workflow's
@@ -71,7 +71,7 @@ jobs:
         # `package`/`binary` are the cargo names. For the simple cases
         # the four collapse, but we declare them explicitly so the
         # divergences for `db/migration` (image is `db-migrate`,
-        # binary is `botwork-migration`) and `admin-ui` (image covers
+        # binary is `botwork-migration`) and `ui` (image covers
         # both server and wasm crates, the package is the server)
         # are visible here rather than buried in `_crate.yml`.
         #
@@ -96,16 +96,16 @@ jobs:
           service: db-migrate
           package: botwork-migration
           binary: botwork-migration
-        - crate: admin-api
-          service: admin-api
-          package: botwork-admin-api
-          binary: botwork-admin-api
+        - crate: api
+          service: api
+          package: botwork-api
+          binary: botwork-api
           needs-db-migrate: true
           needs-docker: true
-        - crate: admin-ui
-          service: admin-ui
-          package: botwork-admin-ui-server
-          binary: botwork-admin-ui-server
+        - crate: ui
+          service: ui
+          package: botwork-ui-server
+          binary: botwork-ui-server
     uses: ./.github/workflows/_crate.yml
     with:
       crate: ${{ matrix.crate }}

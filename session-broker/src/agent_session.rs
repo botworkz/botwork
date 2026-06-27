@@ -62,7 +62,7 @@
 //!
 //! Cache invalidation is "process restart" — the same shape config-
 //! broker uses for its plugin descriptors. If a tenant is deleted out
-//! from under us (admin-api, eventually), the cache returns stale ids
+//! from under us (api, eventually), the cache returns stale ids
 //! that the FK constraint will reject; we surface that as a `warn!`
 //! and the operator either bounces session-broker or waits for the
 //! janitor to age out the inactive row.
