@@ -94,6 +94,16 @@ on:
         required: false
         type: boolean
         default: false
+      needs-docker:
+        description: >-
+          Mount the host docker socket and run the cargo test container
+          on the host network so testcontainers-rs can spawn sidecar
+          fixtures (e.g. postgres) visible to the in-container test
+          process. Required for crates whose integration tests use
+          `testcontainers::*` (today: admin-api).
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -149,6 +159,8 @@ jobs:
     # runs inside the same container so the wasm32 target and the
     # trunk binary are guaranteed present.
     - name: cargo fmt, clippy, test, build (in container)
+      env:
+        NEEDS_DOCKER: ${{ inputs.needs-docker }}
       run: |
         set -euo pipefail
         mkdir -p "${HOME}/.cargo" "${RUNNER_TEMP}/container-home"
@@ -160,9 +172,23 @@ jobs:
           # host's `~/.cargo/registry` cache.
           trunk_prefix='(cd admin-ui/wasm && trunk build --release) && '
         fi
+
+        # When tests use testcontainers-rs, plumb host docker access into
+        # the cargo container and join the host network so get_host() +
+        # get_host_port_ipv4() resolve to a reachable host-side port.
+        docker_access_flags=""
+        if [ "${NEEDS_DOCKER}" = "true" ]; then
+          docker_sock_gid="$(stat -c %g /var/run/docker.sock)"
+          docker_access_flags="--network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --group-add ${docker_sock_gid}"
+        fi
+
+        # shellcheck disable=SC2086
         docker run --rm \
           --platform linux/amd64 \
           --user "$(id -u):$(id -g)" \
+          ${docker_access_flags} \
           -e HOME=/tmp/home \
           -e BOTWORK_GIT_SHA="${GITHUB_SHA}" \
           -e CARGO_HOME=/cargo-home \

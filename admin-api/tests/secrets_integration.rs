@@ -150,6 +150,14 @@ async fn spawn_server(secret_store: SecretStoreClient) -> Option<Server> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_secret_happy_path() {
     let mock = MockServer::start().await;
+    // Register the strict wiremock expectation only after the docker probe.
+    // If docker is unreachable we intentionally return early, and mounting
+    // `.expect(1)` before that point would panic at MockServer drop-time.
+    let client = SecretStoreClient::with_endpoint(mock.uri());
+    let Some(server) = spawn_server(client).await else {
+        eprintln!("IGNORED create_secret_happy_path: docker not reachable");
+        return;
+    };
     Mock::given(method("POST"))
         .and(path("/secrets"))
         .respond_with(
@@ -159,12 +167,6 @@ async fn create_secret_happy_path() {
         .expect(1)
         .mount(&mock)
         .await;
-
-    let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
-        eprintln!("IGNORED create_secret_happy_path: docker not reachable");
-        return;
-    };
 
     let resp = reqwest::Client::new()
         .post(format!("{}/admin/api/v1/secrets", server.base))
@@ -403,6 +405,14 @@ async fn create_secret_bad_service_name() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_secret_happy_path() {
     let mock = MockServer::start().await;
+    // Register the strict wiremock expectation only after the docker probe.
+    // If docker is unreachable we intentionally return early, and mounting
+    // `.expect(1)` before that point would panic at MockServer drop-time.
+    let client = SecretStoreClient::with_endpoint(mock.uri());
+    let Some(server) = spawn_server(client).await else {
+        eprintln!("IGNORED delete_secret_happy_path: docker not reachable");
+        return;
+    };
     Mock::given(method("DELETE"))
         .and(path("/secrets/github/pat"))
         .and(query_param("tenant", "phlax"))
@@ -410,12 +420,6 @@ async fn delete_secret_happy_path() {
         .expect(1)
         .mount(&mock)
         .await;
-
-    let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
-        eprintln!("IGNORED delete_secret_happy_path: docker not reachable");
-        return;
-    };
 
     let resp = reqwest::Client::new()
         .delete(format!("{}/admin/api/v1/secrets/github/pat", server.base))
