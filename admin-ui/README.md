@@ -13,7 +13,8 @@ admin-ui/
 │   ├── Cargo.toml        ← cdylib + rlib, leptos = "0.8" csr
 │   ├── Trunk.toml        ← build config + dev proxy → admin-api
 │   ├── index.html        ← trunk template
-│   ├── admin.css         ← baseline operator stylesheet
+│   ├── input.css         ← Tailwind entry + shadcn theme tokens
+│   ├── tailwind.config.js
 │   ├── src/
 │   │   └── lib.rs        ← App component + #[wasm_bindgen(start)]
 │   └── dist/             ← (gitignored) trunk build --release output
@@ -46,12 +47,12 @@ disjoint dependency graphs is the standard Leptos-CSR layout (see
 `botworkz/gander`'s `gander-chat` for the same split, just without
 the embedding server).
 
-## v0 surface
+## UI surface
 
-* `wasm/`: a one-page Leptos app that fetches
-  `GET /admin/api/v1/health` from the same origin and renders the
-  response. One signal, one component, one fetch — entirely focused
-  on proving the build + deploy pipeline.
+* `wasm/`: full operator UI with routed entity pages:
+  * Tenants / Workspaces / Plugins / Bindings: full CRUD.
+  * Sessions / Workers: read-only list + detail.
+  * Dashboard: aggregate counts across all entities.
 * `server/`:
   * `GET /healthz` — `{ "status": "ok" }`. Liveness probe for
     systemd + goss.
@@ -72,12 +73,16 @@ You'll need `trunk` and the wasm32 target installed on your dev box:
 ```bash
 cargo install trunk --version 0.21.5 --locked
 rustup target add wasm32-unknown-unknown
+curl -fsSL https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-linux-x64 \
+  -o ~/.cargo/bin/tailwindcss
+chmod +x ~/.cargo/bin/tailwindcss
 ```
 
 Then:
 
 ```bash
 # 1. Build the WASM bundle into admin-ui/wasm/dist/
+#    (Trunk pre_build hook runs Tailwind automatically)
 cd admin-ui/wasm
 trunk build --release
 
@@ -115,7 +120,14 @@ trunk serve
 Open `http://127.0.0.1:8080/`. The browser fetches
 `/admin/api/v1/health` → trunk dev server proxies to
 `127.0.0.1:9400/admin/api/v1/health`. No CORS. Edit Rust source →
-trunk rebuilds wasm, browser reloads.
+trunk rebuilds wasm, re-runs Tailwind via hook, browser reloads.
+
+## Styling
+
+`admin-ui/wasm` now uses Tailwind CSS + `leptos-shadcn-*` component
+crates (pinned versions in `wasm/Cargo.toml`). The Tailwind input is
+`wasm/input.css`, with shadcn-style CSS variable tokens and dark mode
+enabled by default via `class="dark"` on `<body>` in `wasm/index.html`.
 
 ## Production invocation pattern
 
