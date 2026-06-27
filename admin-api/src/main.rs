@@ -12,7 +12,7 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use botwork_admin_api::{build_router, AppState, ControlPlaneClient};
+use botwork_admin_api::{build_router, AppState, ControlPlaneClient, SecretStoreClient};
 use botwork_entity::connection::{connect_from_env, ConnectError, DATABASE_URL_ENV};
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -83,8 +83,24 @@ async fn main() -> ExitCode {
     // its own reqwest pool; the construction is cheap.
     let control_plane = ControlPlaneClient::from_env();
 
+    // Secret-store backend. SecretStoreClient reads
+    // BOTWORK_SECRET_STORE_ENDPOINT (default
+    // http://secret_store:9500) and the break-glass
+    // BOTWORK_ADMIN_API_DISABLE_SECRET_STORE flag.
+    let secret_store = SecretStoreClient::from_env();
+    let ss_endpoint = std::env::var(botwork_admin_api::secret_store::ENDPOINT_ENV)
+        .unwrap_or_else(|_| botwork_admin_api::secret_store::ENDPOINT_DEFAULT.to_string());
+    info!(
+        "{PREFIX} secret-store endpoint={ss_endpoint} disabled={}",
+        secret_store.is_disabled(),
+    );
+
     let bind = bind_from_env();
-    let app = build_router(AppState { db, control_plane });
+    let app = build_router(AppState {
+        db,
+        control_plane,
+        secret_store,
+    });
 
     let listener = match TcpListener::bind(&bind).await {
         Ok(listener) => listener,
