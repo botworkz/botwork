@@ -44,6 +44,10 @@ fn make_headers(values: &[(&str, &str)]) -> HttpHeaders {
 }
 
 fn make_state() -> AppState {
+    make_state_with_grace(Duration::from_secs(300))
+}
+
+fn make_state_with_grace(disconnect_grace: Duration) -> AppState {
     AppState {
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
@@ -54,6 +58,7 @@ fn make_state() -> AppState {
         tombstones: Arc::new(Mutex::new(HashMap::new())),
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        disconnect_grace,
         // RFE #105 PR2 / round-3: production wires three DB-bound
         // handles via `run()`. Liveness tests drive the grace state
         // machine against an in-memory `transport_sessions` map only,
@@ -467,7 +472,7 @@ fn env_knob_default_is_30_seconds() {
 
 #[test]
 fn env_knob_custom_value_is_parsed() {
-    // Verify the env-knob parsing path used in schedule_grace_timer.
+    // Verify the env-knob parsing path used when AppState is constructed.
     for (raw, expected) in [("5", 5u64), ("0", 0), ("3600", 3600)] {
         let val = Some(raw)
             .and_then(|s: &str| s.parse::<u64>().ok())
@@ -493,11 +498,7 @@ fn env_knob_custom_value_is_parsed() {
 #[tokio::test]
 async fn grace_expiry_invokes_teardown() {
     // Use a short grace so the test runs quickly.
-    // Safety: tests run in a single process; other tests use set_var(…, "300")
-    // or long sleeps, so a brief 1-second window here is fine.
-    std::env::set_var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS", "1");
-
-    let state = make_state();
+    let state = make_state_with_grace(Duration::from_secs(1));
     insert_transport(&state, "sess-reap", "mcp_session_reap").await;
 
     // Open one stream so the liveness counter is bumped to 1.
@@ -552,9 +553,6 @@ async fn grace_expiry_invokes_teardown() {
 /// indicate the schedule-vs-bump race or another ordering hazard.
 #[tokio::test]
 async fn concurrent_bump_drop_never_leaves_corrupt_state() {
-    // Use a long grace so the timer does not fire during the test window.
-    std::env::set_var("BOTWORK_BROKER_DISCONNECT_GRACE_SECS", "300");
-
     let state = make_state();
     insert_transport(&state, "sess-race", "mcp_session_race").await;
 
