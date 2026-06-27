@@ -34,12 +34,15 @@ fn pretty(v: &JsonValue) -> String {
 
 #[component]
 pub fn List() -> impl IntoView {
+    let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let (state, set_state) =
         signal::<Async<api::ListResponse<api::WorkspacePlugin>>>(Async::Loading);
 
     Effect::new(move |_| {
+        let t = tenant();
         spawn_local(async move {
-            set_state.set(match api::list_workspace_plugins(None, None).await {
+            set_state.set(match api::list_workspace_plugins(&t, None, None).await {
                 Ok(r) => Async::Loaded(r),
                 Err(err) => Async::Failed(err),
             });
@@ -132,14 +135,16 @@ pub fn List() -> impl IntoView {
 #[component]
 pub fn Detail() -> impl IntoView {
     let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let wid = move || params.read().get("workspace_id").unwrap_or_default();
     let pid = move || params.read().get("plugin_id").unwrap_or_default();
     let (state, set_state) = signal::<Async<api::WorkspacePlugin>>(Async::Loading);
 
     Effect::new(move |_| {
+        let t = tenant();
         let (w, p) = (wid(), pid());
         spawn_local(async move {
-            set_state.set(match api::get_workspace_plugin(&w, &p).await {
+            set_state.set(match api::get_workspace_plugin(&t, &w, &p).await {
                 Ok(b) => Async::Loaded(b),
                 Err(err) => Async::Failed(err),
             });
@@ -195,6 +200,8 @@ pub fn Detail() -> impl IntoView {
 
 #[component]
 pub fn Create() -> impl IntoView {
+    let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     // We need workspace + plugin selects, populated from list calls.
     let (workspaces, set_workspaces) =
         signal::<Async<api::ListResponse<api::Workspace>>>(Async::Loading);
@@ -208,7 +215,8 @@ pub fn Create() -> impl IntoView {
 
     Effect::new(move |_| {
         spawn_local(async move {
-            let result = api::list_workspaces(None).await;
+            let t = tenant();
+            let result = api::list_workspaces(&t).await;
             if let Ok(r) = &result {
                 if let Some(first) = r.items.first() {
                     set_workspace_id.set(first.id.clone());
@@ -238,11 +246,11 @@ pub fn Create() -> impl IntoView {
         ev.prevent_default();
         let config_val = {
             let s = config.get_untracked();
-            let t = s.trim();
-            if t.is_empty() {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
                 None
             } else {
-                match serde_json::from_str::<JsonValue>(t) {
+                match serde_json::from_str::<JsonValue>(&trimmed) {
                     Ok(v) => Some(v),
                     Err(err) => {
                         set_error.set(Some(format!("invalid config JSON: {err}")));
@@ -266,8 +274,9 @@ pub fn Create() -> impl IntoView {
         set_api_error.set(None);
         set_busy.set(true);
         let navigate = navigate.clone();
+        let t = tenant();
         spawn_local(async move {
-            match api::create_workspace_plugin(&body).await {
+            match api::create_workspace_plugin(&t, &body).await {
                 Ok(b) => navigate(
                     &ui_path!("/bindings/{}/{}", b.workspace_id, b.plugin_id),
                     Default::default(),
@@ -366,6 +375,7 @@ pub fn Create() -> impl IntoView {
 #[component]
 pub fn Edit() -> impl IntoView {
     let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let wid = Memo::new(move |_| params.read().get("workspace_id").unwrap_or_default());
     let pid = Memo::new(move |_| params.read().get("plugin_id").unwrap_or_default());
 
@@ -377,9 +387,10 @@ pub fn Edit() -> impl IntoView {
     let (busy, set_busy) = signal(false);
 
     Effect::new(move |_| {
+        let t = tenant();
         let (w, p) = (wid.get(), pid.get());
         spawn_local(async move {
-            match api::get_workspace_plugin(&w, &p).await {
+            match api::get_workspace_plugin(&t, &w, &p).await {
                 Ok(b) => {
                     if let Some(c) = &b.config {
                         set_config.set(pretty(c));
@@ -397,13 +408,14 @@ pub fn Edit() -> impl IntoView {
     let navigate = use_navigate();
     let on_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
+        let tenant_name = tenant();
         let config_val = {
             let s = config.get_untracked();
-            let t = s.trim();
-            if t.is_empty() {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
                 None
             } else {
-                match serde_json::from_str::<JsonValue>(t) {
+                match serde_json::from_str::<JsonValue>(&trimmed) {
                     Ok(v) => Some(v),
                     Err(err) => {
                         set_error.set(Some(format!("invalid config JSON: {err}")));
@@ -422,10 +434,10 @@ pub fn Edit() -> impl IntoView {
         let (w, p) = (wid.get_untracked(), pid.get_untracked());
         let navigate = navigate.clone();
         spawn_local(async move {
-            match api::update_workspace_plugin(&w, &p, &body).await {
+            match api::update_workspace_plugin(&tenant_name, &w, &p, &body).await {
                 Ok(_) => navigate(&ui_path!("/bindings/{}/{}", w, p), Default::default()),
                 Err(api::ApiError::Stale { message }) => {
-                    if let Ok(fresh) = api::get_workspace_plugin(&w, &p).await {
+                    if let Ok(fresh) = api::get_workspace_plugin(&tenant_name, &w, &p).await {
                         set_lock.set(fresh.updated_at.clone());
                         set_loaded.set(Async::Loaded(fresh));
                     }
@@ -497,6 +509,7 @@ pub fn Edit() -> impl IntoView {
 #[component]
 pub fn DeleteConfirm() -> impl IntoView {
     let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let wid = Memo::new(move |_| params.read().get("workspace_id").unwrap_or_default());
     let pid = Memo::new(move |_| params.read().get("plugin_id").unwrap_or_default());
 
@@ -505,9 +518,10 @@ pub fn DeleteConfirm() -> impl IntoView {
     let (busy, set_busy) = signal(false);
 
     Effect::new(move |_| {
+        let t = tenant();
         let (w, p) = (wid.get(), pid.get());
         spawn_local(async move {
-            set_loaded.set(match api::get_workspace_plugin(&w, &p).await {
+            set_loaded.set(match api::get_workspace_plugin(&t, &w, &p).await {
                 Ok(b) => Async::Loaded(b),
                 Err(err) => Async::Failed(err),
             });
@@ -531,12 +545,13 @@ pub fn DeleteConfirm() -> impl IntoView {
                     );
                     let navigate_inner = navigate.clone();
                     let on_confirm = move |_ev: web_sys::MouseEvent| {
+                        let t2 = tenant();
                         let (w, p) = (wid.get_untracked(), pid.get_untracked());
                         set_busy.set(true);
                         set_error.set(None);
                         let navigate = navigate_inner.clone();
                         spawn_local(async move {
-                            match api::delete_workspace_plugin(&w, &p).await {
+                            match api::delete_workspace_plugin(&t2, &w, &p).await {
                                 Ok(()) => navigate(ui_path!("/bindings"), Default::default()),
                                 Err(err) => {
                                     set_error.set(Some(err));

@@ -10,19 +10,24 @@
 
 set -euo pipefail
 
-# End-to-end production-path proof for api (RFE #106 PR1):
+# End-to-end production-path proof for api (RFE #106 PR1,
+# Phase 2 reshape — botworkz/space#311):
 #
 #   1. boot a fresh postgres on a throwaway docker network,
 #   2. land the schema via db-migrate (api's health probe
 #      runs SELECT 1; it doesn't strictly need migrations, but
 #      production always has them — keep the test path honest),
 #   3. run api on the same network with the DB URL set,
-#   4. curl /admin/api/v1/health from a sibling client container
-#      on the same network (the host has no published port —
-#      same trust-boundary posture as config-broker / control-
-#      plane), assert the response shape,
+#   4. curl /api/health from a sibling client container on the
+#      same network (the host has no published port — same
+#      trust-boundary posture as config-broker / control-plane),
+#      assert the response shape,
 #   5. confirm BOTWORK_DATABASE_URL unset surfaces a structured
 #      error and a non-zero exit (operator misconfig is fail-loud).
+#
+# Post-Phase-2 the public route is /api/health (unauthed liveness
+# probe). The old /admin/api/v1/health space was retired in the
+# space#311 cut and no compat shim ships.
 #
 # postgres pin must match db/migration/tests/migrate_smoke.rs and
 # the vm-baked shasset; drift between the three is exactly what
@@ -86,13 +91,13 @@ if [[ "${ready}" -ne 1 ]]; then
   exit 1
 fi
 
-# 4. — hit /admin/api/v1/health from a sibling curl container.
+# 4. — hit /api/health from a sibling curl container.
 # We pin curl by digest-less tag (CI-only, throwaway) and use
 # --fail so a non-2xx surfaces as a non-zero exit. The body is
 # tiny JSON; check the two contract fields.
 body="$(docker run --rm --network "${net}" curlimages/curl:8.10.1 \
   --fail --silent --show-error \
-  http://admin_api:9400/admin/api/v1/health)"
+  http://admin_api:9400/api/health)"
 echo "health body: ${body}"
 echo "${body}" | grep -q '"status":"ok"'
 echo "${body}" | grep -q '"db":"reachable"'

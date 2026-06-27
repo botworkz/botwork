@@ -40,11 +40,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use botwork_api_core::names::NameError;
 use botwork_api_core::ValidationError;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tracing::{error, warn};
+use uuid::Uuid;
 
 use crate::control_plane::ControlPlaneClient;
 use crate::secret_store::SecretStoreClient;
@@ -101,6 +103,20 @@ pub enum ApiError {
     /// JSON wrong" from "you typed it right but it violates the
     /// schema."
     ValidationFailed { detail: String },
+    /// Name failed the `^[A-Za-z0-9_-]{1,63}$` regex. 400
+    /// `invalid_name`. Distinct from `bad_request` so callers can
+    /// surface a name-specific error message.
+    InvalidName { detail: String },
+    /// Name matched the regex but appears in the reserved list. 400
+    /// `reserved_name`.
+    ReservedName { detail: String },
+    /// Path-borne tenant (`/api/tenant/{tenant}/…`) does not match the
+    /// `x-botwork-tenant` header injected by auth-broker, or the
+    /// header is absent. 403 `cross_tenant_forbidden`.
+    CrossTenantForbidden { path_tenant: String },
+    /// Endpoint requires `x-botwork-admin` header (admin-gated surface)
+    /// but the header was absent or empty. 403 `admin_required`.
+    AdminRequired,
     /// Delete-guard preflight found dependents (RESTRICT would fire
     /// at the DB). 409 `has_dependents`. `dependents` is a JSON
     /// array describing each blocker; clients render this.
@@ -203,6 +219,18 @@ impl From<ValidationError> for ApiError {
     }
 }
 
+impl From<NameError> for ApiError {
+    fn from(err: NameError) -> Self {
+        match err {
+            NameError::Invalid => Self::InvalidName {
+                detail: err.to_string(),
+            },
+            NameError::Reserved => Self::ReservedName {
+                detail: err.to_string(),
+            },
+        }
+    }
+}
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, body) = match self {
@@ -227,6 +255,40 @@ impl IntoResponse for ApiError {
                 ErrorBody {
                     error: "validation_failed",
                     message: detail,
+                    dependents: None,
+                },
+            ),
+            ApiError::InvalidName { detail } => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "invalid_name",
+                    message: detail,
+                    dependents: None,
+                },
+            ),
+            ApiError::ReservedName { detail } => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "reserved_name",
+                    message: detail,
+                    dependents: None,
+                },
+            ),
+            ApiError::CrossTenantForbidden { path_tenant } => (
+                StatusCode::FORBIDDEN,
+                ErrorBody {
+                    error: "cross_tenant_forbidden",
+                    message: format!(
+                        "path tenant {path_tenant:?} does not match authenticated tenant"
+                    ),
+                    dependents: None,
+                },
+            ),
+            ApiError::AdminRequired => (
+                StatusCode::FORBIDDEN,
+                ErrorBody {
+                    error: "admin_required",
+                    message: "this endpoint requires the x-botwork-admin header".to_string(),
                     dependents: None,
                 },
             ),
@@ -324,13 +386,70 @@ pub(crate) fn operator(headers: &HeaderMap) -> String {
 /// ext_authz (a misconfiguration in the deployment).
 pub(crate) const TENANT_HEADER: &str = "x-botwork-tenant";
 
-pub(crate) fn tenant_header(headers: &HeaderMap) -> Result<String, ApiError> {
-    headers
+/// Verify that the path-borne tenant name matches the `x-botwork-tenant`
+/// header injected by auth-broker.
+///
+/// Returns 403 `cross_tenant_forbidden` if:
+/// * the header is absent or empty (request didn't come through auth-broker), or
+/// * the header value differs from `path_tenant` (cross-tenant access attempt).
+///
+/// This is the primary auth enforcement for all tenant-scoped endpoints.
+pub(crate) fn check_tenant_consistency(
+    headers: &HeaderMap,
+    path_tenant: &str,
+) -> Result<(), ApiError> {
+    // Validate the path segment before any header match so malformed or
+    // reserved names fail at parser level (400) rather than falling through
+    // to DB lookup paths.
+    botwork_api_core::names::validate_tenant_name(path_tenant).map_err(ApiError::from)?;
+    let header_tenant = headers
         .get(TENANT_HEADER)
         .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty());
+    match header_tenant {
+        Some(ht) if ht == path_tenant => Ok(()),
+        _ => Err(ApiError::CrossTenantForbidden {
+            path_tenant: path_tenant.to_string(),
+        }),
+    }
+}
+
+/// Require the `x-botwork-admin` header to be present and non-empty.
+///
+/// Returns 403 `admin_required` if the header is absent or empty.
+/// Used on admin-gated endpoints (`/api/tenants`, `/api/plugins`).
+pub(crate) fn require_admin(headers: &HeaderMap) -> Result<(), ApiError> {
+    let has_admin = headers
+        .get(ADMIN_HEADER)
+        .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .ok_or_else(|| ApiError::bad_request("missing x-botwork-tenant header"))
+        .is_some();
+    if has_admin {
+        Ok(())
+    } else {
+        Err(ApiError::AdminRequired)
+    }
+}
+
+/// Resolve a tenant name to its UUID. Returns 404 if no such tenant exists.
+///
+/// Used by tenant-scoped handlers to translate the path segment `{tenant}`
+/// (a human-readable name) into the UUID primary key used for DB joins.
+pub(crate) async fn resolve_tenant_id(
+    db: &DatabaseConnection,
+    tenant_name: &str,
+) -> Result<Uuid, ApiError> {
+    use botwork_entity::tenant;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    tenant::Entity::find()
+        .filter(tenant::Column::Name.eq(tenant_name))
+        .one(db)
+        .await?
+        .map(|t| t.id)
+        .ok_or_else(|| {
+            ApiError::not_found("tenant", format!("no tenant with name {tenant_name:?}"))
+        })
 }
 
 // ── JSON body parse helper with envelope-shaped errors ─────────────
@@ -371,7 +490,7 @@ pub(crate) fn parse_body<T: serde::de::DeserializeOwned>(body: JsonValue) -> Res
         .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))
 }
 
-// ── health (unchanged from PR1) ────────────────────────────────────
+// ── health (unauthed liveness probe) ──────────────────────────────
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
@@ -408,7 +527,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        .route("/admin/api/v1/health", get(health))
+        // Unauthed liveness probe.
+        .route("/api/health", get(health))
         .merge(read::router())
         .merge(write::router())
         .with_state(state)
