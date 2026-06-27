@@ -2,19 +2,11 @@
 
 //! Workspace CRUD pages.
 //!
-//! Same five-route shape as tenants. The interesting differences from
-//! the tenant template:
-//!
-//! * **Create** takes a `tenant_id` foreign key. v0 renders it as a
-//!   select populated from `list_tenants()`; if the operator landed
-//!   on this page from a tenant's detail link, the upstream link
-//!   could pre-select but the URL grammar doesn't carry that today.
-//! * **Delete** CASCADEs to `workspace_plugin` bindings and
-//!   `agent_session` rows, AND walks the live-state gate against
-//!   control-plane to terminate any live sessions. Failure modes:
-//!   `409 has_dependents` is not actually emitted (CASCADE wipes
-//!   everything), but `503 unavailable` can be when control-plane
-//!   is down mid-cascade.
+//! After botworkz/space#311 Phase 2 tenant scoping is path-borne:
+//! every workspace page lives under `/{tenant}/workspaces/*`.
+//! The tenant is extracted from the route param and threaded into
+//! all API calls; the old tenant-selector on the Create form is gone
+//! (the workspace always belongs to the path-borne tenant).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -24,15 +16,17 @@ use web_sys::SubmitEvent;
 
 use crate::api;
 use crate::pages::{render_dependents, Async, AsyncView};
-use crate::ui_path;
 
 #[component]
 pub fn List() -> impl IntoView {
+    let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let (state, set_state) = signal::<Async<api::ListResponse<api::Workspace>>>(Async::Loading);
 
     Effect::new(move |_| {
+        let t = tenant();
         spawn_local(async move {
-            set_state.set(match api::list_workspaces(None).await {
+            set_state.set(match api::list_workspaces(&t).await {
                 Ok(r) => Async::Loaded(r),
                 Err(err) => Async::Failed(err),
             });
@@ -43,62 +37,46 @@ pub fn List() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Workspaces"</h1>
-                <A href=ui_path!("/workspaces/new")>
-                    <button class="primary">"+ New workspace"</button>
-                </A>
+                <A href=move || format!("/{}/workspaces/new", tenant())>"+ New"</A>
             </header>
 
             <AsyncView
                 state=state
-                children=Box::new(|r: api::ListResponse<api::Workspace>| {
+                children=Box::new(move |r: api::ListResponse<api::Workspace>| {
                     if r.items.is_empty() {
-                        view! {
-                            <p class="muted">
-                                "No workspaces yet. Click "
-                                <em>"New workspace"</em>
-                                " to create one (you must have at least one tenant first)."
+                        return view! {
+                            <p class="empty">
+                                "No workspaces yet. "
+                                <A href=move || format!("/{}/workspaces/new", tenant())>
+                                    "Create one"
+                                </A>
+                                "."
                             </p>
-                        }.into_any()
-                    } else {
-                        view! {
-                            <table class="entity-list">
-                                <thead>
-                                    <tr>
-                                        <th>"Name"</th>
-                                        <th>"Tenant"</th>
-                                        <th>"ID"</th>
-                                        <th>"Updated"</th>
-                                        <th>"Actions"</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {r.items.into_iter().map(|w| {
-                                        let detail = ui_path!("/workspaces/{}", w.id);
-                                        let edit = ui_path!("/workspaces/{}/edit", w.id);
-                                        let delete = ui_path!("/workspaces/{}/delete", w.id);
-                                        let tenant_link = ui_path!("/tenants/{}", w.tenant_id);
-                                        view! {
-                                            <tr>
-                                                <td><A href=detail.clone()>{w.name.clone()}</A></td>
-                                                <td>
-                                                    <A href=tenant_link>
-                                                        <code class="muted">{w.tenant_id.clone()}</code>
-                                                    </A>
-                                                </td>
-                                                <td><code class="muted">{w.id.clone()}</code></td>
-                                                <td>{w.updated_at.clone()}</td>
-                                                <td class="actions">
-                                                    <A href=edit>"Edit"</A>
-                                                    " · "
-                                                    <A href=delete>"Delete"</A>
-                                                </td>
-                                            </tr>
-                                        }
-                                    }).collect_view()}
-                                </tbody>
-                            </table>
-                        }.into_any()
+                        }.into_any();
                     }
+                    view! {
+                        <table class="entity-table">
+                            <thead>
+                                <tr>
+                                    <th>"Name"</th>
+                                    <th>"ID"</th>
+                                    <th>"Created"</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {r.items.into_iter().map(|w| {
+                                    let detail_link = format!("/{}/workspaces/{}", tenant(), w.id);
+                                    view! {
+                                        <tr>
+                                            <td><A href=detail_link>{w.name.clone()}</A></td>
+                                            <td><code>{w.id.clone()}</code></td>
+                                            <td>{w.created_at.clone()}</td>
+                                        </tr>
+                                    }
+                                }).collect_view()}
+                            </tbody>
+                        </table>
+                    }.into_any()
                 })
             />
         </article>
@@ -108,13 +86,15 @@ pub fn List() -> impl IntoView {
 #[component]
 pub fn Detail() -> impl IntoView {
     let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let id = move || params.read().get("id").unwrap_or_default();
     let (state, set_state) = signal::<Async<api::Workspace>>(Async::Loading);
 
     Effect::new(move |_| {
+        let t = tenant();
         let id_val = id();
         spawn_local(async move {
-            set_state.set(match api::get_workspace(&id_val).await {
+            set_state.set(match api::get_workspace(&t, &id_val).await {
                 Ok(w) => Async::Loaded(w),
                 Err(err) => Async::Failed(err),
             });
@@ -125,21 +105,18 @@ pub fn Detail() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Workspace"</h1>
-                <p><A href=ui_path!("/workspaces")>"← All workspaces"</A></p>
+                <p><A href=move || format!("/{}/workspaces", tenant())>"← All workspaces"</A></p>
             </header>
 
             <AsyncView
                 state=state
-                children=Box::new(|w: api::Workspace| {
-                    let edit_link = ui_path!("/workspaces/{}/edit", w.id);
-                    let delete_link = ui_path!("/workspaces/{}/delete", w.id);
-                    let tenant_link = ui_path!("/tenants/{}", w.tenant_id);
+                children=Box::new(move |w: api::Workspace| {
+                    let edit_link = format!("/{}/workspaces/{}/edit", tenant(), w.id);
+                    let delete_link = format!("/{}/workspaces/{}/delete", tenant(), w.id);
                     view! {
                         <dl class="entity-detail">
                             <dt>"Name"</dt>
                             <dd>{w.name.clone()}</dd>
-                            <dt>"Tenant"</dt>
-                            <dd><A href=tenant_link><code>{w.tenant_id.clone()}</code></A></dd>
                             <dt>"ID"</dt>
                             <dd><code>{w.id.clone()}</code></dd>
                             <dt>"Created"</dt>
@@ -161,44 +138,20 @@ pub fn Detail() -> impl IntoView {
 
 #[component]
 pub fn Create() -> impl IntoView {
-    // Need a tenant list to populate the select.
-    let (tenants, set_tenants) = signal::<Async<api::ListResponse<api::Tenant>>>(Async::Loading);
-    let (tenant_id, set_tenant_id) = signal(String::new());
+    let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
+
     let (name, set_name) = signal(String::new());
     let (error, set_error) = signal::<Option<api::ApiError>>(None);
     let (busy, set_busy) = signal(false);
 
-    Effect::new(move |_| {
-        spawn_local(async move {
-            let result = api::list_tenants().await;
-            // Default the select to the first tenant so the form is
-            // useful on submit. Skipped if the list errors or is
-            // empty; the form's submit handler validates the value.
-            if let Ok(r) = &result {
-                if let Some(first) = r.items.first() {
-                    set_tenant_id.set(first.id.clone());
-                }
-            }
-            set_tenants.set(match result {
-                Ok(r) => Async::Loaded(r),
-                Err(err) => Async::Failed(err),
-            });
-        });
-    });
-
     let navigate = use_navigate();
     let on_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
+        let t = tenant();
         let body = api::WorkspaceCreate {
-            tenant_id: tenant_id.get_untracked(),
             name: name.get_untracked().trim().to_string(),
         };
-        if body.tenant_id.is_empty() {
-            set_error.set(Some(api::ApiError::ValidationFailed {
-                message: "tenant must be selected".to_string(),
-            }));
-            return;
-        }
         if body.name.is_empty() {
             set_error.set(Some(api::ApiError::ValidationFailed {
                 message: "name must not be blank".to_string(),
@@ -209,8 +162,8 @@ pub fn Create() -> impl IntoView {
         set_error.set(None);
         let navigate = navigate.clone();
         spawn_local(async move {
-            match api::create_workspace(&body).await {
-                Ok(w) => navigate(&ui_path!("/workspaces/{}", w.id), Default::default()),
+            match api::create_workspace(&t, &body).await {
+                Ok(w) => navigate(&format!("/{}/workspaces/{}", t, w.id), Default::default()),
                 Err(err) => {
                     set_error.set(Some(err));
                     set_busy.set(false);
@@ -223,64 +176,31 @@ pub fn Create() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"New workspace"</h1>
-                <p><A href=ui_path!("/workspaces")>"← All workspaces"</A></p>
+                <p><A href=move || format!("/{}/workspaces", tenant())>"← All workspaces"</A></p>
             </header>
 
-            <AsyncView
-                state=tenants
-                children=Box::new(move |r: api::ListResponse<api::Tenant>| {
-                    if r.items.is_empty() {
-                        return view! {
-                            <p class="error">
-                                "No tenants exist; you must create a tenant before \
-                                 you can create a workspace under it."
-                            </p>
-                        }.into_any();
-                    }
-                    let on_submit = on_submit.clone();
-                    view! {
-                        <form class="entity-form" on:submit=on_submit>
-                            <label>
-                                <span>"Tenant"</span>
-                                <select
-                                    on:change:target=move |ev| set_tenant_id.set(ev.target().value())
-                                >
-                                    {r.items.into_iter().map(|t| {
-                                        view! {
-                                            <option value=t.id.clone()>
-                                                {t.name.clone()}
-                                                " ("
-                                                {t.id.clone()}
-                                                ")"
-                                            </option>
-                                        }
-                                    }).collect_view()}
-                                </select>
-                            </label>
-                            <label>
-                                <span>"Name"</span>
-                                <input
-                                    type="text"
-                                    prop:value=move || name.get()
-                                    on:input:target=move |ev| set_name.set(ev.target().value())
-                                />
-                            </label>
-                            {move || error.get().map(|err| view! {
-                                <p class="error">{err.message().to_string()}</p>
-                            })}
-                            <div class="actions">
-                                <button
-                                    type="submit"
-                                    class="primary"
-                                    prop:disabled=move || busy.get()
-                                >
-                                    {move || if busy.get() { "Creating…" } else { "Create" }}
-                                </button>
-                            </div>
-                        </form>
-                    }.into_any()
-                })
-            />
+            <form class="entity-form" on:submit=on_submit>
+                <label>
+                    <span>"Name"</span>
+                    <input
+                        type="text"
+                        prop:value=move || name.get()
+                        on:input:target=move |ev| set_name.set(ev.target().value())
+                    />
+                </label>
+                {move || error.get().map(|err| view! {
+                    <p class="error">{err.message().to_string()}</p>
+                })}
+                <div class="actions">
+                    <button
+                        type="submit"
+                        class="primary"
+                        prop:disabled=move || busy.get()
+                    >
+                        {move || if busy.get() { "Creating…" } else { "Create" }}
+                    </button>
+                </div>
+            </form>
         </article>
     }
 }
@@ -288,6 +208,7 @@ pub fn Create() -> impl IntoView {
 #[component]
 pub fn Edit() -> impl IntoView {
     let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let id = Memo::new(move |_| params.read().get("id").unwrap_or_default());
 
     let (loaded, set_loaded) = signal::<Async<api::Workspace>>(Async::Loading);
@@ -297,9 +218,10 @@ pub fn Edit() -> impl IntoView {
     let (busy, set_busy) = signal(false);
 
     Effect::new(move |_| {
+        let t = tenant();
         let id_val = id.get();
         spawn_local(async move {
-            match api::get_workspace(&id_val).await {
+            match api::get_workspace(&t, &id_val).await {
                 Ok(w) => {
                     set_name.set(w.name.clone());
                     set_lock.set(w.updated_at.clone());
@@ -313,6 +235,7 @@ pub fn Edit() -> impl IntoView {
     let navigate = use_navigate();
     let on_submit = move |ev: SubmitEvent| {
         ev.prevent_default();
+        let t = tenant();
         let body = api::WorkspaceUpdate {
             name: name.get_untracked().trim().to_string(),
             if_unmodified_since: lock.get_untracked(),
@@ -328,10 +251,10 @@ pub fn Edit() -> impl IntoView {
         set_error.set(None);
         let navigate = navigate.clone();
         spawn_local(async move {
-            match api::update_workspace(&id_val, &body).await {
-                Ok(_) => navigate(&ui_path!("/workspaces/{}", id_val), Default::default()),
+            match api::update_workspace(&t, &id_val, &body).await {
+                Ok(_) => navigate(&format!("/{}/workspaces/{}", t, id_val), Default::default()),
                 Err(api::ApiError::Stale { message }) => {
-                    if let Ok(fresh) = api::get_workspace(&id_val).await {
+                    if let Ok(fresh) = api::get_workspace(&t, &id_val).await {
                         set_lock.set(fresh.updated_at.clone());
                         set_loaded.set(Async::Loaded(fresh));
                     }
@@ -350,7 +273,7 @@ pub fn Edit() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Edit workspace"</h1>
-                <p><A href=ui_path!("/workspaces")>"← All workspaces"</A></p>
+                <p><A href=move || format!("/{}/workspaces", tenant())>"← All workspaces"</A></p>
             </header>
 
             <AsyncView
@@ -393,6 +316,7 @@ pub fn Edit() -> impl IntoView {
 #[component]
 pub fn DeleteConfirm() -> impl IntoView {
     let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let id = Memo::new(move |_| params.read().get("id").unwrap_or_default());
 
     let (loaded, set_loaded) = signal::<Async<api::Workspace>>(Async::Loading);
@@ -400,9 +324,10 @@ pub fn DeleteConfirm() -> impl IntoView {
     let (busy, set_busy) = signal(false);
 
     Effect::new(move |_| {
+        let t = tenant();
         let id_val = id.get();
         spawn_local(async move {
-            set_loaded.set(match api::get_workspace(&id_val).await {
+            set_loaded.set(match api::get_workspace(&t, &id_val).await {
                 Ok(w) => Async::Loaded(w),
                 Err(err) => Async::Failed(err),
             });
@@ -415,22 +340,23 @@ pub fn DeleteConfirm() -> impl IntoView {
         <article class="page">
             <header class="page-header">
                 <h1>"Delete workspace"</h1>
-                <p><A href=ui_path!("/workspaces")>"← All workspaces"</A></p>
+                <p><A href=move || format!("/{}/workspaces", tenant())>"← All workspaces"</A></p>
             </header>
 
             <AsyncView
                 state=loaded
                 children=Box::new(move |w: api::Workspace| {
-                    let detail_link = ui_path!("/workspaces/{}", w.id);
+                    let detail_link = format!("/{}/workspaces/{}", tenant(), w.id);
                     let navigate_inner = navigate.clone();
                     let on_confirm = move |_ev: web_sys::MouseEvent| {
+                        let t = tenant();
                         let id_val = id.get_untracked();
                         set_busy.set(true);
                         set_error.set(None);
                         let navigate = navigate_inner.clone();
                         spawn_local(async move {
-                            match api::delete_workspace(&id_val).await {
-                                Ok(()) => navigate(ui_path!("/workspaces"), Default::default()),
+                            match api::delete_workspace(&t, &id_val).await {
+                                Ok(()) => navigate(&format!("/{}/workspaces", t), Default::default()),
                                 Err(err) => {
                                     set_error.set(Some(err));
                                     set_busy.set(false);

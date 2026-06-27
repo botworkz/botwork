@@ -31,6 +31,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
+    "Headers",
     "Window",
     "Request",
     "RequestInit",
@@ -44,6 +45,10 @@ console_error_panic_hook = "0.1"
 # JSON wire format for talking to api.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# OPAQUE login client dependency is intentionally not wired yet in this
+# repository clone: the canonical crate lives in botwork-extra and is not
+# accessible here. See `src/pages/login.rs` TODO.
 
 # shadcn/ui components (Leptos 0.8 compatible), imported per-component
 # to keep the wasm bundle lean.

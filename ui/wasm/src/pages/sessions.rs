@@ -35,11 +35,14 @@ use crate::ui_path;
 
 #[component]
 pub fn List() -> impl IntoView {
+    let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let (state, set_state) = signal::<Async<api::ListResponse<api::AgentSession>>>(Async::Loading);
     let (state_filter, set_state_filter) = signal::<String>(String::new());
     let (open_filter, set_open_filter) = signal(false);
 
     let refetch = move || {
+        let t = tenant();
         let filter = state_filter.get_untracked();
         let filter_opt = if filter.is_empty() {
             None
@@ -48,7 +51,7 @@ pub fn List() -> impl IntoView {
         };
         spawn_local(async move {
             let f = filter_opt.as_deref();
-            set_state.set(match api::list_agent_sessions(None, None, f).await {
+            set_state.set(match api::list_agent_sessions(&t, None, f).await {
                 Ok(r) => Async::Loaded(r),
                 Err(err) => Async::Failed(err),
             });
@@ -170,13 +173,14 @@ pub fn List() -> impl IntoView {
 #[component]
 pub fn Detail() -> impl IntoView {
     let params = use_params_map();
+    let tenant = move || params.with(|p| p.get("tenant").unwrap_or_default().to_string());
     let id = move || params.read().get("id").unwrap_or_default();
     let (state, set_state) = signal::<Async<api::AgentSession>>(Async::Loading);
 
     Effect::new(move |_| {
         let id_val = id();
         spawn_local(async move {
-            set_state.set(match api::get_agent_session(&id_val).await {
+            set_state.set(match api::get_agent_session(&tenant(), &id_val).await {
                 Ok(s) => Async::Loaded(s),
                 Err(err) => Async::Failed(err),
             });
