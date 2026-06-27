@@ -21,7 +21,7 @@ use reqwest::StatusCode;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-const INDEX_MARKER: &str = "botwork admin";
+const INDEX_MARKER: &str = "botwork ui";
 
 struct Server {
     base: String,
