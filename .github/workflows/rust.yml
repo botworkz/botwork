@@ -20,12 +20,12 @@ jobs:
         targets: wasm32-unknown-unknown
     - uses: Swatinem/rust-cache@v2
     - run: cargo fmt --all -- --check
-    # `--workspace` covers every member, including admin-ui/wasm.
+    # `--workspace` covers every member, including ui/wasm.
     # The wasm crate compiles on the host (it's just a normal lib for
     # cargo fmt's purposes) — only its *runtime* needs wasm32.
     - run: cargo clippy --workspace --all-targets -- -D warnings
     - run: cargo test --workspace --all-targets
-    # Explicit wasm32 build for admin-ui/wasm so a regression in the
+    # Explicit wasm32 build for ui/wasm so a regression in the
     # WASM-only dep tree (wasm-bindgen / web-sys / leptos csr) doesn't
     # sneak through the host-targeted checks above.
-    - run: cargo build -p botwork-admin-ui-wasm --target wasm32-unknown-unknown
+    - run: cargo build -p botwork-ui-wasm --target wasm32-unknown-unknown

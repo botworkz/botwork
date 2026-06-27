@@ -2,7 +2,7 @@
 //!
 //! Holds SeaORM entity definitions and the helpers used to obtain a
 //! [`sea_orm::DatabaseConnection`]. Every persistence-aware consumer
-//! (config-broker, control-plane, the future admin-api, the bootstrap
+//! (config-broker, control-plane, the future api, the bootstrap
 //! binary, the future auth-broker) depends on this crate so the
 //! schema has a single source of truth.
 //!
@@ -91,7 +91,7 @@
 //! # Trust posture
 //!
 //! v0 has a single DB role (`botwork`) used by every consumer. Per-consumer
-//! roles + GRANTs are a follow-up that pays off once admin-api lands — until
+//! roles + GRANTs are a follow-up that pays off once api lands — until
 //! then trust is enforced at the docker-network boundary (`botwork-internal`)
 //! and at the bind-mounted credential file (`/var/lib/botwork-db/secret.env`,
 //! mode 0600). The crate itself does no credential plumbing: it reads
@@ -104,7 +104,7 @@
 //! was deliberately deferred until a real query forces structure — see
 //! RFE #101 § "JSONB vs typed columns". Treat the JSON as opaque at the
 //! storage layer; validation happens on the wire boundary
-//! (config-broker / future admin-api), not in the entity layer.
+//! (config-broker / future api), not in the entity layer.
 
 pub mod agent_session;
 pub mod connection;

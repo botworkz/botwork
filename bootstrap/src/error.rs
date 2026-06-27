@@ -1,25 +1,25 @@
 //! Errors for the bootstrap apply-to-database path.
 //!
-//! Surfaces the per-entry + list-level rules from `botwork-admin-core`
+//! Surfaces the per-entry + list-level rules from `botwork-api-core`
 //! (1:1 mirror via `From<ValidationError>`) plus the sea-orm DB error
 //! the writer produces. There is no file-IO / yaml-parse variant any
 //! more — those used to belong to the boot-time binary's
 //! `BootstrapConfig::load(path)` codepath, which retired in RFE #106
 //! PR4 (botwork#118 / botwork#TBD). The caller now reads + validates
-//! the yaml via `botwork_admin_core::BootstrapConfig::from_raw` and
+//! the yaml via `botwork_api_core::BootstrapConfig::from_raw` and
 //! converts the resulting `LoadError` itself if it needs to.
 //!
 //! Variants stay enumerated rather than collapsing into a single
-//! `Validation(#[from] …)` arm so downstream consumers (admin-api
+//! `Validation(#[from] …)` arm so downstream consumers (api
 //! tests, config-broker tests, session-broker tests) can pattern-
 //! match cleanly when they care.
 
-use botwork_admin_core::ValidationError;
+use botwork_api_core::ValidationError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum BootstrapError {
-    // -- Per-entry rules (1:1 with admin-core ValidationError) ------------
+    // -- Per-entry rules (1:1 with api-core ValidationError) ------------
     #[error("empty {0}: must be a non-blank string")]
     EmptyName(&'static str),
 
@@ -59,7 +59,7 @@ pub enum BootstrapError {
 
     /// Bootstrap-side tripwire for `PackageInvalid` — the
     /// `mcp-package.yaml`-only validation variant
-    /// (`botwork-admin-core::ValidationError::PackageInvalid`) that
+    /// (`botwork-api-core::ValidationError::PackageInvalid`) that
     /// `validate_package` emits for the package-side-only rules
     /// (isolation, spill). Bootstrap reads `bootstrap.yaml`, not
     /// `mcp-package.yaml`, so the package-side validator is never on

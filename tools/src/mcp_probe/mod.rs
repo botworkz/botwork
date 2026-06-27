@@ -6,7 +6,7 @@
 //! Three modes, all of which share the same probe pipeline:
 //!
 //! 1. Read + validate the `mcp-package.yaml` sidecar (per
-//!    [`botwork_admin_core::package`]).
+//!    [`botwork_api_core::package`]).
 //! 2. Start the input image as a throwaway docker container, bind it
 //!    to an ephemeral host port, wait for `:port` to accept TCP.
 //! 3. Drive an MCP `initialize` → `notifications/initialized` →
@@ -36,7 +36,7 @@
 //!
 //! ## File layout
 //!
-//! * [`package`] — wraps the [`botwork_admin_core::package`] loader
+//! * [`package`] — wraps the [`botwork_api_core::package`] loader
 //!   with a thin io-error layer so the CLI surface stays uniform
 //!   with [`crate::bootstrap`]'s `LoadError`.
 //! * [`probe`] — container lifecycle + MCP handshake.

@@ -11,7 +11,7 @@
 //!
 //!   1. botwork#118 added `botwork-tools bootstrap`, an
 //!      operator-facing replacement that POSTs through
-//!      `botwork-admin-api` instead of writing sea-orm directly.
+//!      `botwork-api` instead of writing sea-orm directly.
 //!   2. botwork#vm-side replaced `botwork-bootstrap.service`
 //!      with `botwork-import.service` (a host-side oneshot
 //!      calling `botwork-tools bootstrap`).
@@ -20,7 +20,7 @@
 //!
 //! What survives is this crate's library API — the
 //! sea-orm-direct `apply()` algorithm and its supporting types.
-//! Three integration tests (`admin-api`, `config-broker`,
+//! Three integration tests (`api`, `config-broker`,
 //! `session-broker`) use it as a fast seed helper:
 //!
 //! ```ignore
@@ -29,9 +29,9 @@
 //!     apply(&db, &cfg).await?;
 //! ```
 //!
-//! Going through admin-api in those tests would cost ~3x the
-//! per-test setup (postgres + admin-api + the HTTP roundtrip per
-//! row) for no signal that doesn't already live in admin-api's
+//! Going through api in those tests would cost ~3x the
+//! per-test setup (postgres + api + the HTTP roundtrip per
+//! row) for no signal that doesn't already live in api's
 //! own integration tests. The crate stays as a test-only lib.
 //!
 //! # Idempotency
@@ -48,11 +48,11 @@ pub mod runner;
 
 pub use error::BootstrapError;
 
-// Re-export from admin-core so existing consumers
-// (`botwork-admin-api`, `botwork-config-broker`,
+// Re-export from api-core so existing consumers
+// (`botwork-api`, `botwork-config-broker`,
 // `botwork-session-broker` integration tests) keep their
 // `use botwork_bootstrap::{...}` paths working.
-pub use botwork_admin_core::{
+pub use botwork_api_core::{
     BootstrapConfig, BootstrapConfigRaw, RawPluginEntry, TenantEntry, ValidatedPlugin,
     WorkspaceEntry, WorkspacePluginEntry,
 };

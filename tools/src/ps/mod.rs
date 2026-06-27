@@ -16,7 +16,7 @@
 //! Two read shapes were considered:
 //!
 //! 1. `docker exec botwork-postgres psql …` and join the entity
-//!    tables directly. This duplicates the JOIN admin-api already
+//!    tables directly. This duplicates the JOIN api already
 //!    runs, requires the postgres password from
 //!    `/var/lib/botwork-db/secret.env` (a root-only file), and
 //!    couples the operator tool to the schema rather than the

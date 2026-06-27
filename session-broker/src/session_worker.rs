@@ -236,7 +236,7 @@ impl SessionWorkerWriter {
 
     /// Resolve `plugin_id` for the broker's spawn-time UPDATE.
     /// Mirrors the agent_session/agent_session_id resolver pattern but
-    /// is uncached: plugin rows churn (admin-api can delete one) and
+    /// is uncached: plugin rows churn (api can delete one) and
     /// the spawn path is rare enough that one extra SELECT per spawn
     /// isn't on a hot path.
     async fn plugin_id(&self, name: &str) -> Result<Uuid, SessionWorkerWriteError> {

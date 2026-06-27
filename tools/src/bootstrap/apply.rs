@@ -2,14 +2,14 @@
 //!
 //! ## What "apply" means
 //!
-//! Walk a [`BootstrapConfig`] (validated by admin-core) and bring
-//! admin-api's state into agreement. Idempotent: re-running with an
+//! Walk a [`BootstrapConfig`] (validated by api-core) and bring
+//! api's state into agreement. Idempotent: re-running with an
 //! unchanged yaml is a no-op (no POSTs, no PUTs, only the read-side
 //! GETs).
 //!
 //! The algorithm is:
 //!
-//! 1. Walk `plugins[]`: list plugins via admin-api, then for each
+//! 1. Walk `plugins[]`: list plugins via api, then for each
 //!    yaml entry either POST (new) or PUT (existing-but-changed).
 //! 2. Walk `tenants[]`: list tenants, then for each yaml tenant
 //!    POST-or-PUT (no PUT today — name is the join key, rename via
@@ -24,7 +24,7 @@
 //! Diff comparison is done on the comparable-field set per entity
 //! (same shape `bootstrap/src/runner.rs` uses for sea-orm
 //! upserts): name + content fields. `updated_at` round-trips
-//! through `if_unmodified_since` only on PUTs so admin-api's
+//! through `if_unmodified_since` only on PUTs so api's
 //! optimistic-lock check stays consistent — and the tool's GET-
 //! before-PUT means the lock is fresh.
 //!
@@ -36,10 +36,10 @@
 
 use std::collections::HashMap;
 
-use botwork_admin_core::config::{
+use botwork_api_core::config::{
     BootstrapConfig, TenantEntry, WorkspaceEntry, WorkspacePluginEntry,
 };
-use botwork_admin_core::plugin_spec::ValidatedPlugin;
+use botwork_api_core::plugin_spec::ValidatedPlugin;
 use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
@@ -205,7 +205,7 @@ fn apply_bindings(
     for binding in &workspace_entry.plugins {
         outcome.bindings_total += 1;
         let plugin_id = plugin_ids.get(&binding.name).copied().ok_or_else(|| {
-            // Validation guarantees this can't happen — admin-core's
+            // Validation guarantees this can't happen — api-core's
             // BootstrapConfig::from_raw fails on UnknownPluginRef. The
             // expect-shaped error is a tripwire.
             ApplyError::MissingPluginId(binding.name.clone())
@@ -252,10 +252,10 @@ fn plugin_differs(existing: &Plugin, entry: &ValidatedPlugin) -> bool {
 }
 
 fn plugin_create_body(entry: &ValidatedPlugin) -> serde_json::Value {
-    // admin-api's POST /plugins body uses the RAW plugin-entry shape
-    // (admin-core::RawPluginEntry), and re-runs the validator on it.
+    // api's POST /plugins body uses the RAW plugin-entry shape
+    // (api-core::RawPluginEntry), and re-runs the validator on it.
     // We've already locally validated, but we cannot just hand the
-    // normalised output back — admin-core's validator deliberately
+    // normalised output back — api-core's validator deliberately
     // rejects some of its own output forms as input:
     //
     //   * env:    validator returns `[{name, value}, ...]`; the raw
@@ -285,7 +285,7 @@ fn plugin_create_body(entry: &ValidatedPlugin) -> serde_json::Value {
 }
 
 /// ValidatedPlugin.env is `[{name, value}, ...]`; the wire-input
-/// shape admin-api expects is the original mapping `{KEY: value, ...}`.
+/// shape api expects is the original mapping `{KEY: value, ...}`.
 /// Walk the validated list back into the mapping shape. Non-conformant
 /// items get filtered out — the validator already proved the list is
 /// well-formed, but defensive defaults keep apply robust against
@@ -308,11 +308,11 @@ fn denormalise_env(env: &serde_json::Value) -> serde_json::Value {
 }
 
 /// ValidatedPlugin.egress is `{"mode":"all"|"none"}` or
-/// `{"allow":[...]}`; the wire-input shape admin-api expects is the
+/// `{"allow":[...]}`; the wire-input shape api expects is the
 /// bare string `"all"` / `"none"`, or the mapping `{"allow":[...]}`
 /// as-is.
 ///
-/// The admin-core validator EXPLICITLY rejects `{"mode": ...}` as an
+/// The api-core validator EXPLICITLY rejects `{"mode": ...}` as an
 /// input (it's the wire-OUTPUT form, reserved for downstream
 /// consumers). Without this denormalisation, every plugin POST fails
 /// 422 with `"'mode:' is reserved for the wire encoding"`.
@@ -389,7 +389,7 @@ pub enum ApplyError {
     #[error(transparent)]
     Client(#[from] ClientError),
 
-    /// Validation tripwire — admin-core's BootstrapConfig::from_raw
+    /// Validation tripwire — api-core's BootstrapConfig::from_raw
     /// should have caught any unknown plugin reference before we
     /// reached the apply phase. If this fires it means the validator
     /// missed a case.

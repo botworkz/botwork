@@ -9,20 +9,20 @@ edition = "2021"
 # + a `botwork/bootstrap:local` container that ran as a systemd
 # oneshot at boot. That production codepath was retired in RFE #106
 # PR4 (botwork#118 + the vm-side cutover) in favour of
-# `botwork-tools bootstrap` calling admin-api. The container,
+# `botwork-tools bootstrap` calling api. The container,
 # Earthfile target, and CI plumbing are gone; this crate now only
 # survives as a fast in-process seed helper for the three integration
-# tests under `admin-api/`, `config-broker/`, and `session-broker/`
-# (going through admin-api in those would cost ~3x setup for no
+# tests under `api/`, `config-broker/`, and `session-broker/`
+# (going through api in those would cost ~3x setup for no
 # additional signal).
 [lib]
 name = "botwork_bootstrap"
 path = "src/lib.rs"
 
 [dependencies]
-# admin-core owns the bootstrap-config shape + validators; this
+# api-core owns the bootstrap-config shape + validators; this
 # crate is just the sea-orm writer that walks a validated tree.
-botwork-admin-core = { path = "../admin-core" }
+botwork-api-core = { path = "../api-core" }
 botwork-entity = { path = "../db/entity" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 sea-orm = { version = "1.1.20", default-features = false, features = [

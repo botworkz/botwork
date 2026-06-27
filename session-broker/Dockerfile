@@ -4,7 +4,7 @@
 #
 # Five-stage build to support two build-source contracts on one
 # Dockerfile (see also config-broker, control-plane, bootstrap,
-# admin-api, db/migration, admin-ui — same shape across the workspace):
+# api, db/migration, ui — same shape across the workspace):
 #
 #   BINARY_SOURCE=source   (default; local `earthly +session-broker-image`,
 #                           and any bare `docker build`) — cargo build
@@ -41,9 +41,9 @@ FROM rust:1.90-slim-bookworm AS rust-toolchain
 # cache id prefix — same idea as mcp-extra's `mcp-extra-` ids.
 FROM rust-toolchain AS build-source
 WORKDIR /build
-COPY admin-api/ ./admin-api/
-COPY admin-core/ ./admin-core/
-COPY admin-ui/ ./admin-ui/
+COPY api/ ./api/
+COPY api-core/ ./api-core/
+COPY ui/ ./ui/
 COPY bootstrap/ ./bootstrap/
 COPY config-broker/ ./config-broker/
 COPY control-plane/ ./control-plane/

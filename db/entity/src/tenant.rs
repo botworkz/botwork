@@ -8,7 +8,7 @@
 //! * `workspace.tenant_id` → **RESTRICT** — deleting a tenant must be a
 //!   deliberate two-step operation (drop workspaces first, then the
 //!   tenant). The day a stray `DELETE FROM tenant WHERE name = 'phlax'`
-//!   slips into a migration during admin-api bring-up, we want it to
+//!   slips into a migration during api bring-up, we want it to
 //!   fail loudly rather than cascade-delete every binding.
 //! * `agent_session.tenant_id` → **CASCADE** — agent sessions are a
 //!   secondary projection of the tenant; they have no value once the

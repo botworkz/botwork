@@ -20,7 +20,7 @@
 //! run, what binding overrides to apply, what egress posture to
 //! enforce. That row is single-version (updates clobber) and is
 //! written by `botwork-bootstrap` from `bootstrap.yaml` today, by the
-//! future admin-api tomorrow.
+//! future api tomorrow.
 //!
 //! `plugin_image_facet` is the producer-side surface — what the
 //! plugin's image *declares* about itself (`tools`, `capabilities`,

@@ -1,7 +1,7 @@
-//! Thin loader wrapping [`botwork_admin_core::package::validate_package`]
+//! Thin loader wrapping [`botwork_api_core::package::validate_package`]
 //! with the io-error layer the CLI needs.
 //!
-//! The shape here mirrors [`botwork_admin_core::config::LoadError`]
+//! The shape here mirrors [`botwork_api_core::config::LoadError`]
 //! intentionally — the operator-facing failure modes (file missing,
 //! file unreadable, yaml parse error, validation rule failed) are
 //! the same set whether they're producing a `bootstrap.yaml` or an
@@ -11,8 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
-use botwork_admin_core::package::{validate_package, PackageFileEntry, ValidatedPackage};
-use botwork_admin_core::ValidationError;
+use botwork_api_core::package::{validate_package, PackageFileEntry, ValidatedPackage};
+use botwork_api_core::ValidationError;
 use thiserror::Error;
 
 /// Read + parse + validate an `mcp-package.yaml`.
@@ -32,7 +32,7 @@ pub fn load(path: &Path) -> Result<ValidatedPackage, PackageLoadError> {
 ///
 /// All four variants map to exit code 3 ("package load failure")
 /// from [`crate::mcp_probe::McpProbeError::exit_code`] — same
-/// posture [`botwork_admin_core::config::LoadError`] uses for
+/// posture [`botwork_api_core::config::LoadError`] uses for
 /// bootstrap.yaml load failures.
 #[derive(Debug, Error)]
 pub enum PackageLoadError {
