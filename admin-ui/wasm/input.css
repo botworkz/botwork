@@ -1,10 +1,77 @@
-/* botwork-admin-ui — baseline stylesheet.
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  code,
+  pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  }
+}
+/* Legacy compatibility styles copied from the removed admin.css.
  *
- * Loaded via `<link data-trunk rel="css" href="admin.css">` in
- * `index.html`; trunk pipelines + fingerprints it and emits
- * `/admin/admin-<hash>.css` alongside the JS loader + wasm blob. The
- * admin-ui server's `include_dir!` macro picks it up automatically
- * because the macro embeds whatever trunk wrote into `dist/`.
+ * This file is the Tailwind SOURCE (`input.css`), not the emitted asset.
+ * Trunk's pre-build Tailwind hook compiles it to `tailwind.css`, and
+ * `index.html` links that compiled output via `data-trunk`.
+ *
+ * MIGRATION-PENDING:
+ * The legacy block below is retained temporarily while tenants /
+ * workspaces / plugins / bindings pages are still using the old class
+ * names. Sessions/workers/layout/shared states already use Tailwind +
+ * shadcn patterns directly.
  *
  * # Why a separate file (and not the inline `<style>` block this
  * replaces)
@@ -81,8 +148,8 @@ body {
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     font-size: 15px;
     line-height: 1.5;
-    background: #1a1a2e;
-    color: #e0e0e0;
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
     min-height: 100dvh;
 }
 
@@ -489,3 +556,5 @@ button.danger:hover:not(:disabled) {
 .page-header .actions a:hover {
     text-decoration: none;
 }
+
+/* End legacy compatibility block. */

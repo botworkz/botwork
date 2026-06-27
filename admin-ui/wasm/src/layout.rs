@@ -34,7 +34,12 @@ fn NavLink(
 ) -> impl IntoView {
     view! {
         <li>
-            <A href=href>{label}</A>
+            <A
+                href=href
+                attr:class="block rounded-md px-3 py-2 text-sm text-muted-foreground transition hover:bg-accent hover:text-accent-foreground aria-[current=page]:bg-secondary aria-[current=page]:text-foreground"
+            >
+                {label}
+            </A>
         </li>
     }
 }
@@ -48,34 +53,34 @@ fn NavLink(
 #[component]
 pub fn Shell(children: Children) -> impl IntoView {
     view! {
-        <div class="admin-shell">
-            <aside class="admin-sidebar">
-                <header class="admin-sidebar-header">
-                    <h1>"botwork"</h1>
-                    <p class="subtitle">"admin"</p>
+        <div class="grid min-h-screen grid-cols-1 bg-background text-foreground md:grid-cols-[16rem_1fr]">
+            <aside class="border-b border-border bg-card/40 md:border-b-0 md:border-r">
+                <header class="px-6 py-6">
+                    <h1 class="text-xl font-semibold tracking-tight">"botwork"</h1>
+                    <p class="text-sm text-muted-foreground">"admin"</p>
                 </header>
-                <nav>
-                    <ul>
+                <nav class="space-y-4 px-4 pb-4">
+                    <ul class="space-y-1">
                         <NavLink href=ui_path!("/") label="Dashboard" />
                     </ul>
-                    <h2>"Config"</h2>
-                    <ul>
+                    <h2 class="px-3 pt-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">"Config"</h2>
+                    <ul class="space-y-1">
                         <NavLink href=ui_path!("/tenants") label="Tenants" />
                         <NavLink href=ui_path!("/workspaces") label="Workspaces" />
                         <NavLink href=ui_path!("/plugins") label="Plugins" />
                         <NavLink href=ui_path!("/bindings") label="Bindings" />
                     </ul>
-                    <h2>"Runtime"</h2>
-                    <ul>
+                    <h2 class="px-3 pt-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">"Runtime"</h2>
+                    <ul class="space-y-1">
                         <NavLink href=ui_path!("/sessions") label="Sessions" />
                         <NavLink href=ui_path!("/workers") label="Workers" />
                     </ul>
                 </nav>
-                <footer class="admin-sidebar-footer">
-                    <p class="operator">"operator: " <code>{crate::api::OPERATOR}</code></p>
+                <footer class="px-6 pb-6 text-xs text-muted-foreground">
+                    <p>"operator: " <code>{crate::api::OPERATOR}</code></p>
                 </footer>
             </aside>
-            <main class="admin-main">
+            <main class="p-6 md:p-8">
                 {children()}
             </main>
         </div>

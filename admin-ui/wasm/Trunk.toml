@@ -51,3 +51,14 @@ port = 8080
 [[proxy]]
 backend = "http://127.0.0.1:9400/admin/api/v1/"
 rewrite = "/admin/api/v1/"
+
+[[hooks]]
+stage = "pre_build"
+command = "tailwindcss"
+command_arguments = [
+  "-i",
+  "input.css",
+  "-o",
+  "tailwind.css",
+  "--minify",
+]
