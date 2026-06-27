@@ -1,4 +1,4 @@
-//! Thin admin-api client used by `botwork-tools bootstrap`.
+//! Thin api client used by `botwork-tools bootstrap`.
 //!
 //! Why a separate client (vs reusing the `reqwest` dance inline in
 //! `apply.rs`): the bootstrap subcommand needs to:
@@ -12,10 +12,10 @@
 //! Wrapping the HTTP shape behind a typed surface keeps `apply.rs`
 //! readable and makes the wiremock-stubbed tests in
 //! `tests/bootstrap_apply_test.rs` use real wire calls — same
-//! integration shape session-broker and admin-api use against
+//! integration shape session-broker and api use against
 //! control-plane (botworkz/botwork#92, #112).
 //!
-//! # Wire contract (matches admin-api/src/{read,write}.rs)
+//! # Wire contract (matches api/src/{read,write}.rs)
 //!
 //! ```text
 //! GET    /admin/api/v1/tenants                          -> { items, total }
@@ -45,7 +45,7 @@ use uuid::Uuid;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// admin-api thin client. Cloneable; the underlying reqwest pool is
+/// api thin client. Cloneable; the underlying reqwest pool is
 /// shared. The bootstrap subcommand is serial so a single client
 /// suffices, but `apply.rs` constructs one and threads it through —
 /// the type just keeps the endpoint + headers in one place.
@@ -57,10 +57,10 @@ pub struct AdminClient {
 }
 
 impl AdminClient {
-    /// Build a client. `endpoint` should be the admin-api base URL
+    /// Build a client. `endpoint` should be the api base URL
     /// (e.g. `http://admin_api:9400`); `/admin/api/v1` is appended
     /// per call. `operator` becomes the `x-botwork-admin` header on
-    /// every write so admin-api's audit log can distinguish
+    /// every write so api's audit log can distinguish
     /// machine-driven imports from operator UI writes.
     pub fn new(endpoint: &str, operator: &str) -> Result<Self, ClientError> {
         let http = HttpClient::builder()
@@ -217,9 +217,7 @@ fn check_status(
     // detail body is logged on the wire but we keep the error
     // surface minimal here.
     let kind = if status.is_server_error() || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-        ClientError::Transport(format!(
-            "{verb} {url}: server returned {status} (admin-api side)",
-        ))
+        ClientError::Transport(format!("{verb} {url}: server returned {status} (api side)",))
     } else {
         ClientError::Http {
             url: url.to_string(),
@@ -318,10 +316,10 @@ pub enum ClientError {
     BuildClient(String),
 
     /// Transport / server-side failure. Maps to exit 7.
-    /// session-broker / admin-api both treat 5xx + connect failures
+    /// session-broker / api both treat 5xx + connect failures
     /// the same way — "the upstream is broken; abort and surface
     /// loudly".
-    #[error("admin-api transport: {0}")]
+    #[error("api transport: {0}")]
     Transport(String),
 
     /// 4xx response. Maps to exit 6 — the data we sent was rejected,

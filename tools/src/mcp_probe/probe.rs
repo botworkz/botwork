@@ -40,7 +40,7 @@ use crate::mcp_probe::Args;
 const HTTP_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Protocol version we negotiate with the upstream MCP server. The
-/// pin lives here (not in admin-core) because it's a producer-side
+/// pin lives here (not in api-core) because it's a producer-side
 /// probe knob; production session-broker negotiates whatever the
 /// agent + server agree on. We use the same revision session-broker
 /// targets in v1; bumping is a deliberate edit, not a runtime
@@ -543,15 +543,15 @@ pub fn tool_name(tool: &JsonValue) -> Result<String, ProbeError> {
         .get("name")
         .and_then(JsonValue::as_str)
         .ok_or_else(|| ProbeError::HandshakeShape("tools/list entry missing 'name'".to_string()))?;
-    // Regex lives in admin-core so the producer-side (this probe)
+    // Regex lives in api-core so the producer-side (this probe)
     // and the consumer-side catalog upserter enforce the same rule
     // out of one place — same posture PLUGIN_NAME_RE uses.
-    let re = regex::Regex::new(botwork_admin_core::plugin_spec::TOOL_NAME_RE)
+    let re = regex::Regex::new(botwork_api_core::plugin_spec::TOOL_NAME_RE)
         .expect("valid tool name regex");
     if !re.is_match(name) {
         return Err(ProbeError::HandshakeShape(format!(
             "tool name {name:?} does not match {pattern}",
-            pattern = botwork_admin_core::plugin_spec::TOOL_NAME_RE,
+            pattern = botwork_api_core::plugin_spec::TOOL_NAME_RE,
         )));
     }
     Ok(name.to_string())

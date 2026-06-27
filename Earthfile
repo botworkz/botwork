@@ -12,21 +12,21 @@ VERSION 0.8
 # string and gets a label-less image; `_crate.yml` passes
 # GITHUB_SHA.
 
-admin-api-image:
+api-image:
     ARG GIT_SHA=""
     FROM DOCKERFILE --platform=linux/amd64 \
-        -f admin-api/Dockerfile \
+        -f api/Dockerfile \
         --build-arg GIT_SHA=${GIT_SHA} \
         .
-    SAVE IMAGE botwork/admin-api:local
+    SAVE IMAGE botwork/api:local
 
-admin-ui-image:
+ui-image:
     ARG GIT_SHA=""
     FROM DOCKERFILE --platform=linux/amd64 \
-        -f admin-ui/Dockerfile \
+        -f ui/Dockerfile \
         --build-arg GIT_SHA=${GIT_SHA} \
         .
-    SAVE IMAGE botwork/admin-ui:local
+    SAVE IMAGE botwork/ui:local
 
 session-broker-image:
     ARG GIT_SHA=""
@@ -61,8 +61,8 @@ db-migrate-image:
     SAVE IMAGE botwork/db-migrate:local
 
 images:
-    BUILD +admin-api-image
-    BUILD +admin-ui-image
+    BUILD +api-image
+    BUILD +ui-image
     BUILD +session-broker-image
     BUILD +config-broker-image
     BUILD +control-plane-image

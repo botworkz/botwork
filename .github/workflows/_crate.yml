@@ -2,7 +2,7 @@
 #
 # Called from .github/workflows/ci.yml as a matrix fan-out so each
 # botwork container crate (session-broker, config-broker, control-plane,
-# db/migration, admin-api, admin-ui) gets its own runner.
+# db/migration, api, ui) gets its own runner.
 #
 # Modelled after botworkz/mcp-extra's `_crate.yml`:
 #
@@ -37,7 +37,7 @@
 #                   - `.ci-prebuilt/${crate}/` (BINARY_SOURCE=prebuilt
 #                     handoff path)
 #                 For the simple crates this is the crate name on the
-#                 workspace tree; for `db/migration` and `admin-ui`
+#                 workspace tree; for `db/migration` and `ui`
 #                 (where the image covers two crates) it's the directory
 #                 that owns the Dockerfile.
 #   * service   — image suffix (`botwork/<service>:local`) and earthly
@@ -52,7 +52,7 @@
 #                 the staging step is unambiguous.
 #   * needs-db-migrate
 #               — whether the smoke test wants `botwork/db-migrate:local`
-#                 present locally as a fixture. Today only `admin-api`
+#                 present locally as a fixture. Today only `api`
 #                 does; we build db-migrate via the `BINARY_SOURCE=source`
 #                 path on the same runner because the per-crate matrix
 #                 doesn't expose cross-job artifact reuse. Cheap enough
@@ -67,7 +67,7 @@ on:
       crate:
         description: >-
           Workspace-relative crate directory that owns the Dockerfile and
-          smoke.sh (e.g. session-broker, db/migration, admin-ui).
+          smoke.sh (e.g. session-broker, db/migration, ui).
         required: true
         type: string
       service:
@@ -77,7 +77,7 @@ on:
         type: string
       package:
         description: >-
-          Cargo workspace package this image wraps (e.g. botwork-admin-api).
+          Cargo workspace package this image wraps (e.g. botwork-api).
         required: true
         type: string
       binary:
@@ -100,7 +100,7 @@ on:
           on the host network so testcontainers-rs can spawn sidecar
           fixtures (e.g. postgres) visible to the in-container test
           process. Required for crates whose integration tests use
-          `testcontainers::*` (today: admin-api).
+          `testcontainers::*` (today: api).
         required: false
         type: boolean
         default: false
@@ -153,8 +153,8 @@ jobs:
     # cargo to write build artifacts to /work/target so they land back on
     # the host where rust-cache will persist them for the next run.
     #
-    # Special-case for admin-ui: trunk must populate
-    # `admin-ui/wasm/dist/` before the server's cargo build (the server
+    # Special-case for ui: trunk must populate
+    # `ui/wasm/dist/` before the server's cargo build (the server
     # crate inlines that directory via `include_dir!`). The trunk step
     # runs inside the same container so the wasm32 target and the
     # trunk binary are guaranteed present.
@@ -165,12 +165,12 @@ jobs:
         set -euo pipefail
         mkdir -p "${HOME}/.cargo" "${RUNNER_TEMP}/container-home"
         trunk_prefix=""
-        if [ "${SERVICE}" = "admin-ui" ]; then
-          # Trunk needs to land the wasm bundle into admin-ui/wasm/dist/
+        if [ "${SERVICE}" = "ui" ]; then
+          # Trunk needs to land the wasm bundle into ui/wasm/dist/
           # before the server crate is compiled. Run it under the same
           # cargo home so the wasm crate's deps are populated in the
           # host's `~/.cargo/registry` cache.
-          trunk_prefix='(cd admin-ui/wasm && trunk build --release) && '
+          trunk_prefix='(cd ui/wasm && trunk build --release) && '
         fi
 
         # When tests use testcontainers-rs, plumb host docker access into
@@ -257,10 +257,10 @@ jobs:
           -f "${CRATE}/Dockerfile" \
           .
 
-    # ── Build db-migrate as a fixture (admin-api only today) ────────────────
-    # The admin-api smoke lands the schema before exercising its own
+    # ── Build db-migrate as a fixture (api only today) ────────────────
+    # The api smoke lands the schema before exercising its own
     # assertion path — the production sequence (db-migrate.service runs
-    # before admin-api.service on the vm). The round-1 workflow built
+    # before api.service on the vm). The round-1 workflow built
     # this via `earthly +db-migrate-image`; we use `docker buildx` with
     # `BINARY_SOURCE=source` so the in-Dockerfile cargo cache mounts
     # kick in. Cheap enough on a single runner; the canonical
@@ -337,7 +337,7 @@ jobs:
     # this up on filesystem ordering.
     #
     # Compression is meaningful here: the distroless images compress to
-    # ~15-30 MiB (admin-ui being the largest because of the trunk bundle).
+    # ~15-30 MiB (ui being the largest because of the trunk bundle).
     # Without gzip the upload + same-run download for publish would
     # serialise ~7 × ~50 MiB.
     - name: Save runtime image as artifact

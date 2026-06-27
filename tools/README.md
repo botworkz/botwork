@@ -17,7 +17,7 @@ Currently implemented subcommands:
   (`BOTWORK_TOOLS_SESSIONS_URL`, default
   `http://session_broker:9002/sessions`); intersects with `docker
   ps --filter name=^mcp_session_` for the runtime row set.
-- `bootstrap` - apply a `bootstrap.yaml` through admin-api.
+- `bootstrap` - apply a `bootstrap.yaml` through api.
 - `mcp-probe` - probe an MCP image, validate it against an
   `mcp-package.yaml`, and emit / verify / describe the
   `org.botwork.mcp.*` label set (RFE #147).
@@ -105,7 +105,7 @@ spill:
 ```
 
 Validation is shared with `bootstrap.yaml` plugin entries via
-`botwork-admin-core::package::validate_package` — same regexes,
+`botwork-api-core::package::validate_package` — same regexes,
 same env-name reservations (`BOTWORK_SECRET_*`, `BOTWORK_MCP_CONFIG`,
 `DOCKER_*`), same egress / resources / static-env caps. A package
 file that passes the probe will pass the catalog upserter.

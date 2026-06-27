@@ -2,8 +2,8 @@
 //! `botwork-bootstrap` boot-time binary.
 //!
 //! Parses the same `bootstrap.yaml` shape via
-//! [`botwork_admin_core::BootstrapConfig`], then POSTs/PUTs each
-//! validated row through `botwork-admin-api` instead of writing
+//! [`botwork_api_core::BootstrapConfig`], then POSTs/PUTs each
+//! validated row through `botwork-api` instead of writing
 //! sea-orm directly. The end-state behaviour matches bootstrap
 //! exactly: idempotent upsert against `(tenant, workspace,
 //! plugin, workspace_plugin)`.
@@ -25,8 +25,8 @@
 //! | 2    | invalid CLI usage                                          |
 //! | 4    | bootstrap config file missing / read failure               |
 //! | 5    | bootstrap config validation failure                        |
-//! | 6    | admin-api write failed mid-apply                           |
-//! | 7    | admin-api unreachable / 5xx                                |
+//! | 6    | api write failed mid-apply                           |
+//! | 7    | api unreachable / 5xx                                |
 //!
 //! # CLI shape
 //!
@@ -39,11 +39,11 @@
 //!
 //! * `--config` — `BOTWORK_BOOTSTRAP_CONFIG` or
 //!   `/etc/botwork/bootstrap.yaml`.
-//! * `--endpoint` — `BOTWORK_ADMIN_API_ENDPOINT` or
-//!   `http://admin_api:9400` (the docker alias admin-api binds on
+//! * `--endpoint` — `BOTWORK_API_ENDPOINT` or
+//!   `http://admin_api:9400` (the docker alias `admin_api` binds on
 //!   `botwork-internal`).
 //! * `--operator` — defaults to `bootstrap-import`. Sent in the
-//!   `x-botwork-admin` header so admin-api's audit log distinguishes
+//!   `x-botwork-admin` header so api's audit log distinguishes
 //!   machine-driven imports from operator UI writes.
 //! * `--dry-run` — validate yaml + plan diffs but issue no writes.
 //!   Exit 0 if the plan would succeed, exit 6 if anything in the
@@ -56,13 +56,13 @@ pub mod client;
 
 use std::path::PathBuf;
 
-use botwork_admin_core::config::LoadError;
+use botwork_api_core::config::LoadError;
 use thiserror::Error;
 
 use crate::bootstrap::apply::ApplyOutcome;
 use crate::bootstrap::client::AdminClient;
 
-/// Default endpoint for admin-api on the production `botwork-internal`
+/// Default endpoint for api on the production `botwork-internal`
 /// docker network. The systemd unit overrides via `--endpoint` only if
 /// the alias changes; the default keeps the tool usable inside the
 /// existing fleet without configuration.
@@ -79,7 +79,7 @@ pub const DEFAULT_OPERATOR: &str = "bootstrap-import";
 /// corresponding flag is absent. These mirror the env vars the old
 /// bootstrap binary honoured so the systemd cutover is a 1:1 swap.
 pub const CONFIG_PATH_ENV: &str = "BOTWORK_BOOTSTRAP_CONFIG";
-pub const ENDPOINT_ENV: &str = "BOTWORK_ADMIN_API_ENDPOINT";
+pub const ENDPOINT_ENV: &str = "BOTWORK_API_ENDPOINT";
 
 /// Parsed bootstrap-subcommand args.
 #[derive(Debug, Clone)]
@@ -148,14 +148,14 @@ pub fn help_text() -> &'static str {
     "Usage: botwork-tools bootstrap [--config <path>] [--endpoint <url>]\n\
      \x20                              [--operator <name>] [--dry-run]\n\
      \n\
-     Apply a bootstrap.yaml through admin-api. Idempotent: every operation\n\
+     Apply a bootstrap.yaml through api. Idempotent: every operation\n\
      is an upsert. Same yaml shape the legacy botwork-bootstrap binary\n\
      consumed; the only difference is the writer side talks HTTP+JSON to\n\
-     admin-api instead of sea-orm-writing the DB directly.\n\
+     api instead of sea-orm-writing the DB directly.\n\
      \n\
      Defaults:\n\
        --config    BOTWORK_BOOTSTRAP_CONFIG or /etc/botwork/bootstrap.yaml\n\
-       --endpoint  BOTWORK_ADMIN_API_ENDPOINT or http://admin_api:9400\n\
+       --endpoint  BOTWORK_API_ENDPOINT or http://admin_api:9400\n\
        --operator  bootstrap-import\n\
      \n\
      Exit codes: 0=ok, 2=usage, 4=file-io, 5=validation, 6=apply, 7=transport"
@@ -164,7 +164,7 @@ pub fn help_text() -> &'static str {
 /// Entry point dispatched from `cli::dispatch`.
 pub fn run(argv: &[String]) -> Result<i32, BootstrapError> {
     let args = Args::from_argv(argv)?;
-    let cfg = botwork_admin_core::BootstrapConfig::load(&args.config_path)?;
+    let cfg = botwork_api_core::BootstrapConfig::load(&args.config_path)?;
     let client = AdminClient::new(&args.endpoint, &args.operator)?;
     let outcome = apply::apply(&client, &cfg, args.dry_run)?;
     print_summary(&outcome, args.dry_run);

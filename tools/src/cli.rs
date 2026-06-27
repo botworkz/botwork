@@ -78,7 +78,7 @@ fn print_usage() {
     println!("Available subcommands:");
     println!("  version    Print the botwork-tools build version");
     println!("  ps         List running botwork sessions");
-    println!("  bootstrap  Apply a bootstrap.yaml through admin-api");
+    println!("  bootstrap  Apply a bootstrap.yaml through api");
     println!("  mcp-probe  Probe an MCP image and generate / verify / describe its labels");
     println!();
     println!("Run `botwork-tools <SUBCOMMAND> --help` for subcommand options.");
@@ -86,7 +86,7 @@ fn print_usage() {
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botwork-tools build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through admin-api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
+    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botwork-tools build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
     UnknownSubcommand(String),
     #[error(transparent)]
     Ps(#[from] ps::PsError),

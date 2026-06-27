@@ -1,0 +1,57 @@
+<!--
+  Trunk entrypoint for botwork-ui-wasm.
+
+  Build:  trunk build --release
+  Serve:  trunk serve --port 8080
+            (proxies /admin/api/v1/* to the local api binary
+             at 127.0.0.1:9400 — see Trunk.toml.)
+
+  Output is written to ui/wasm/dist/ (gitignored). The
+  ui server crate embeds that directory verbatim via
+  `include_dir!`, so the production deploy story is "trunk
+  build → cargo build → distroless image" with no runtime
+  filesystem dependency.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>botwork ui</title>
+
+  <!--
+    Inline data: favicon. The browser ALWAYS requests /favicon.ico
+    on a page load, even with no <link rel="icon"> hint, and the
+    ingress envoy treats /favicon.ico as MCP traffic (catch-all
+    route → ext_authz → 401). Surfacing that 401 in the network
+    panel is operator-confusing noise; a zero-byte data URL
+    satisfies the browser without making a network request.
+    The day ui gets a real icon, swap this for a
+    `<link data-trunk rel="icon" href="favicon.png">` and trunk
+    will fingerprint + emit it under /admin/ like every other
+    asset.
+  -->
+  <link rel="icon" href="data:," />
+
+  <!--
+    Trunk replaces the <link data-trunk rel="rust"> tag with the
+    compiled WASM + JS loader. `data-wasm-opt="z"` enables
+    wasm-opt level z on release builds (smallest size); dev
+    builds skip wasm-opt entirely.
+  -->
+  <link data-trunk rel="rust" data-wasm-opt="z" />
+
+  <!--
+    Baseline operator stylesheet. Trunk pipelines + fingerprints the
+    `admin.css` file (sibling of this template) and emits it as
+    `/admin/admin-<hash>.css` alongside the JS loader and wasm blob,
+    which the ui server picks up automatically via
+    `include_dir!`. See admin.css for the rule inventory + the
+    rationale for splitting it out of the inline <style> block this
+    replaces.
+  -->
+  <link data-trunk rel="css" href="tailwind.css" />
+</head>
+<body class="dark">
+</body>
+</html>

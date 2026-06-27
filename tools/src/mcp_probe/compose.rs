@@ -48,7 +48,7 @@
 
 use std::collections::BTreeMap;
 
-use botwork_admin_core::package::ValidatedPackage;
+use botwork_api_core::package::ValidatedPackage;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -239,7 +239,7 @@ pub enum ComposeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use botwork_admin_core::package::{Isolation, SpillEntry, SpillMode};
+    use botwork_api_core::package::{Isolation, SpillEntry, SpillMode};
     use serde_json::json;
 
     fn minimal_package() -> ValidatedPackage {

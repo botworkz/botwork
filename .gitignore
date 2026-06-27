@@ -3,8 +3,8 @@
 Cargo.lock.bak
 # Trunk emits everything here; the .gitkeep file (and only that file)
 # is checked in so the directory exists for include_dir!.
-/admin-ui/wasm/dist/*
-!/admin-ui/wasm/dist/.gitkeep
+/ui/wasm/dist/*
+!/ui/wasm/dist/.gitkeep
 # Staging directory the CI runner populates with the binary it built
 # on the host before invoking `docker build -f <crate>/Dockerfile
 # --build-arg BINARY_SOURCE=prebuilt .`. Empty in local-dev — local

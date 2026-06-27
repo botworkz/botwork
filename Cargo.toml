@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "admin-api",
-    "admin-core",
-    "admin-ui/server",
-    "admin-ui/wasm",
+    "api",
+    "api-core",
+    "ui/server",
+    "ui/wasm",
     "bootstrap",
     "config-broker",
     "control-plane",
@@ -17,15 +17,15 @@ members = [
 ]
 
 # Default set for bare `cargo build` / `cargo test` (no `--workspace`).
-# Excludes `admin-ui/wasm` because that crate only links against the
+# Excludes `ui/wasm` because that crate only links against the
 # `wasm32-unknown-unknown` target — building it for the host pulls in
 # wasm-bindgen / web-sys against native, which is at best a long
 # compile and at worst a hard link failure. CI exercises the wasm
 # crate explicitly with `--target wasm32-unknown-unknown` and the
 # container image builds it via `trunk build --release`.
 default-members = [
-    "admin-api",
-    "admin-ui/server",
+    "api",
+    "ui/server",
     "bootstrap",
     "config-broker",
     "control-plane",

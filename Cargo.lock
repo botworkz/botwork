@@ -405,11 +405,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "botwork-admin-api"
+name = "botwork-api"
 version = "0.0.0"
 dependencies = [
  "axum 0.7.9",
- "botwork-admin-core",
+ "botwork-api-core",
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
@@ -435,7 +435,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "botwork-admin-core"
+name = "botwork-api-core"
 version = "0.0.0"
 dependencies = [
  "regex",
@@ -446,49 +446,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "botwork-admin-ui-server"
-version = "0.0.0"
-dependencies = [
- "axum 0.7.9",
- "botwork-version",
- "http",
- "include_dir",
- "mime_guess",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tower 0.4.13",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "botwork-admin-ui-wasm"
-version = "0.0.0"
-dependencies = [
- "console_error_panic_hook",
- "js-sys",
- "leptos",
- "leptos-shadcn-alert",
- "leptos-shadcn-button",
- "leptos-shadcn-card",
- "leptos-shadcn-select",
- "leptos-shadcn-skeleton",
- "leptos-shadcn-table",
- "leptos_router",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
 name = "botwork-bootstrap"
 version = "0.0.0"
 dependencies = [
- "botwork-admin-core",
+ "botwork-api-core",
  "botwork-entity",
  "botwork-migration",
  "chrono",
@@ -664,7 +625,7 @@ dependencies = [
 name = "botwork-tools"
 version = "0.0.0"
 dependencies = [
- "botwork-admin-core",
+ "botwork-api-core",
  "botwork-version",
  "chrono",
  "http-body-util",
@@ -680,6 +641,45 @@ dependencies = [
  "tokio",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "botwork-ui-server"
+version = "0.0.0"
+dependencies = [
+ "axum 0.7.9",
+ "botwork-version",
+ "http",
+ "include_dir",
+ "mime_guess",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "botwork-ui-wasm"
+version = "0.0.0"
+dependencies = [
+ "console_error_panic_hook",
+ "js-sys",
+ "leptos",
+ "leptos-shadcn-alert",
+ "leptos-shadcn-button",
+ "leptos-shadcn-card",
+ "leptos-shadcn-select",
+ "leptos-shadcn-skeleton",
+ "leptos-shadcn-table",
+ "leptos_router",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

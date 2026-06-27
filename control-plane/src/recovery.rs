@@ -99,7 +99,7 @@
 //! ordering puts `botwork-control-plane.service` AFTER
 //! `botwork-db-migrate.service` (transitively `After=`
 //! `botwork-postgres.service` + `botwork-db-init.service`). Same
-//! posture config-broker, admin-api, and session-broker use.
+//! posture config-broker, api, and session-broker use.
 //!
 //! Crucially the `After=botwork-session-broker.service` edge from
 //! the pre-round-3 unit can now be **dropped**: control-plane no
