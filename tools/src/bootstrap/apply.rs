@@ -125,6 +125,7 @@ pub fn apply(
             client,
             tenant_entry,
             tenant_id,
+            &tenant_entry.name,
             &plugin_ids,
             dry_run,
             &mut outcome,
@@ -138,6 +139,7 @@ fn apply_workspaces(
     client: &AdminClient,
     tenant_entry: &TenantEntry,
     tenant_id: Uuid,
+    tenant_name: &str,
     plugin_ids: &HashMap<String, Uuid>,
     dry_run: bool,
     outcome: &mut ApplyOutcome,
@@ -148,7 +150,7 @@ fn apply_workspaces(
         HashMap::new()
     } else {
         client
-            .list_workspaces(tenant_id)?
+            .list_workspaces(tenant_name)?
             .into_iter()
             .map(|w| (w.name.clone(), w))
             .collect()
@@ -163,10 +165,12 @@ fn apply_workspaces(
                 if dry_run {
                     (Uuid::nil(), chrono::Utc::now())
                 } else {
-                    let created = client.create_workspace(&CreateWorkspace {
-                        tenant_id,
-                        name: &workspace_entry.name,
-                    })?;
+                    let created = client.create_workspace(
+                        tenant_name,
+                        &CreateWorkspace {
+                            name: &workspace_entry.name,
+                        },
+                    )?;
                     (created.id, created.updated_at)
                 }
             }
@@ -176,6 +180,7 @@ fn apply_workspaces(
             client,
             workspace_entry,
             workspace_id,
+            tenant_name,
             plugin_ids,
             dry_run,
             outcome,
@@ -188,6 +193,7 @@ fn apply_bindings(
     client: &AdminClient,
     workspace_entry: &WorkspaceEntry,
     workspace_id: Uuid,
+    tenant_name: &str,
     plugin_ids: &HashMap<String, Uuid>,
     dry_run: bool,
     outcome: &mut ApplyOutcome,
@@ -196,7 +202,7 @@ fn apply_bindings(
         HashMap::new()
     } else {
         client
-            .list_workspace_plugins(workspace_id)?
+            .list_workspace_plugins(tenant_name, workspace_id)?
             .into_iter()
             .map(|b| (b.plugin_id, b))
             .collect()
@@ -215,6 +221,7 @@ fn apply_bindings(
                 if binding_differs(existing, binding) {
                     if !dry_run {
                         client.update_workspace_plugin(
+                            tenant_name,
                             workspace_id,
                             plugin_id,
                             &UpdateWorkspacePlugin {
@@ -229,11 +236,14 @@ fn apply_bindings(
             None => {
                 outcome.bindings_created += 1;
                 if !dry_run {
-                    client.create_workspace_plugin(&CreateWorkspacePlugin {
-                        workspace_id,
-                        plugin_id,
-                        config: binding.config.clone(),
-                    })?;
+                    client.create_workspace_plugin(
+                        tenant_name,
+                        &CreateWorkspacePlugin {
+                            workspace_id,
+                            plugin_id,
+                            config: binding.config.clone(),
+                        },
+                    )?;
                 }
             }
         }

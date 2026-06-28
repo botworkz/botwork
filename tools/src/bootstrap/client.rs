@@ -7,7 +7,7 @@
 //!    vs what the yaml wants);
 //! 2. Create new rows;
 //! 3. Update changed rows;
-//! 4. Carry the `x-botwork-admin` operator header on every write.
+//! 4. Carry the appropriate auth headers on every request.
 //!
 //! Wrapping the HTTP shape behind a typed surface keeps `apply.rs`
 //! readable and makes the wiremock-stubbed tests in
@@ -15,26 +15,43 @@
 //! integration shape session-broker and api use against
 //! control-plane (botworkz/botwork#92, #112).
 //!
-//! # Wire contract (matches api/src/{read,write}.rs)
+//! # Wire contract (matches api/src/{read,write}.rs — Phase 2, space#311)
 //!
 //! ```text
-//! GET    /admin/api/v1/tenants                          -> { items, total }
-//! POST   /admin/api/v1/tenants                          {name}
-//! PUT    /admin/api/v1/tenants/{id}                     {name, if_unmodified_since}
+//! # Admin-gated (x-botwork-admin: <operator> required)
+//! GET    /api/tenants                                   -> { items, total }
+//! POST   /api/tenants                                   {name}
+//! PUT    /api/tenants/{id}                              {name, if_unmodified_since}
 //!
-//! GET    /admin/api/v1/workspaces?tenant_id=<uuid>      -> { items, total }
-//! POST   /admin/api/v1/workspaces                       {tenant_id, name}
-//! PUT    /admin/api/v1/workspaces/{id}                  {name, if_unmodified_since}
+//! GET    /api/plugins                                   -> { items, total }
+//! POST   /api/plugins                                   {name, image, port, …, egress}
+//! PUT    /api/plugins/{id}                              {name, image, …, if_unmodified_since}
 //!
-//! GET    /admin/api/v1/plugins                          -> { items, total }
-//! POST   /admin/api/v1/plugins                          {name, image, port, …, egress}
-//! PUT    /admin/api/v1/plugins/{id}                     {name, image, …, if_unmodified_since}
+//! # Tenant-scoped (x-botwork-tenant: <name> required, must match path)
+//! GET    /api/tenant/{tenant}/workspaces                -> { items, total }
+//! POST   /api/tenant/{tenant}/workspaces                {name}
+//! PUT    /api/tenant/{tenant}/workspaces/{id}           {name, if_unmodified_since}
 //!
-//! GET    /admin/api/v1/workspace_plugins                -> { items, total }
+//! GET    /api/tenant/{tenant}/workspace_plugins         -> { items, total }
 //!        ?workspace_id=<uuid>&plugin_id=<uuid>
-//! POST   /admin/api/v1/workspace_plugins                {workspace_id, plugin_id, config?}
-//! PUT    /admin/api/v1/workspace_plugins/{wid}/{pid}    {config?, if_unmodified_since}
+//! POST   /api/tenant/{tenant}/workspace_plugins         {workspace_id, plugin_id, config?}
+//! PUT    /api/tenant/{tenant}/workspace_plugins/{wid}/{pid}
+//!                                                       {config?, if_unmodified_since}
 //! ```
+//!
+//! ## Header conventions
+//!
+//! * **Admin-gated routes** (`/api/tenants`, `/api/plugins` and their
+//!   sub-paths): `x-botwork-admin: <operator>`. The API requires the
+//!   header to be present and non-empty; it also reads the value as
+//!   the operator identity for audit logs — sending the operator name
+//!   satisfies both the auth gate and the audit requirement in one
+//!   header.
+//! * **Tenant-scoped routes** (`/api/tenant/{tenant}/…`):
+//!   `x-botwork-tenant: <tenant>` (must match the path segment).
+//!   `x-botwork-admin: <operator>` is also sent so the audit log
+//!   records the import operator rather than "anonymous" (the API
+//!   reads it from `x-botwork-admin` for all write paths).
 
 use std::time::Duration;
 
@@ -58,10 +75,9 @@ pub struct AdminClient {
 
 impl AdminClient {
     /// Build a client. `endpoint` should be the api base URL
-    /// (e.g. `http://admin_api:9400`); `/admin/api/v1` is appended
-    /// per call. `operator` becomes the `x-botwork-admin` header on
-    /// every write so api's audit log can distinguish
-    /// machine-driven imports from operator UI writes.
+    /// (e.g. `http://admin_api:9400`). `operator` is sent as the
+    /// `x-botwork-admin` header value so api's audit log records
+    /// the import operator on every write.
     pub fn new(endpoint: &str, operator: &str) -> Result<Self, ClientError> {
         let http = HttpClient::builder()
             .timeout(HTTP_TIMEOUT)
@@ -74,71 +90,89 @@ impl AdminClient {
         })
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/admin/api/v1{path}", self.endpoint)
+    /// URL for admin-gated routes: `{endpoint}/api{path}`.
+    fn admin_url(&self, path: &str) -> String {
+        format!("{}/api{path}", self.endpoint)
+    }
+
+    /// URL for tenant-scoped routes: `{endpoint}/api/tenant/{tenant}{path}`.
+    fn tenant_url(&self, tenant: &str, path: &str) -> String {
+        format!("{}/api/tenant/{tenant}{path}", self.endpoint)
     }
 
     pub fn list_tenants(&self) -> Result<Vec<Tenant>, ClientError> {
-        self.get_list("/tenants")
+        self.admin_get_list("/tenants")
     }
 
-    pub fn list_workspaces(&self, tenant_id: Uuid) -> Result<Vec<Workspace>, ClientError> {
-        self.get_list(&format!("/workspaces?tenant_id={tenant_id}"))
+    pub fn list_workspaces(&self, tenant: &str) -> Result<Vec<Workspace>, ClientError> {
+        self.tenant_get_list(tenant, "/workspaces")
     }
 
     pub fn list_plugins(&self) -> Result<Vec<Plugin>, ClientError> {
-        self.get_list("/plugins")
+        self.admin_get_list("/plugins")
     }
 
     pub fn list_workspace_plugins(
         &self,
+        tenant: &str,
         workspace_id: Uuid,
     ) -> Result<Vec<WorkspacePlugin>, ClientError> {
-        self.get_list(&format!("/workspace_plugins?workspace_id={workspace_id}"))
+        self.tenant_get_list(
+            tenant,
+            &format!("/workspace_plugins?workspace_id={workspace_id}"),
+        )
     }
 
     pub fn create_tenant(&self, body: &CreateTenant<'_>) -> Result<Tenant, ClientError> {
-        self.post("/tenants", body)
+        self.admin_post("/tenants", body)
     }
 
     pub fn update_tenant(&self, id: Uuid, body: &UpdateTenant<'_>) -> Result<Tenant, ClientError> {
-        self.put(&format!("/tenants/{id}"), body)
+        self.admin_put(&format!("/tenants/{id}"), body)
     }
 
-    pub fn create_workspace(&self, body: &CreateWorkspace<'_>) -> Result<Workspace, ClientError> {
-        self.post("/workspaces", body)
+    pub fn create_workspace(
+        &self,
+        tenant: &str,
+        body: &CreateWorkspace<'_>,
+    ) -> Result<Workspace, ClientError> {
+        self.tenant_post(tenant, "/workspaces", body)
     }
 
     pub fn update_workspace(
         &self,
+        tenant: &str,
         id: Uuid,
         body: &UpdateWorkspace<'_>,
     ) -> Result<Workspace, ClientError> {
-        self.put(&format!("/workspaces/{id}"), body)
+        self.tenant_put(tenant, &format!("/workspaces/{id}"), body)
     }
 
     pub fn create_plugin(&self, body: &serde_json::Value) -> Result<Plugin, ClientError> {
-        self.post("/plugins", body)
+        self.admin_post("/plugins", body)
     }
 
     pub fn update_plugin(&self, id: Uuid, body: &serde_json::Value) -> Result<Plugin, ClientError> {
-        self.put(&format!("/plugins/{id}"), body)
+        self.admin_put(&format!("/plugins/{id}"), body)
     }
 
     pub fn create_workspace_plugin(
         &self,
+        tenant: &str,
         body: &CreateWorkspacePlugin,
     ) -> Result<WorkspacePlugin, ClientError> {
-        self.post("/workspace_plugins", body)
+        self.tenant_post(tenant, "/workspace_plugins", body)
     }
 
     pub fn update_workspace_plugin(
         &self,
+        tenant: &str,
         workspace_id: Uuid,
         plugin_id: Uuid,
         body: &UpdateWorkspacePlugin,
     ) -> Result<WorkspacePlugin, ClientError> {
-        self.put(
+        self.tenant_put(
+            tenant,
             &format!("/workspace_plugins/{workspace_id}/{plugin_id}"),
             body,
         )
@@ -146,9 +180,18 @@ impl AdminClient {
 
     // -- internals ------------------------------------------------------
 
-    fn get_list<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, ClientError> {
-        let url = self.url(path);
-        let resp = self.http.get(&url).send().map_err(transport(&url, "GET"))?;
+    /// GET list from an admin-gated route. Sends `x-botwork-admin: <operator>`.
+    fn admin_get_list<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<Vec<T>, ClientError> {
+        let url = self.admin_url(path);
+        let resp = self
+            .http
+            .get(&url)
+            .header("x-botwork-admin", &self.operator)
+            .send()
+            .map_err(transport(&url, "GET"))?;
         check_status(&resp.status(), &resp, &url, "GET")?;
         let envelope: ListEnvelope<T> = resp
             .json()
@@ -156,12 +199,33 @@ impl AdminClient {
         Ok(envelope.items)
     }
 
-    fn post<B: Serialize, R: serde::de::DeserializeOwned>(
+    /// GET list from a tenant-scoped route. Sends `x-botwork-tenant: <tenant>`.
+    fn tenant_get_list<T: serde::de::DeserializeOwned>(
+        &self,
+        tenant: &str,
+        path: &str,
+    ) -> Result<Vec<T>, ClientError> {
+        let url = self.tenant_url(tenant, path);
+        let resp = self
+            .http
+            .get(&url)
+            .header("x-botwork-tenant", tenant)
+            .send()
+            .map_err(transport(&url, "GET"))?;
+        check_status(&resp.status(), &resp, &url, "GET")?;
+        let envelope: ListEnvelope<T> = resp
+            .json()
+            .map_err(|err| ClientError::Decode(format!("GET {url}: {err}")))?;
+        Ok(envelope.items)
+    }
+
+    /// POST to an admin-gated route. Sends `x-botwork-admin: <operator>`.
+    fn admin_post<B: Serialize, R: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
     ) -> Result<R, ClientError> {
-        let url = self.url(path);
+        let url = self.admin_url(path);
         let resp = self
             .http
             .post(&url)
@@ -175,15 +239,62 @@ impl AdminClient {
             .map_err(|err| ClientError::Decode(format!("POST {url}: {err}")))
     }
 
-    fn put<B: Serialize, R: serde::de::DeserializeOwned>(
+    /// POST to a tenant-scoped route. Sends `x-botwork-tenant: <tenant>`
+    /// and `x-botwork-admin: <operator>` (for audit log identity).
+    fn tenant_post<B: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        tenant: &str,
+        path: &str,
+        body: &B,
+    ) -> Result<R, ClientError> {
+        let url = self.tenant_url(tenant, path);
+        let resp = self
+            .http
+            .post(&url)
+            .header("x-botwork-tenant", tenant)
+            .header("x-botwork-admin", &self.operator)
+            .header("content-type", "application/json")
+            .json(body)
+            .send()
+            .map_err(transport(&url, "POST"))?;
+        check_status(&resp.status(), &resp, &url, "POST")?;
+        resp.json()
+            .map_err(|err| ClientError::Decode(format!("POST {url}: {err}")))
+    }
+
+    /// PUT to an admin-gated route. Sends `x-botwork-admin: <operator>`.
+    fn admin_put<B: Serialize, R: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
     ) -> Result<R, ClientError> {
-        let url = self.url(path);
+        let url = self.admin_url(path);
         let resp = self
             .http
             .put(&url)
+            .header("x-botwork-admin", &self.operator)
+            .header("content-type", "application/json")
+            .json(body)
+            .send()
+            .map_err(transport(&url, "PUT"))?;
+        check_status(&resp.status(), &resp, &url, "PUT")?;
+        resp.json()
+            .map_err(|err| ClientError::Decode(format!("PUT {url}: {err}")))
+    }
+
+    /// PUT to a tenant-scoped route. Sends `x-botwork-tenant: <tenant>`
+    /// and `x-botwork-admin: <operator>` (for audit log identity).
+    fn tenant_put<B: Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        tenant: &str,
+        path: &str,
+        body: &B,
+    ) -> Result<R, ClientError> {
+        let url = self.tenant_url(tenant, path);
+        let resp = self
+            .http
+            .put(&url)
+            .header("x-botwork-tenant", tenant)
             .header("x-botwork-admin", &self.operator)
             .header("content-type", "application/json")
             .json(body)
@@ -287,7 +398,6 @@ pub struct UpdateTenant<'a> {
 
 #[derive(Debug, Serialize)]
 pub struct CreateWorkspace<'a> {
-    pub tenant_id: Uuid,
     pub name: &'a str,
 }
 
