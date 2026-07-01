@@ -99,12 +99,23 @@ The canonical source of the regex and reserved list is
 * **Error envelope:**
 
   ```json
-  { "error": "<machine code>", "message": "<human detail>" }
+  {
+    "error": {
+      "code": "<machine code>",
+      "message": "<human detail>",
+      "remediation": {
+        "command": "<optional CLI hint>",
+        "docs_url": "<optional docs URL>"
+      }
+    }
+  }
   ```
 
-  Error codes: `not_found`, `bad_request`, `invalid_name`, `reserved_name`,
-  `cross_tenant_forbidden`, `admin_required`, `conflict`, `precondition_failed`,
-  `internal`, `unavailable`.
+  `error.remediation` is optional and omitted when there is no useful operator hint.
+
+  Error codes: `not_found`, `bad_request`, `validation_failed`, `invalid_name`,
+  `reserved_name`, `cross_tenant_forbidden`, `admin_required`, `has_dependents`,
+  `stale_write`, `already_exists`, `internal`, `unavailable`.
 
 ## Secret store coupling
 

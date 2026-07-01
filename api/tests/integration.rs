@@ -308,7 +308,7 @@ async fn get_tenant_unknown_id_is_404() {
         .expect("GET");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["error"]["code"], "not_found");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -326,7 +326,7 @@ async fn get_tenant_invalid_uuid_is_400() {
         .expect("GET");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "bad_request");
+    assert_eq!(body["error"]["code"], "bad_request");
 }
 
 // ── workspace reads (carried from PR2) ──────────────────────────────
@@ -369,7 +369,7 @@ async fn cross_tenant_request_is_403() {
         .expect("GET");
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "cross_tenant_forbidden");
+    assert_eq!(body["error"]["code"], "cross_tenant_forbidden");
 }
 
 /// Missing `x-botwork-tenant` header on tenant-scoped endpoint returns 403.
@@ -403,7 +403,7 @@ async fn tenant_scoped_endpoint_rejects_invalid_path_tenant_with_400() {
         .expect("GET");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "invalid_name");
+    assert_eq!(body["error"]["code"], "invalid_name");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -420,7 +420,7 @@ async fn tenant_scoped_endpoint_rejects_reserved_path_tenant_with_400() {
         .expect("GET");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "reserved_name");
+    assert_eq!(body["error"]["code"], "reserved_name");
 }
 
 // ── plugin reads (carried from PR2) ─────────────────────────────────
@@ -668,7 +668,7 @@ async fn create_tenant_rejects_duplicate_with_409_already_exists() {
         .expect("POST");
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "already_exists");
+    assert_eq!(body["error"]["code"], "already_exists");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -687,7 +687,7 @@ async fn create_tenant_rejects_unknown_field_with_400() {
         .expect("POST");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "bad_request");
+    assert_eq!(body["error"]["code"], "bad_request");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -706,7 +706,7 @@ async fn create_tenant_rejects_invalid_name_with_400() {
         .expect("POST");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "invalid_name");
+    assert_eq!(body["error"]["code"], "invalid_name");
 }
 
 /// Tenant names in the reserved set (`admin`, `api`, etc.) return 400
@@ -726,7 +726,7 @@ async fn create_tenant_rejects_reserved_name_with_400() {
         .expect("POST");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "reserved_name");
+    assert_eq!(body["error"]["code"], "reserved_name");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -793,7 +793,7 @@ async fn update_tenant_rejects_stale_lock_with_409_stale_write() {
         .expect("PUT");
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "stale_write");
+    assert_eq!(body["error"]["code"], "stale_write");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -823,13 +823,12 @@ async fn delete_tenant_blocks_with_409_has_dependents_and_names_workspaces() {
         .expect("DELETE");
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "has_dependents");
-    let dependents = body["dependents"].as_array().expect("dependents array");
-    let names: Vec<&str> = dependents
-        .iter()
-        .map(|d| d["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, vec!["mcp"]);
+    assert_eq!(body["error"]["code"], "has_dependents");
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("workspace") && message.contains("mcp"),
+        "has_dependents message should include blocking workspace details: {message}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -974,9 +973,12 @@ async fn create_plugin_invokes_api_core_validator() {
         .expect("POST");
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "validation_failed");
+    assert_eq!(body["error"]["code"], "validation_failed");
     assert!(
-        body["message"].as_str().unwrap().contains("egress"),
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("egress"),
         "validation error should name the missing field: {body}"
     );
 }
@@ -1033,13 +1035,12 @@ async fn delete_plugin_blocks_with_409_and_names_bindings() {
         .expect("DELETE");
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "has_dependents");
-    let dependents = body["dependents"].as_array().expect("dependents");
-    // Each entry carries identifying fields per the contract.
-    assert!(!dependents.is_empty());
-    assert_eq!(dependents[0]["kind"], "workspace_plugin");
-    assert!(dependents[0]["tenant"].is_string());
-    assert!(dependents[0]["workspace"].is_string());
+    assert_eq!(body["error"]["code"], "has_dependents");
+    let message = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("workspace") && message.contains("phlax"),
+        "has_dependents message should include binding context: {message}"
+    );
 }
 
 // ── workspace_plugin writes (with control-plane gate) ──────────────
@@ -1180,7 +1181,7 @@ async fn delete_binding_rolls_back_when_control_plane_unavailable() {
         .expect("DELETE");
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "unavailable");
+    assert_eq!(body["error"]["code"], "unavailable");
 
     // The binding should still exist — rollback worked.
     let resp = client
@@ -1444,7 +1445,7 @@ async fn agent_sessions_cross_tenant_is_403() {
         .expect("GET");
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "cross_tenant_forbidden");
+    assert_eq!(body["error"]["code"], "cross_tenant_forbidden");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

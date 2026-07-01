@@ -64,7 +64,7 @@ use sea_orm::{
     EntityTrait, JoinType, QueryFilter, TransactionTrait,
 };
 use serde::Deserialize;
-use serde_json::{json, Value as JsonValue};
+use serde_json::Value as JsonValue;
 use tracing::info;
 use uuid::Uuid;
 
@@ -417,28 +417,19 @@ async fn delete_tenant(
         check_lock(&lock, &live.updated_at, "tenant")?;
     }
 
-    // Delete-guard: workspace.tenant_id is RESTRICT. Build the
-    // dependent identity list so the UI can render "remove these
-    // workspaces first".
+    // Delete-guard: workspace.tenant_id is RESTRICT.
     let dependents = workspace::Entity::find()
         .filter(workspace::Column::TenantId.eq(id))
         .all(&tx)
         .await?;
     if !dependents.is_empty() {
         let names: Vec<String> = dependents.iter().map(|w| w.name.clone()).collect();
-        let payload = json!(dependents
-            .iter()
-            .map(|w| json!({ "kind": "workspace", "id": w.id, "name": w.name }))
-            .collect::<Vec<_>>());
-        return Err(ApiError::has_dependents(
-            format!(
-                "tenant '{}' still has {} workspace(s): {:?}",
-                live.name,
-                dependents.len(),
-                names
-            ),
-            payload,
-        ));
+        return Err(ApiError::has_dependents(format!(
+            "tenant '{}' still has {} workspace(s): {:?}",
+            live.name,
+            dependents.len(),
+            names
+        )));
     }
 
     tenant::Entity::delete_by_id(id).exec(&tx).await?;
@@ -901,7 +892,6 @@ async fn delete_plugin(
         .all(&tx)
         .await?;
     if !bindings.is_empty() {
-        let mut payload = Vec::with_capacity(bindings.len());
         let mut summary = Vec::with_capacity(bindings.len());
         for (binding, ws_opt) in &bindings {
             let ws = ws_opt.as_ref().ok_or_else(|| ApiError::Internal {
@@ -920,24 +910,14 @@ async fn delete_plugin(
                         ws.id, ws.tenant_id
                     ),
                 )?;
-            payload.push(json!({
-                "kind": "workspace_plugin",
-                "tenant": tenant_row.name,
-                "workspace": ws.name,
-                "workspace_id": ws.id,
-                "plugin_id": binding.plugin_id,
-            }));
             summary.push(format!("{}/{}", tenant_row.name, ws.name));
         }
-        return Err(ApiError::has_dependents(
-            format!(
-                "plugin '{}' still bound in {} workspace(s): {:?}",
-                live.name,
-                bindings.len(),
-                summary
-            ),
-            json!(payload),
-        ));
+        return Err(ApiError::has_dependents(format!(
+            "plugin '{}' still bound in {} workspace(s): {:?}",
+            live.name,
+            bindings.len(),
+            summary
+        )));
     }
 
     plugin::Entity::delete_by_id(id).exec(&tx).await?;

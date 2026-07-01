@@ -245,7 +245,7 @@ async fn create_secret_missing_tenant_header() {
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "cross_tenant_forbidden");
+    assert_eq!(body["error"]["code"], "cross_tenant_forbidden");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -281,7 +281,7 @@ async fn create_secret_already_exists() {
 
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "already_exists");
+    assert_eq!(body["error"]["code"], "already_exists");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -315,9 +315,9 @@ async fn create_secret_backend_unavailable() {
 
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "unavailable");
+    assert_eq!(body["error"]["code"], "unavailable");
     assert!(
-        body["message"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("secret-store"),
@@ -350,9 +350,9 @@ async fn create_secret_backend_disabled() {
 
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "unavailable");
+    assert_eq!(body["error"]["code"], "unavailable");
     assert!(
-        body["message"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("break-glass"),
@@ -389,7 +389,7 @@ async fn create_secret_bad_service_name() {
 
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "validation_failed");
+    assert_eq!(body["error"]["code"], "validation_failed");
 
     // Backend must NOT have received a request.
     let reqs = mock.received_requests().await.unwrap_or_default();
@@ -423,7 +423,7 @@ async fn create_secret_rejects_path_traversal_component() {
 
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "validation_failed");
+    assert_eq!(body["error"]["code"], "validation_failed");
 
     let reqs = mock.received_requests().await.unwrap_or_default();
     assert!(
@@ -501,7 +501,7 @@ async fn delete_secret_not_found() {
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["error"]["code"], "not_found");
 }
 
 /// Phase 2: a missing `x-botwork-tenant` header on the tenant-scoped
@@ -528,5 +528,5 @@ async fn delete_secret_missing_tenant_header() {
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"], "cross_tenant_forbidden");
+    assert_eq!(body["error"]["code"], "cross_tenant_forbidden");
 }
