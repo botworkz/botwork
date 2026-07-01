@@ -5,15 +5,16 @@
 //!
 //! # Error envelope
 //!
-//! Mirrors config-broker / control-plane:
+//! Mirrors auth-broker:
 //!
 //! ```json
-//! { "error": "<machine code>", "message": "<human detail>" }
+//! {
+//!   "error": {
+//!     "code": "<machine code>",
+//!     "message": "<human detail>"
+//!   }
+//! }
 //! ```
-//!
-//! `409 has_dependents` extends the envelope with a `dependents` array
-//! so the operator UI can render "remove these bindings first" instead
-//! of a bare refusal. The other 4xx codes use the bare envelope only.
 //!
 //! [`ApiError`] maps each variant to a `(StatusCode, body)` pair via
 //! [`ApiError::into_response`]; callers `?`-bubble through this so the
@@ -74,17 +75,36 @@ pub struct AppState {
 
 /// Wire-shape for non-2xx responses.
 ///
-/// Keys are stable; values are the caller-facing contract. The
-/// `dependents` field is only populated by 409 `has_dependents`; it
-/// is `Option<JsonValue>` so we can describe shape per dependent
-/// type without bumping the envelope (every list element is
-/// `{ "id": uuid, ...identifying-fields }`).
+/// Keys are stable; values are the caller-facing contract.
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
-    pub error: &'static str,
+    pub error: ErrorDetail,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ErrorDetail {
+    pub code: &'static str,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dependents: Option<JsonValue>,
+    pub remediation: Option<ErrorRemediation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ErrorRemediation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_url: Option<&'static str>,
+}
+
+impl ErrorDetail {
+    fn new(code: &'static str, message: String) -> Self {
+        Self {
+            code,
+            message,
+            remediation: None,
+        }
+    }
 }
 
 /// Errors produced by handlers.
@@ -118,12 +138,8 @@ pub enum ApiError {
     /// but the header was absent or empty. 403 `admin_required`.
     AdminRequired,
     /// Delete-guard preflight found dependents (RESTRICT would fire
-    /// at the DB). 409 `has_dependents`. `dependents` is a JSON
-    /// array describing each blocker; clients render this.
-    HasDependents {
-        message: String,
-        dependents: JsonValue,
-    },
+    /// at the DB). 409 `has_dependents`.
+    HasDependents { message: String },
     /// Optimistic-lock token didn't match the live `updated_at`. 409
     /// `stale_write`. Client should GET the entity and retry.
     StaleWrite { detail: String },
@@ -160,10 +176,9 @@ impl ApiError {
         }
     }
 
-    pub(crate) fn has_dependents(message: impl Into<String>, dependents: JsonValue) -> Self {
+    pub(crate) fn has_dependents(message: impl Into<String>) -> Self {
         Self::HasDependents {
             message: message.into(),
-            dependents,
         }
     }
 
@@ -237,94 +252,73 @@ impl IntoResponse for ApiError {
             ApiError::NotFound { what, detail } => (
                 StatusCode::NOT_FOUND,
                 ErrorBody {
-                    error: "not_found",
-                    message: format!("{what}: {detail}"),
-                    dependents: None,
+                    error: ErrorDetail::new("not_found", format!("{what}: {detail}")),
                 },
             ),
             ApiError::BadRequest { detail } => (
                 StatusCode::BAD_REQUEST,
                 ErrorBody {
-                    error: "bad_request",
-                    message: detail,
-                    dependents: None,
+                    error: ErrorDetail::new("bad_request", detail),
                 },
             ),
             ApiError::ValidationFailed { detail } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorBody {
-                    error: "validation_failed",
-                    message: detail,
-                    dependents: None,
+                    error: ErrorDetail::new("validation_failed", detail),
                 },
             ),
             ApiError::InvalidName { detail } => (
                 StatusCode::BAD_REQUEST,
                 ErrorBody {
-                    error: "invalid_name",
-                    message: detail,
-                    dependents: None,
+                    error: ErrorDetail::new("invalid_name", detail),
                 },
             ),
             ApiError::ReservedName { detail } => (
                 StatusCode::BAD_REQUEST,
                 ErrorBody {
-                    error: "reserved_name",
-                    message: detail,
-                    dependents: None,
+                    error: ErrorDetail::new("reserved_name", detail),
                 },
             ),
             ApiError::CrossTenantForbidden { path_tenant } => (
                 StatusCode::FORBIDDEN,
                 ErrorBody {
-                    error: "cross_tenant_forbidden",
-                    message: format!(
-                        "path tenant {path_tenant:?} does not match authenticated tenant"
+                    error: ErrorDetail::new(
+                        "cross_tenant_forbidden",
+                        format!("path tenant {path_tenant:?} does not match authenticated tenant"),
                     ),
-                    dependents: None,
                 },
             ),
             ApiError::AdminRequired => (
                 StatusCode::FORBIDDEN,
                 ErrorBody {
-                    error: "admin_required",
-                    message: "this endpoint requires the x-botwork-admin header".to_string(),
-                    dependents: None,
+                    error: ErrorDetail::new(
+                        "admin_required",
+                        "this endpoint requires the x-botwork-admin header".to_string(),
+                    ),
                 },
             ),
-            ApiError::HasDependents {
-                message,
-                dependents,
-            } => (
+            ApiError::HasDependents { message } => (
                 StatusCode::CONFLICT,
                 ErrorBody {
-                    error: "has_dependents",
-                    message,
-                    dependents: Some(dependents),
+                    error: ErrorDetail::new("has_dependents", message),
                 },
             ),
             ApiError::StaleWrite { detail } => (
                 StatusCode::CONFLICT,
                 ErrorBody {
-                    error: "stale_write",
-                    message: detail,
-                    dependents: None,
+                    error: ErrorDetail::new("stale_write", detail),
                 },
             ),
             ApiError::AlreadyExists { detail } => (
                 StatusCode::CONFLICT,
                 ErrorBody {
-                    error: "already_exists",
-                    message: detail,
-                    dependents: None,
+                    error: ErrorDetail::new("already_exists", detail),
                 },
             ),
             ApiError::Unavailable { detail } => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 ErrorBody {
-                    error: "unavailable",
-                    message: detail,
-                    dependents: None,
+                    error: ErrorDetail::new("unavailable", detail),
                 },
             ),
             ApiError::Internal { detail } => {
@@ -332,14 +326,107 @@ impl IntoResponse for ApiError {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     ErrorBody {
-                        error: "internal",
-                        message: "internal server error".to_string(),
-                        dependents: None,
+                        error: ErrorDetail::new("internal", "internal server error".to_string()),
                     },
                 )
             }
         };
         (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn api_error_envelope_is_structured_for_all_variants() {
+        let cases = vec![
+            (
+                ApiError::not_found("tenant", "missing"),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                ApiError::bad_request("bad request"),
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+            ),
+            (
+                ApiError::validation_failed("validation failed"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_failed",
+            ),
+            (
+                ApiError::InvalidName {
+                    detail: "invalid name".to_string(),
+                },
+                StatusCode::BAD_REQUEST,
+                "invalid_name",
+            ),
+            (
+                ApiError::ReservedName {
+                    detail: "reserved name".to_string(),
+                },
+                StatusCode::BAD_REQUEST,
+                "reserved_name",
+            ),
+            (
+                ApiError::CrossTenantForbidden {
+                    path_tenant: "wrong-tenant".to_string(),
+                },
+                StatusCode::FORBIDDEN,
+                "cross_tenant_forbidden",
+            ),
+            (
+                ApiError::AdminRequired,
+                StatusCode::FORBIDDEN,
+                "admin_required",
+            ),
+            (
+                ApiError::has_dependents("blocked by dependents"),
+                StatusCode::CONFLICT,
+                "has_dependents",
+            ),
+            (
+                ApiError::stale_write("stale write"),
+                StatusCode::CONFLICT,
+                "stale_write",
+            ),
+            (
+                ApiError::already_exists("already exists"),
+                StatusCode::CONFLICT,
+                "already_exists",
+            ),
+            (
+                ApiError::unavailable("temporarily unavailable"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+            ),
+            (
+                ApiError::Internal {
+                    detail: "db down".to_string(),
+                },
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+            ),
+        ];
+
+        for (error, expected_status, expected_code) in cases {
+            let response = error.into_response();
+            assert_eq!(response.status(), expected_status);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response bytes");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+            assert_eq!(json["error"]["code"], expected_code);
+            assert!(json["error"]["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()));
+            assert!(json["error"]["remediation"].is_null());
+        }
     }
 }
 
