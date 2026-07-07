@@ -51,6 +51,7 @@ use uuid::Uuid;
 
 use crate::control_plane::ControlPlaneClient;
 use crate::secret_store::SecretStoreClient;
+use crate::session_broker::SessionBrokerClient;
 use crate::{read, write};
 
 pub(crate) const PREFIX: &str = "[api]";
@@ -66,11 +67,16 @@ pub(crate) const PREFIX: &str = "[api]";
 /// * `secret_store` — HTTP client targeting the secret-store
 ///   backend on `botwork-internal`. See [`crate::secret_store`]
 ///   for the failure semantics.
+/// * `session_broker` — HTTP client targeting session-broker's admin
+///   interface on `botwork-internal`. Called after a successful secret
+///   mutation to evict stale-credential containers for the tenant. See
+///   [`crate::session_broker`] for the failure semantics.
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<DatabaseConnection>,
     pub control_plane: ControlPlaneClient,
     pub secret_store: SecretStoreClient,
+    pub session_broker: SessionBrokerClient,
 }
 
 /// Wire-shape for non-2xx responses.

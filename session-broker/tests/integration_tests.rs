@@ -161,3 +161,113 @@ async fn admin_get_sessions_includes_spawned_session() {
 // Leaving this comment in place so a future bisect lands on the
 // reason rather than `git log -p` archaeology.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// POST /evict-tenant/{tenant}
+// ---------------------------------------------------------------------------
+
+/// `POST /evict-tenant/{tenant}` with no live sessions returns 200 `{"evicted":0}`.
+#[tokio::test]
+async fn evict_tenant_no_sessions_returns_zero() {
+    let state = app_state_for_admin_tests();
+    let app = build_router(state);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/evict-tenant/acme")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["evicted"], 0);
+}
+
+/// Eviction tombstones matching sessions and removes them from the
+/// routing table; sessions for other tenants are untouched.
+#[tokio::test]
+async fn evict_tenant_tombstones_matching_sessions_and_leaves_others() {
+    let state = app_state_for_admin_tests();
+
+    // Seed two sessions for "acme" and one for "other".
+    {
+        let mut sessions = state.transport_sessions.lock().await;
+        for (sid, tenant, container) in [
+            ("sess-1", "acme", "ctr-acme-1"),
+            ("sess-2", "acme", "ctr-acme-2"),
+            ("sess-3", "other", "ctr-other-1"),
+        ] {
+            sessions.insert(
+                sid.to_string(),
+                TransportState {
+                    container_name: container.to_string(),
+                    container_ip: "172.20.0.5".to_string(),
+                    staging_token: "tok".to_string(),
+                    tenant_name: tenant.to_string(),
+                    workspace: "ws".to_string(),
+                    plugin_name: "p".to_string(),
+                    port: 8000,
+                    path: "/mcp".to_string(),
+                    upstream_auth: UpstreamAuth::None,
+                    upstream_authorization: None,
+                    agent_id: None,
+                    egress_policy: None,
+                },
+            );
+        }
+    }
+
+    let app = build_router(state.clone());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/evict-tenant/acme")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["evicted"], 2, "two acme sessions should be evicted");
+
+    // Both acme sessions must be removed from transport_sessions.
+    let sessions = state.transport_sessions.lock().await;
+    assert!(
+        !sessions.contains_key("sess-1"),
+        "sess-1 should be removed from routing"
+    );
+    assert!(
+        !sessions.contains_key("sess-2"),
+        "sess-2 should be removed from routing"
+    );
+    // Other-tenant session must survive.
+    assert!(
+        sessions.contains_key("sess-3"),
+        "sess-3 (different tenant) must not be evicted"
+    );
+    drop(sessions);
+
+    // Both acme session ids must be tombstoned so the next request
+    // with a stale Mcp-Session-Id receives an immediate 404.
+    let tombstones = state.tombstones.lock().await;
+    assert!(
+        tombstones.contains_key("sess-1"),
+        "sess-1 must be tombstoned"
+    );
+    assert!(
+        tombstones.contains_key("sess-2"),
+        "sess-2 must be tombstoned"
+    );
+    assert!(
+        !tombstones.contains_key("sess-3"),
+        "sess-3 (different tenant) must not be tombstoned"
+    );
+}
