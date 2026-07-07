@@ -621,7 +621,7 @@ async fn request_headers_post_unknown_session_returns_404() {
 }
 
 #[tokio::test]
-async fn request_headers_post_known_session_routes_to_upstream() {
+async fn request_headers_post_known_session_without_cap_routes_to_upstream() {
     let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
     insert_transport(
         &state,
@@ -1192,21 +1192,10 @@ async fn spawn_passes_cap_to_secrets_fetch_and_envs_to_launcher() {
 }
 
 #[tokio::test]
-async fn spawn_without_cap_fetches_no_secrets_and_passes_empty_env() {
-    let temp = tempdir().unwrap();
-    let socket_path = temp.path().join("launcher.sock");
-    let launcher_body = Arc::new(Mutex::new(None));
-    let launcher_task = spawn_launcher_capture(
-        &socket_path,
-        500,
-        r#"{"error":"boom"}"#,
-        Arc::clone(&launcher_body),
-    )
-    .await;
-
+async fn spawn_without_cap_returns_503_and_does_not_spawn() {
     let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
     let state = app_state_for_spawn(
-        path_to_string(&socket_path),
+        "/tmp/no-launcher.sock".to_string(),
         "http://127.0.0.1:1".to_string(),
         config_url,
     );
@@ -1221,12 +1210,11 @@ async fn spawn_without_cap_fetches_no_secrets_and_passes_empty_env() {
         ]),
     )
     .await;
-    launcher_task.await.unwrap();
-    assert_eq!(immediate_status(&response), Some(502));
-    let launcher_payload: serde_json::Value =
-        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
-            .expect("launcher json");
-    assert!(launcher_payload.get("env").is_none());
+    assert_eq!(immediate_status(&response), Some(503));
+    assert_eq!(
+        immediate_body(&response).as_deref(),
+        Some("spawn requires x-botwork-cap")
+    );
 }
 
 #[tokio::test]
@@ -1241,12 +1229,14 @@ async fn request_headers_strips_authorization_when_upstream_auth_none_spawn_path
         Arc::clone(&launcher_body),
     )
     .await;
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
     let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
-    let state = app_state_for_spawn(
-        path_to_string(&socket_path),
-        "http://127.0.0.1:1".to_string(),
-        config_url,
-    );
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -1255,6 +1245,7 @@ async fn request_headers_strips_authorization_when_upstream_auth_none_spawn_path
             (":method", "POST"),
             (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
         ]),
     )
     .await;
@@ -1396,20 +1387,10 @@ async fn request_headers_bearer_non_utf8_secret_returns_5xx() {
 }
 
 #[tokio::test]
-async fn spawn_with_cap_but_auth_broker_unreachable_continues_with_empty_env() {
-    let temp = tempdir().unwrap();
-    let socket_path = temp.path().join("launcher.sock");
-    let launcher_body = Arc::new(Mutex::new(None));
-    let launcher_task = spawn_launcher_capture(
-        &socket_path,
-        500,
-        r#"{"error":"boom"}"#,
-        Arc::clone(&launcher_body),
-    )
-    .await;
+async fn spawn_with_cap_but_auth_broker_unreachable_returns_503_and_does_not_spawn() {
     let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
     let state = app_state_for_spawn(
-        path_to_string(&socket_path),
+        "/tmp/no-launcher.sock".to_string(),
         "http://127.0.0.1:1".to_string(),
         config_url,
     );
@@ -1425,16 +1406,63 @@ async fn spawn_with_cap_but_auth_broker_unreachable_continues_with_empty_env() {
         ]),
     )
     .await;
-    launcher_task.await.unwrap();
-    assert_eq!(immediate_status(&response), Some(502));
-    let launcher_payload: serde_json::Value =
-        serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
-            .expect("launcher json");
-    assert!(launcher_payload.get("env").is_none());
+    assert_eq!(immediate_status(&response), Some(503));
+    assert_eq!(
+        immediate_body(&response).as_deref(),
+        Some("spawn secrets fetch failed")
+    );
 }
 
 #[tokio::test]
-async fn spawn_with_cap_but_auth_broker_401_continues_with_empty_env() {
+async fn spawn_with_cap_but_auth_broker_401_returns_503_and_does_not_spawn() {
+    let auth_url = spawn_auth_broker_capture(401, "{}", Arc::new(Mutex::new(None))).await;
+    let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
+    let state = app_state_for_spawn("/tmp/no-launcher.sock".to_string(), auth_url, config_url);
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    assert_eq!(immediate_status(&response), Some(503));
+    assert_eq!(
+        immediate_body(&response).as_deref(),
+        Some("spawn secrets fetch failed")
+    );
+}
+
+#[tokio::test]
+async fn spawn_with_cap_but_auth_broker_bad_json_returns_503_and_does_not_spawn() {
+    let auth_url = spawn_auth_broker_capture(200, "{", Arc::new(Mutex::new(None))).await;
+    let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
+    let state = app_state_for_spawn("/tmp/no-launcher.sock".to_string(), auth_url, config_url);
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    assert_eq!(immediate_status(&response), Some(503));
+    assert_eq!(
+        immediate_body(&response).as_deref(),
+        Some("spawn secrets fetch failed")
+    );
+}
+
+#[tokio::test]
+async fn spawn_with_cap_and_empty_secrets_response_still_spawns_with_empty_env() {
     let temp = tempdir().unwrap();
     let socket_path = temp.path().join("launcher.sock");
     let launcher_body = Arc::new(Mutex::new(None));
@@ -1445,7 +1473,13 @@ async fn spawn_with_cap_but_auth_broker_401_continues_with_empty_env() {
         Arc::clone(&launcher_body),
     )
     .await;
-    let auth_url = spawn_auth_broker_capture(401, "{}", Arc::new(Mutex::new(None))).await;
+
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
     let config_url = spawn_config_broker_with_descriptor(descriptor_default()).await;
     let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
     let mut stream = PerStreamState::default();
@@ -1587,12 +1621,14 @@ async fn spawn_static_env_appears_in_launcher_payload() {
             value: "true".to_string(),
         },
     ]);
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
     let config_url = spawn_config_broker_with_descriptor(descriptor).await;
-    let state = app_state_for_spawn(
-        path_to_string(&socket_path),
-        "http://127.0.0.1:1".to_string(),
-        config_url,
-    );
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -1601,6 +1637,7 @@ async fn spawn_static_env_appears_in_launcher_payload() {
             (":method", "POST"),
             (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
         ]),
     )
     .await;
@@ -1648,12 +1685,14 @@ async fn spawn_plugin_resources_appear_in_launcher_payload() {
         memory: Some("4g".to_string()),
         pids: Some(1024),
     });
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
     let config_url = spawn_config_broker_with_descriptor(descriptor).await;
-    let state = app_state_for_spawn(
-        path_to_string(&socket_path),
-        "http://127.0.0.1:1".to_string(),
-        config_url,
-    );
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
         &state,
@@ -1662,6 +1701,7 @@ async fn spawn_plugin_resources_appear_in_launcher_payload() {
             (":method", "POST"),
             (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
         ]),
     )
     .await;
@@ -1734,7 +1774,7 @@ async fn spawn_static_env_appears_before_secrets() {
 }
 
 #[tokio::test]
-async fn spawn_static_env_present_when_no_cap() {
+async fn spawn_static_env_present_with_cap_when_secrets_empty() {
     let temp = tempdir().unwrap();
     let socket_path = temp.path().join("launcher.sock");
     let launcher_body = Arc::new(Mutex::new(None));
@@ -1750,14 +1790,15 @@ async fn spawn_static_env_present_when_no_cap() {
         name: "GITHUB_TOOLSETS".to_string(),
         value: "default,actions".to_string(),
     }]);
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
     let config_url = spawn_config_broker_with_descriptor(descriptor).await;
-    let state = app_state_for_spawn(
-        path_to_string(&socket_path),
-        "http://127.0.0.1:1".to_string(),
-        config_url,
-    );
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
     let mut stream = PerStreamState::default();
-    // No x-botwork-cap header — no secrets fetch.
     let response = ExternalProcessorService::handle_request_headers(
         &state,
         &mut stream,
@@ -1765,6 +1806,7 @@ async fn spawn_static_env_present_when_no_cap() {
             (":method", "POST"),
             (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
         ]),
     )
     .await;
@@ -2436,12 +2478,14 @@ async fn spawn_config_env_appears_in_launcher_payload() {
     })
     .to_string();
     let descriptor = descriptor_with_config_blob(Some(blob));
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
     let config_url = spawn_config_broker_with_descriptor(descriptor).await;
-    let state = app_state_for_spawn(
-        path_to_string(&socket_path),
-        "http://127.0.0.1:1".to_string(),
-        config_url,
-    );
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
 
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -2451,6 +2495,7 @@ async fn spawn_config_env_appears_in_launcher_payload() {
             (":method", "POST"),
             (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
         ]),
     )
     .await;
@@ -2492,12 +2537,14 @@ async fn spawn_config_env_absent_when_config_not_set() {
     .await;
 
     let descriptor = descriptor_with_config_blob(None);
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
     let config_url = spawn_config_broker_with_descriptor(descriptor).await;
-    let state = app_state_for_spawn(
-        path_to_string(&socket_path),
-        "http://127.0.0.1:1".to_string(),
-        config_url,
-    );
+    let state = app_state_for_spawn(path_to_string(&socket_path), auth_url, config_url);
 
     let mut stream = PerStreamState::default();
     let response = ExternalProcessorService::handle_request_headers(
@@ -2507,6 +2554,7 @@ async fn spawn_config_env_absent_when_config_not_set() {
             (":method", "POST"),
             (":path", "/tenant1/mcp/plugin-a"),
             ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
         ]),
     )
     .await;
