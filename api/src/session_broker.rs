@@ -164,11 +164,7 @@ pub async fn signal_evict(client: &SessionBrokerClient, tenant: &str) {
             debug!("{PREFIX} session-broker evict: tenant={tenant:?} signaled");
         }
         Err(err) => {
-            warn!(
-                "{PREFIX} session-broker evict failed for tenant={tenant:?}: {err} \
-                 (live sessions for this tenant may serve stale credentials until their \
-                 next liveness check)"
-            );
+            warn!("{PREFIX} session-broker evict failed for tenant={tenant:?}: {err} (live sessions for this tenant may serve stale credentials until their next liveness check)");
         }
     }
 }
