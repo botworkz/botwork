@@ -2527,3 +2527,89 @@ async fn spawn_config_env_absent_when_config_not_set() {
         "BOTWORK_MCP_CONFIG should not be present when config is None"
     );
 }
+
+// ---------------------------------------------------------------------------
+// evict_sessions_for_tenant: stale session ID → 404 routing behavior
+// ---------------------------------------------------------------------------
+
+/// After `evict_sessions_for_tenant`, a subsequent request carrying the
+/// previously-valid `Mcp-Session-Id` receives an immediate 404 because
+/// the session was tombstoned.  This is the client-observable signal that
+/// drives MCP re-initialization (session-less POST → spawn → secrets re-fetched).
+#[tokio::test]
+async fn evicted_session_id_returns_404_from_routing() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+
+    // Seed a live session for tenant "acme".
+    let transport = sample_transport("acme", "plugin-a", "ctr-evict-test");
+    insert_transport(&state, "sess-evict", transport).await;
+
+    // Evict all acme sessions.
+    let evicted = botwork_session_broker::ext_proc::evict_sessions_for_tenant(&state, "acme").await;
+    assert_eq!(evicted, 1);
+
+    // A subsequent request with the now-stale Mcp-Session-Id must get 404.
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/plugin-a/mcp"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-evict"),
+        ]),
+    )
+    .await;
+
+    assert_eq!(
+        immediate_status(&response),
+        Some(404),
+        "tombstoned session must return 404"
+    );
+}
+
+/// `evict_sessions_for_tenant` only evicts the targeted tenant; sessions
+/// for other tenants remain routable.
+#[tokio::test]
+async fn evict_tenant_does_not_affect_other_tenants() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+
+    // Seed sessions for two different tenants.
+    insert_transport(
+        &state,
+        "sess-alpha",
+        sample_transport("alpha", "plugin-a", "ctr-alpha"),
+    )
+    .await;
+    insert_transport(
+        &state,
+        "sess-beta",
+        sample_transport("beta", "plugin-a", "ctr-beta"),
+    )
+    .await;
+
+    // Evict only "alpha".
+    let evicted =
+        botwork_session_broker::ext_proc::evict_sessions_for_tenant(&state, "alpha").await;
+    assert_eq!(evicted, 1);
+
+    // "alpha" session is gone from the routing table.
+    assert!(
+        !state
+            .transport_sessions
+            .lock()
+            .await
+            .contains_key("sess-alpha"),
+        "alpha session should be evicted"
+    );
+    // "beta" session is still routable.
+    assert!(
+        state
+            .transport_sessions
+            .lock()
+            .await
+            .contains_key("sess-beta"),
+        "beta session must survive"
+    );
+}

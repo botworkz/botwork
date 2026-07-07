@@ -133,8 +133,10 @@ pub mod control_plane;
 pub mod handler;
 pub mod read;
 pub mod secret_store;
+pub mod session_broker;
 pub mod write;
 
 pub use control_plane::ControlPlaneClient;
 pub use handler::{build_router, AppState};
 pub use secret_store::SecretStoreClient;
+pub use session_broker::SessionBrokerClient;

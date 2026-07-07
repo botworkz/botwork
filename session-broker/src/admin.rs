@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
-use axum::extract::State;
-use axum::response::Json;
-use axum::routing::get;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json};
+use axum::routing::{get, post};
 use axum::Router;
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -12,6 +13,7 @@ use crate::AppState;
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/sessions", get(get_sessions))
+        .route("/evict-tenant/:tenant", post(evict_tenant))
         .with_state(state)
 }
 
@@ -81,4 +83,30 @@ struct SessionView {
     /// Only populated once the first non-init JSON-RPC call has
     /// surfaced the goose agent-session-id (see ext_proc.rs).
     agent_id: Option<String>,
+}
+
+/// `POST /evict-tenant/{tenant}` — evict all live sessions for a tenant.
+///
+/// Called by api after a successful secret mutation (create, overwrite, or
+/// delete) for the tenant so that the next request re-enters the spawn path
+/// and re-fetches secrets with the updated credentials.
+///
+/// Sync: removes the session from the routing table and tombstones its
+/// `Mcp-Session-Id`; subsequent requests with a stale id receive an
+/// immediate 404, causing well-behaved MCP clients to re-initialize.
+///
+/// Async: spawns a background task per session to call the launcher
+/// teardown helper and update the DB audit trail.
+///
+/// Returns `200 { "evicted": N }` regardless of whether any sessions were
+/// found. A `0` result is normal (tenant has no live sessions).
+async fn evict_tenant(
+    State(state): State<AppState>,
+    Path(tenant): Path<String>,
+) -> impl IntoResponse {
+    let evicted = crate::ext_proc::evict_sessions_for_tenant(&state, &tenant).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "evicted": evicted })),
+    )
 }
