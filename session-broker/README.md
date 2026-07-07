@@ -41,10 +41,13 @@ byte-wise sanitization and collision handling.
 `env: [{name, value}]` entries. The MCP container itself does not call
 auth-broker and does not need cap awareness.
 
-Auth-broker fetch errors are fail-open: spawn continues with no injected
-secrets, so control-plane/auth-broker issues do not take down the MCP data
-plane. Config-broker errors, by contrast, are fail-closed: spawn cannot
-proceed without a descriptor (see "Config-broker resolution" below).
+Spawn is fail-closed for cap/secrets fetch preconditions: a missing
+`x-botwork-cap` on spawn, or any `/secrets/fetch` error (401, transport, bad
+response), returns an immediate 503 and does not launch a container. A
+successful fetch that returns an empty secret list is still a normal spawn and
+injects no `BOTWORK_SECRET_*` variables. Config-broker errors are likewise
+fail-closed: spawn cannot proceed without a descriptor (see
+"Config-broker resolution" below).
 
 ## Config-broker resolution
 

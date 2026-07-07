@@ -1474,27 +1474,44 @@ impl ExternalProcessorService {
             };
             let rewritten_path = forward_path(&stream.path, &descriptor.path);
 
-            // Fail open for env injection; upstream bearer resolution below fails closed.
-            let fetched_secrets = match stream.cap.as_deref() {
-                Some(cap) if !cap.is_empty() => {
-                    match secrets::fetch_secrets(
-                        &state.auth_broker_url,
-                        cap,
-                        std::time::Duration::from_secs(5),
-                    )
-                    .await
-                    {
-                        Ok(secrets) => secrets,
-                        Err(err) => {
-                            log_info(&format!(
-                                "spawn_secrets fetch failed tenant={} plugin={} err={err}",
-                                stream.trusted_tenant, plugin_name
-                            ));
-                            Vec::new()
-                        }
-                    }
+            let cap = match stream.cap.as_deref() {
+                Some(cap) if !cap.is_empty() => cap,
+                _ => {
+                    // Spawn requests should always arrive with a short-lived cap
+                    // minted by ext_authz; missing cap indicates an auth edge
+                    // misconfiguration or bypass. Fail closed.
+                    log_info(&format!(
+                        "spawn_secrets no_cap_on_spawn tenant={} plugin={}",
+                        stream.trusted_tenant, plugin_name
+                    ));
+                    return logged_immediate_response(
+                        stream,
+                        "request_headers",
+                        503,
+                        "spawn requires x-botwork-cap",
+                    );
                 }
-                _ => Vec::new(),
+            };
+            let fetched_secrets = match secrets::fetch_secrets(
+                &state.auth_broker_url,
+                cap,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            {
+                Ok(secrets) => secrets,
+                Err(err) => {
+                    log_info(&format!(
+                        "spawn_secrets fetch_failed tenant={} plugin={} fetch_error={err}",
+                        stream.trusted_tenant, plugin_name
+                    ));
+                    return logged_immediate_response(
+                        stream,
+                        "request_headers",
+                        503,
+                        "spawn secrets fetch failed",
+                    );
+                }
             };
             let secret_env = secrets::build_env_entries(&fetched_secrets);
             let static_env_count = descriptor.env.len();
