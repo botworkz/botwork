@@ -848,6 +848,87 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
     });
 }
 
+/// Evict all live sessions for a tenant triggered by a secret mutation.
+///
+/// **Sync:** tombstones every matching `Mcp-Session-Id` and removes it from
+/// the routing table so subsequent requests with those ids receive an
+/// immediate 404.  Per the MCP Streamable HTTP spec, clients that receive a
+/// 404 for their session MUST re-initialize; the re-initialize is a
+/// session-less POST that re-enters the spawn path and re-fetches secrets.
+///
+/// **Async:** spawns a background task for each evicted session that calls
+/// the launcher teardown helper and records the appropriate DB transitions
+/// (`agent_session` inactive, `session_worker` reaped).  Container teardown
+/// is explicitly off the caller's request path.
+///
+/// Returns the number of sessions evicted.
+pub async fn evict_sessions_for_tenant(state: &AppState, tenant: &str) -> usize {
+    // Collect all (session_id, TransportState) pairs for this tenant
+    // under a single short-lived lock.  We hold nothing across the
+    // async teardown tasks.
+    let to_evict: Vec<(String, TransportState)> = {
+        let sessions = state.transport_sessions.lock().await;
+        sessions
+            .iter()
+            .filter(|(_, t)| t.tenant_name == tenant)
+            .map(|(id, t)| (id.clone(), t.clone()))
+            .collect()
+    };
+
+    let count = to_evict.len();
+    if count == 0 {
+        return 0;
+    }
+
+    log_info(&format!(
+        "secret_evict: tenant={tenant:?} evicting {count} session(s)"
+    ));
+
+    for (mcp_session_id, transport) in to_evict {
+        // ── Sync: make the session unreachable immediately ──────────
+        liveness_remove(state, &mcp_session_id).await;
+        {
+            let mut tombstones = state.tombstones.lock().await;
+            tombstones.insert(mcp_session_id.clone(), Instant::now() + TOMBSTONE_TTL);
+        }
+        {
+            let mut sessions = state.transport_sessions.lock().await;
+            sessions.remove(&mcp_session_id);
+        }
+
+        // ── Async: reap container + DB writes ────────────────────────
+        let container_name = transport.container_name.clone();
+        let staging_path = staging_path(&transport.tenant_name, &transport.staging_token);
+        let agent_session_identity = transport.agent_id.as_ref().map(|agent_id| {
+            (
+                transport.tenant_name.clone(),
+                transport.workspace.clone(),
+                agent_id.clone(),
+            )
+        });
+        let agent_session_writer = state.agent_session_writer.clone();
+        let session_worker_writer = state.session_worker_writer.clone();
+        let launcher_path = state.launcher_socket_path.clone();
+        let container_name_for_reap = container_name.clone();
+        log_info(&format!(
+            "secret_evict: tombstoned session={mcp_session_id} container={container_name}"
+        ));
+        tokio::spawn(async move {
+            call_teardown(&launcher_path, &container_name, &staging_path).await;
+            if let (Some(writer), Some((ten, ws, agent_id))) =
+                (agent_session_writer, agent_session_identity)
+            {
+                writer.record_inactive(&ten, &ws, &agent_id).await;
+            }
+            if let Some(writer) = session_worker_writer {
+                writer.record_reap(&container_name_for_reap).await;
+            }
+        });
+    }
+
+    count
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_new_container(
     state: &AppState,

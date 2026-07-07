@@ -12,7 +12,9 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use botwork_api::{build_router, AppState, ControlPlaneClient, SecretStoreClient};
+use botwork_api::{
+    build_router, AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient,
+};
 use botwork_entity::connection::{connect_from_env, ConnectError, DATABASE_URL_ENV};
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -95,11 +97,24 @@ async fn main() -> ExitCode {
         secret_store.is_disabled(),
     );
 
+    // Session-broker eviction client. SessionBrokerClient reads
+    // BOTWORK_SESSION_BROKER_EVICT_ENDPOINT (default
+    // http://session_broker:9002) and the break-glass
+    // BOTWORK_API_DISABLE_SESSION_BROKER_EVICT flag.
+    let session_broker = SessionBrokerClient::from_env();
+    let sb_endpoint = std::env::var(botwork_api::session_broker::ENDPOINT_ENV)
+        .unwrap_or_else(|_| botwork_api::session_broker::ENDPOINT_DEFAULT.to_string());
+    info!(
+        "{PREFIX} session-broker evict endpoint={sb_endpoint} disabled={}",
+        session_broker.is_disabled(),
+    );
+
     let bind = bind_from_env();
     let app = build_router(AppState {
         db,
         control_plane,
         secret_store,
+        session_broker,
     });
 
     let listener = match TcpListener::bind(&bind).await {

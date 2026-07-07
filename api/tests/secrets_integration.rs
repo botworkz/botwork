@@ -21,7 +21,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use botwork_api::{build_router, AppState, ControlPlaneClient, SecretStoreClient};
+use botwork_api::{
+    build_router, AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient,
+};
 use botwork_bootstrap::{apply, BootstrapConfig, BootstrapConfigRaw};
 use botwork_entity::connection::connect;
 use botwork_migration::Migrator;
@@ -115,7 +117,11 @@ async fn connect_with_retry(url: &str) -> Result<DatabaseConnection, sea_orm::Db
 ///
 /// `secret_store` is the client to inject; the caller controls whether
 /// it points at a wiremock or is `disabled()`.
-async fn spawn_server(secret_store: SecretStoreClient) -> Option<Server> {
+/// `session_broker` is the client to inject for eviction signalling.
+async fn spawn_server(
+    secret_store: SecretStoreClient,
+    session_broker: SessionBrokerClient,
+) -> Option<Server> {
     if !docker_available().await {
         return None;
     }
@@ -137,6 +143,7 @@ async fn spawn_server(secret_store: SecretStoreClient) -> Option<Server> {
         db: Arc::new(db),
         control_plane: ControlPlaneClient::disabled(),
         secret_store,
+        session_broker,
     };
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -160,7 +167,7 @@ async fn create_secret_happy_path() {
     // If docker is unreachable we intentionally return early, and mounting
     // `.expect(1)` before that point would panic at MockServer drop-time.
     let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED create_secret_happy_path: docker not reachable");
         return;
     };
@@ -225,7 +232,7 @@ async fn create_secret_missing_tenant_header() {
     // No wiremock needed — auth check is api-local and no
     // request should reach the backend.
     let client = SecretStoreClient::with_endpoint("http://127.0.0.1:1");
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED create_secret_missing_tenant_header: docker not reachable");
         return;
     };
@@ -261,7 +268,7 @@ async fn create_secret_already_exists() {
         .await;
 
     let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED create_secret_already_exists: docker not reachable");
         return;
     };
@@ -295,7 +302,7 @@ async fn create_secret_backend_unavailable() {
         .await;
 
     let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED create_secret_backend_unavailable: docker not reachable");
         return;
     };
@@ -330,7 +337,12 @@ async fn create_secret_backend_disabled() {
     // SecretStoreClient::disabled() triggers the break-glass path.
     // No docker needed since validation happens before any backend call,
     // but AppState still requires a DB so we still need postgres.
-    let Some(server) = spawn_server(SecretStoreClient::disabled()).await else {
+    let Some(server) = spawn_server(
+        SecretStoreClient::disabled(),
+        SessionBrokerClient::disabled(),
+    )
+    .await
+    else {
         eprintln!("IGNORED create_secret_backend_disabled: docker not reachable");
         return;
     };
@@ -368,7 +380,7 @@ async fn create_secret_bad_service_name() {
     // unexpected and wiremock would return 404.
 
     let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED create_secret_bad_service_name: docker not reachable");
         return;
     };
@@ -403,7 +415,7 @@ async fn create_secret_bad_service_name() {
 async fn create_secret_rejects_path_traversal_component() {
     let mock = MockServer::start().await;
     let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED create_secret_rejects_path_traversal_component: docker not reachable");
         return;
     };
@@ -441,7 +453,7 @@ async fn delete_secret_happy_path() {
     // If docker is unreachable we intentionally return early, and mounting
     // `.expect(1)` before that point would panic at MockServer drop-time.
     let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED delete_secret_happy_path: docker not reachable");
         return;
     };
@@ -484,7 +496,7 @@ async fn delete_secret_not_found() {
         .await;
 
     let client = SecretStoreClient::with_endpoint(mock.uri());
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED delete_secret_not_found: docker not reachable");
         return;
     };
@@ -511,7 +523,7 @@ async fn delete_secret_not_found() {
 async fn delete_secret_missing_tenant_header() {
     // No backend call expected — the consistency check is first.
     let client = SecretStoreClient::with_endpoint("http://127.0.0.1:1");
-    let Some(server) = spawn_server(client).await else {
+    let Some(server) = spawn_server(client, SessionBrokerClient::disabled()).await else {
         eprintln!("IGNORED delete_secret_missing_tenant_header: docker not reachable");
         return;
     };
@@ -529,4 +541,153 @@ async fn delete_secret_missing_tenant_header() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["error"]["code"], "cross_tenant_forbidden");
+}
+
+// ── session-broker eviction signaling ──────────────────────────────
+
+/// After a successful `POST /api/tenant/{tenant}/secrets`, api must
+/// signal session-broker to evict stale-credential containers for the
+/// tenant. Verify that the `POST /evict-tenant/{tenant}` call is made
+/// to session-broker's admin endpoint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_secret_signals_session_broker_eviction() {
+    let secret_mock = MockServer::start().await;
+    let broker_mock = MockServer::start().await;
+
+    let client = SecretStoreClient::with_endpoint(secret_mock.uri());
+    let broker_client = SessionBrokerClient::with_endpoint(broker_mock.uri());
+
+    let Some(server) = spawn_server(client, broker_client).await else {
+        eprintln!("IGNORED create_secret_signals_session_broker_eviction: docker not reachable");
+        return;
+    };
+
+    // Secret-store stub returns success.
+    Mock::given(method("POST"))
+        .and(path("/secrets"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(serde_json::json!({"stored": "github.com/pat", "created": true})),
+        )
+        .expect(1)
+        .mount(&secret_mock)
+        .await;
+
+    // Session-broker eviction endpoint must receive exactly one call for
+    // the matching tenant.
+    Mock::given(method("POST"))
+        .and(path("/evict-tenant/phlax"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"evicted": 0})))
+        .expect(1)
+        .mount(&broker_mock)
+        .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .header("x-botwork-tenant", "phlax")
+        .json(&json!({
+            "service": "github",
+            "name": "pat",
+            "kind": "token",
+            "value_b64": "dG9rZW4="
+        }))
+        .send()
+        .await
+        .expect("POST");
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // wiremock verify: both endpoints were called exactly once.
+    secret_mock.verify().await;
+    broker_mock.verify().await;
+}
+
+/// After a successful `DELETE /api/tenant/{tenant}/secrets/{service}/{name}`,
+/// api must signal session-broker to evict stale-credential containers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_secret_signals_session_broker_eviction() {
+    let secret_mock = MockServer::start().await;
+    let broker_mock = MockServer::start().await;
+
+    let client = SecretStoreClient::with_endpoint(secret_mock.uri());
+    let broker_client = SessionBrokerClient::with_endpoint(broker_mock.uri());
+
+    let Some(server) = spawn_server(client, broker_client).await else {
+        eprintln!("IGNORED delete_secret_signals_session_broker_eviction: docker not reachable");
+        return;
+    };
+
+    Mock::given(method("DELETE"))
+        .and(path("/secrets/github/pat"))
+        .and(query_param("tenant", "phlax"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&secret_mock)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/evict-tenant/phlax"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"evicted": 0})))
+        .expect(1)
+        .mount(&broker_mock)
+        .await;
+
+    let resp = reqwest::Client::new()
+        .delete(format!(
+            "{}/api/tenant/phlax/secrets/github/pat",
+            server.base
+        ))
+        .header("x-botwork-tenant", "phlax")
+        .send()
+        .await
+        .expect("DELETE");
+
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    secret_mock.verify().await;
+    broker_mock.verify().await;
+}
+
+/// When session-broker is unreachable (eviction fails), the secret write
+/// still returns success — eviction failure is non-fatal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_secret_succeeds_even_when_session_broker_unreachable() {
+    let secret_mock = MockServer::start().await;
+    // Point broker client at a port with nothing listening.
+    let broker_client = SessionBrokerClient::with_endpoint("http://127.0.0.1:1");
+
+    let client = SecretStoreClient::with_endpoint(secret_mock.uri());
+    let Some(server) = spawn_server(client, broker_client).await else {
+        eprintln!(
+            "IGNORED create_secret_succeeds_even_when_session_broker_unreachable: docker not reachable"
+        );
+        return;
+    };
+
+    Mock::given(method("POST"))
+        .and(path("/secrets"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(serde_json::json!({"stored": "github.com/pat", "created": true})),
+        )
+        .mount(&secret_mock)
+        .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .header("x-botwork-tenant", "phlax")
+        .json(&json!({
+            "service": "github",
+            "name": "pat",
+            "kind": "token",
+            "value_b64": "dG9rZW4="
+        }))
+        .send()
+        .await
+        .expect("POST");
+
+    // Must still succeed despite the broker being unreachable.
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["stored"], "github.com/pat");
 }

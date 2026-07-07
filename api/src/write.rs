@@ -74,6 +74,7 @@ use crate::handler::{
     ApiError, ApiErrorExt, AppState, PREFIX,
 };
 use crate::secret_store::{PutSecretRequest, SecretStoreError};
+use crate::session_broker::signal_evict;
 
 // ── name validation helpers ───────────────────────────────────────
 //
@@ -1287,6 +1288,12 @@ async fn create_secret(
         ),
     );
 
+    // Evict stale-credential containers for this tenant so the next
+    // request re-enters the spawn path and re-fetches secrets.
+    // Fire-and-forget: the secret is already stored; eviction failure
+    // is non-fatal (logged as a warning inside signal_evict).
+    signal_evict(&state.session_broker, &tenant).await;
+
     let mut response = (StatusCode::CREATED, Json(resp)).into_response();
     response.headers_mut().insert(
         LOCATION,
@@ -1333,6 +1340,11 @@ async fn delete_secret(
         format!("{service}/{name}"),
         &format!("tenant={tenant:?}"),
     );
+
+    // Evict stale-credential containers for this tenant so the next
+    // request re-enters the spawn path and re-fetches secrets.
+    // Fire-and-forget: eviction failure is non-fatal.
+    signal_evict(&state.session_broker, &tenant).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
