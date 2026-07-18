@@ -121,3 +121,208 @@ impl From<ValidationError> for BootstrapError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Display / Error impl -------------------------------------------------
+
+    #[test]
+    fn empty_name_display() {
+        let err = BootstrapError::EmptyName("plugins[].name");
+        assert_eq!(
+            err.to_string(),
+            "empty plugins[].name: must be a non-blank string"
+        );
+    }
+
+    #[test]
+    fn duplicate_plugin_display() {
+        let err = BootstrapError::DuplicatePlugin("mcp-bash".into());
+        assert_eq!(
+            err.to_string(),
+            "duplicate plugin name in plugins[]: mcp-bash"
+        );
+    }
+
+    #[test]
+    fn duplicate_tenant_display() {
+        let err = BootstrapError::DuplicateTenant("phlax".into());
+        assert_eq!(err.to_string(), "duplicate tenant name in tenants[]: phlax");
+    }
+
+    #[test]
+    fn duplicate_workspace_display() {
+        let err = BootstrapError::DuplicateWorkspace {
+            tenant: "phlax".into(),
+            workspace: "mcp".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "duplicate workspace name in tenant 'phlax': 'mcp'"
+        );
+    }
+
+    #[test]
+    fn duplicate_binding_display() {
+        let err = BootstrapError::DuplicateBinding {
+            tenant: "phlax".into(),
+            workspace: "mcp".into(),
+            plugin: "mcp-bash".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("phlax"), "msg: {msg}");
+        assert!(msg.contains("mcp-bash"), "msg: {msg}");
+    }
+
+    #[test]
+    fn unknown_plugin_ref_display() {
+        let err = BootstrapError::UnknownPluginRef {
+            tenant: "phlax".into(),
+            workspace: "mcp".into(),
+            plugin: "ghost".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("phlax"), "msg: {msg}");
+        assert!(msg.contains("mcp"), "msg: {msg}");
+        assert!(msg.contains("ghost"), "msg: {msg}");
+    }
+
+    #[test]
+    fn plugin_invalid_display() {
+        let err = BootstrapError::PluginInvalid {
+            plugin: "bad-plugin".into(),
+            detail: "image is required".into(),
+        };
+        assert_eq!(err.to_string(), "plugin 'bad-plugin': image is required");
+    }
+
+    #[test]
+    fn binding_invalid_display() {
+        let err = BootstrapError::BindingInvalid {
+            context: "tenant 'phlax' workspace 'mcp' plugin 'mcp-fetch'".into(),
+            detail: "config too large".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("config too large"), "msg: {msg}");
+        assert!(msg.contains("mcp-fetch"), "msg: {msg}");
+    }
+
+    #[test]
+    fn unexpected_package_validation_display() {
+        let err = BootstrapError::UnexpectedPackageValidation {
+            plugin: "mcp-bash".into(),
+            detail: "isolation required".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("internal"), "msg: {msg}");
+        assert!(msg.contains("mcp-bash"), "msg: {msg}");
+    }
+
+    #[test]
+    fn db_error_is_transparent() {
+        let err = BootstrapError::Db(sea_orm::DbErr::Custom("db down".into()));
+        assert!(err.to_string().contains("db down"));
+    }
+
+    // --- From<ValidationError> ------------------------------------------------
+
+    #[test]
+    fn from_validation_empty_name() {
+        let be: BootstrapError = ValidationError::EmptyName("plugins[].name").into();
+        assert!(matches!(be, BootstrapError::EmptyName("plugins[].name")));
+    }
+
+    #[test]
+    fn from_validation_plugin_invalid() {
+        let be: BootstrapError = ValidationError::PluginInvalid {
+            plugin: "bad".into(),
+            detail: "bad image".into(),
+        }
+        .into();
+        assert!(
+            matches!(be, BootstrapError::PluginInvalid { ref plugin, ref detail }
+                if plugin == "bad" && detail == "bad image")
+        );
+    }
+
+    #[test]
+    fn from_validation_binding_invalid() {
+        let be: BootstrapError = ValidationError::BindingInvalid {
+            context: "ctx".into(),
+            detail: "too big".into(),
+        }
+        .into();
+        assert!(
+            matches!(be, BootstrapError::BindingInvalid { ref context, ref detail }
+                if context == "ctx" && detail == "too big")
+        );
+    }
+
+    #[test]
+    fn from_validation_package_invalid_becomes_unexpected() {
+        let be: BootstrapError = ValidationError::PackageInvalid {
+            plugin: "mcp-bash".into(),
+            detail: "isolation required".into(),
+        }
+        .into();
+        assert!(
+            matches!(be, BootstrapError::UnexpectedPackageValidation { ref plugin, .. }
+                if plugin == "mcp-bash")
+        );
+    }
+
+    #[test]
+    fn from_validation_duplicate_plugin() {
+        let be: BootstrapError = ValidationError::DuplicatePlugin("mcp-bash".into()).into();
+        assert!(matches!(be, BootstrapError::DuplicatePlugin(ref n) if n == "mcp-bash"));
+    }
+
+    #[test]
+    fn from_validation_duplicate_tenant() {
+        let be: BootstrapError = ValidationError::DuplicateTenant("phlax".into()).into();
+        assert!(matches!(be, BootstrapError::DuplicateTenant(ref n) if n == "phlax"));
+    }
+
+    #[test]
+    fn from_validation_duplicate_workspace() {
+        let be: BootstrapError = ValidationError::DuplicateWorkspace {
+            tenant: "t".into(),
+            workspace: "w".into(),
+        }
+        .into();
+        assert!(
+            matches!(be, BootstrapError::DuplicateWorkspace { ref tenant, ref workspace }
+                if tenant == "t" && workspace == "w")
+        );
+    }
+
+    #[test]
+    fn from_validation_duplicate_binding() {
+        let be: BootstrapError = ValidationError::DuplicateBinding {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            plugin: "p".into(),
+        }
+        .into();
+        assert!(
+            matches!(be, BootstrapError::DuplicateBinding { ref tenant, ref workspace, ref plugin }
+                if tenant == "t" && workspace == "w" && plugin == "p")
+        );
+    }
+
+    #[test]
+    fn from_validation_unknown_plugin_ref() {
+        let be: BootstrapError = ValidationError::UnknownPluginRef {
+            tenant: "t".into(),
+            workspace: "w".into(),
+            plugin: "p".into(),
+        }
+        .into();
+        assert!(
+            matches!(be, BootstrapError::UnknownPluginRef { ref tenant, ref workspace, ref plugin }
+                if tenant == "t" && workspace == "w" && plugin == "p")
+        );
+    }
+}
