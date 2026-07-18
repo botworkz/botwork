@@ -19,6 +19,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::UnixListener;
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::control_plane;
 use crate::ext_proc::liveness_remove;
@@ -200,7 +201,12 @@ pub async fn handle_container_exit(
     // path and the docker-exit path can both converge on the same
     // container), so concurrent invocation is safe.
     if let Some(writer) = state.session_worker_writer.as_ref() {
-        writer.record_reap(container_name).await;
+        if let Err(err) = writer.record_reap(container_name).await {
+            warn!(
+                "[session-broker] exit_listener: session_worker reap failed for \
+                 container={container_name}: {err}"
+            );
+        }
     }
 
     // Best-effort: container is already gone, but the launcher still needs to
@@ -372,31 +378,13 @@ mod tests {
 
     #[tokio::test]
     async fn handle_container_exit_with_db_writer_calls_record_reap() {
-        use sea_orm::{DbBackend, MockDatabase, MockExecResult};
-
-        // record_reap calls find_by_container_name (1 SELECT) then UPDATE (1 EXEC)
-        let mock = MockDatabase::new(DbBackend::Postgres)
-            .append_query_results::<botwork_entity::session_worker::Model, _, _>([vec![
-                botwork_entity::session_worker::Model {
-                    id: uuid::Uuid::new_v4(),
-                    agent_session_id: None,
-                    plugin_id: uuid::Uuid::new_v4(),
-                    container_name: "mcp-session-reap".to_string(),
-                    container_ip: "10.0.0.2".to_string(),
-                    mcp_session_id: "sess-reap-db".to_string(),
-                    spawned_at: chrono::Utc::now(),
-                    reaped_at: None,
-                },
-            ]])
-            .append_exec_results([MockExecResult {
-                last_insert_id: 0,
-                rows_affected: 1,
-            }]);
+        let plugin_id = uuid::Uuid::new_v4();
+        let mock = crate::store::mock::MockSessionWorkerStore::new()
+            .with_plugin(plugin_id, "mcp-bash")
+            .with_live_worker("mcp-session-reap", "10.0.0.2", "sess-reap-db", plugin_id);
 
         let mut state = bare_state();
-        state.session_worker_writer = Some(Arc::new(
-            crate::test_support::mock_session_worker_writer(mock),
-        ));
+        state.session_worker_writer = Some(Arc::new(mock.clone()));
 
         let transport = sample_transport("mcp-session-reap");
         state
@@ -417,6 +405,10 @@ mod tests {
                 .await
                 .contains_key("sess-reap-db"),
             "transport removed after reap"
+        );
+        assert_eq!(
+            mock.drain_recorded_reaps().await,
+            vec!["mcp-session-reap".to_string()]
         );
     }
 }

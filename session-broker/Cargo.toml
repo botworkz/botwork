@@ -12,6 +12,7 @@ name = "botwork-session-broker"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = "0.1"
 axum = "0.7"
 base64 = "0.22"
 # RFE #105 PR2: session-broker becomes a DB writer. botwork-entity + sea-orm

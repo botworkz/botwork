@@ -534,14 +534,23 @@ async fn teardown_session(state: &AppState, teardown: &TeardownInfo) {
     if let (Some(writer), Some((tenant, workspace, agent_id))) =
         (state.agent_session_writer.as_ref(), agent_session_identity)
     {
-        writer.record_inactive(&tenant, &workspace, &agent_id).await;
+        if let Err(err) = writer.record_inactive(&tenant, &workspace, &agent_id).await {
+            log_info(&format!(
+                "agent_session inactive write failed for tenant={tenant} workspace={workspace} agent_id={agent_id}: {err}"
+            ));
+        }
     }
     // RFE #105 round-3 PR2: mark the session_worker row as reaped.
     // Container is gone, row stays for audit/billing until the
     // janitor sweeps it. Lookup is by container_name (globally
     // unique); we don't need the agent_session linkage here.
     if let Some(writer) = state.session_worker_writer.as_ref() {
-        writer.record_reap(&teardown.container_name).await;
+        if let Err(err) = writer.record_reap(&teardown.container_name).await {
+            log_info(&format!(
+                "session_worker reap write failed for container={}: {err}",
+                teardown.container_name
+            ));
+        }
     }
 }
 
@@ -598,9 +607,14 @@ async fn liveness_bump(state: &AppState, mcp_session_id: &str) {
                 })
             };
             if let Some((tenant, workspace, agent_id)) = identity {
-                writer
+                if let Err(err) = writer
                     .record_bind_agent(&tenant, &workspace, &agent_id)
-                    .await;
+                    .await
+                {
+                    log_info(&format!(
+                        "agent_session bind write failed for tenant={tenant} workspace={workspace} agent_id={agent_id}: {err}"
+                    ));
+                }
             }
         }
     }
@@ -648,7 +662,11 @@ pub async fn liveness_drop(state: &AppState, mcp_session_id: &str) {
                     })
                 };
                 if let Some((tenant, workspace, agent_id)) = identity {
-                    writer.record_grace(&tenant, &workspace, &agent_id).await;
+                    if let Err(err) = writer.record_grace(&tenant, &workspace, &agent_id).await {
+                        log_info(&format!(
+                            "agent_session grace write failed for tenant={tenant} workspace={workspace} agent_id={agent_id}: {err}"
+                        ));
+                    }
                 }
             }
             schedule_grace_timer(state.clone(), mcp_session_id.to_string(), liveness).await;
@@ -840,10 +858,18 @@ async fn evict_dead_session(state: &AppState, mcp_session_id: &str, transport: &
         if let (Some(writer), Some((tenant, workspace, agent_id))) =
             (agent_session_writer, agent_session_identity)
         {
-            writer.record_inactive(&tenant, &workspace, &agent_id).await;
+            if let Err(err) = writer.record_inactive(&tenant, &workspace, &agent_id).await {
+                log_info(&format!(
+                    "agent_session inactive write failed for tenant={tenant} workspace={workspace} agent_id={agent_id}: {err}"
+                ));
+            }
         }
         if let Some(writer) = session_worker_writer {
-            writer.record_reap(&container_name_for_reap).await;
+            if let Err(err) = writer.record_reap(&container_name_for_reap).await {
+                log_info(&format!(
+                    "session_worker reap write failed for container={container_name_for_reap}: {err}"
+                ));
+            }
         }
     });
 }
@@ -918,10 +944,18 @@ pub async fn evict_sessions_for_tenant(state: &AppState, tenant: &str) -> usize 
             if let (Some(writer), Some((ten, ws, agent_id))) =
                 (agent_session_writer, agent_session_identity)
             {
-                writer.record_inactive(&ten, &ws, &agent_id).await;
+                if let Err(err) = writer.record_inactive(&ten, &ws, &agent_id).await {
+                    log_info(&format!(
+                        "agent_session inactive write failed for tenant={ten} workspace={ws} agent_id={agent_id}: {err}"
+                    ));
+                }
             }
             if let Some(writer) = session_worker_writer {
-                writer.record_reap(&container_name_for_reap).await;
+                if let Err(err) = writer.record_reap(&container_name_for_reap).await {
+                    log_info(&format!(
+                        "session_worker reap write failed for container={container_name_for_reap}: {err}"
+                    ));
+                }
             }
         });
     }
@@ -1036,9 +1070,14 @@ async fn spawn_new_container(
     // next cold-start recovery the missing row leads to immediate
     // reap (the agreed posture for "live container with no DB row").
     if let Some(writer) = state.session_worker_writer.as_ref() {
-        writer
+        if let Err(err) = writer
             .record_spawn(plugin_name, &container_name, &container_ip)
-            .await;
+            .await
+        {
+            log_info(&format!(
+                "session_worker spawn write failed for plugin={plugin_name} container={container_name}: {err}"
+            ));
+        }
     }
 
     log_info(&format!(
@@ -1721,13 +1760,19 @@ impl ExternalProcessorService {
                     // Round-3 deleted the JSON registry; this is now the
                     // only durable record of the bind.
                     if let Some(writer) = state.agent_session_writer.as_ref() {
-                        writer
+                        if let Err(err) = writer
                             .record_bind_agent(
                                 &transport.tenant_name,
                                 &transport.workspace,
                                 &agent_id,
                             )
-                            .await;
+                            .await
+                        {
+                            log_info(&format!(
+                                "agent_session bind write failed for tenant={} workspace={} agent_id={agent_id}: {err}",
+                                transport.tenant_name, transport.workspace
+                            ));
+                        }
                     }
                     // RFE #105 round-3 PR2: backfill the
                     // session_worker.agent_session_id linkage now
@@ -1737,30 +1782,38 @@ impl ExternalProcessorService {
                     // here is `warn!` + carry on (the row stays with
                     // agent_session_id NULL until either the next
                     // bind retry or cold-start recovery cleans up).
-                    if let (Some(writer), Some(db)) =
-                        (state.session_worker_writer.as_ref(), state.db.as_ref())
-                    {
+                    if let Some(writer) = state.session_worker_writer.as_ref() {
                         // Identity slugs → PKs via the AgentSessionWriter
                         // cache surface (cheap, in-memory after first
                         // lookup).
                         if let Some(agent_writer) = state.agent_session_writer.as_ref() {
-                            if let Some(agent_session_pk) = agent_writer
+                            match agent_writer
                                 .resolve_pk(&transport.tenant_name, &transport.workspace, &agent_id)
                                 .await
                             {
-                                writer
-                                    .record_agent_binding(
-                                        &transport.container_name,
-                                        agent_session_pk,
-                                    )
-                                    .await;
+                                Ok(Some(agent_session_pk)) => {
+                                    if let Err(err) = writer
+                                        .record_agent_binding(
+                                            &transport.container_name,
+                                            agent_session_pk,
+                                        )
+                                        .await
+                                    {
+                                        log_info(&format!(
+                                            "session_worker agent-binding write failed for container={}: {err}",
+                                            transport.container_name
+                                        ));
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    log_info(&format!(
+                                        "agent_session resolve_pk failed for tenant={} workspace={} agent_id={agent_id}: {err}",
+                                        transport.tenant_name, transport.workspace
+                                    ));
+                                }
                             }
                         }
-                        // Suppress the unused warning on `db` — kept
-                        // on AppState for a future direct-SELECT
-                        // recovery path that bypasses the writer's
-                        // caches.
-                        let _ = db;
                     }
                 }
             }
@@ -1843,9 +1896,15 @@ impl ExternalProcessorService {
         // recovery path (which joins live docker containers to
         // session_worker rows by container_name).
         if let Some(writer) = state.session_worker_writer.as_ref() {
-            writer
+            if let Err(err) = writer
                 .record_mcp_session_id(&pending.container_name, &mcp_session_id)
-                .await;
+                .await
+            {
+                log_info(&format!(
+                    "session_worker mcp_session_id write failed for container={}: {err}",
+                    pending.container_name
+                ));
+            }
         }
         liveness_bump(state, &mcp_session_id).await;
         stream.liveness_session_id = Some(mcp_session_id);
