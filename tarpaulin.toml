@@ -1,0 +1,24 @@
+# Tarpaulin configuration for local coverage runs.
+#
+# Usage:
+#   cargo tarpaulin          # picks up this file automatically
+#   make coverage            # equivalent via the Makefile target
+#
+# Notes:
+#   * engine = "llvm" — matches CI and the other botworkz repos.
+#   * Dev profile only — [profile.release] sets panic = "abort" which
+#     is incompatible with LLVM instrumentation. Do not add
+#     release = true here.
+#   * botwork-ui-wasm is excluded because it only links against
+#     wasm32-unknown-unknown; a host-target build hard-fails.
+#   * No fail-under threshold is set — this establishes the baseline.
+#     A maintainer will ratchet a floor in a later dedicated PR.
+
+[default]
+engine = "llvm"
+locked = true
+workspace = true
+all-targets = true
+exclude = ["botwork-ui-wasm"]
+out = ["Lcov", "Xml"]
+output-dir = "coverage"
