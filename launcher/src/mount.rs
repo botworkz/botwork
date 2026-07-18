@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use crate::cmd::{log_info, run_command};
+use crate::cmd::{log_info, run_command, CommandOutput};
 use crate::error::LauncherError;
 use crate::validate::Validators;
 
@@ -12,8 +12,25 @@ pub fn setup_staging_dir(
     plugin_uid: u32,
     plugin_gid: u32,
 ) -> Result<(), LauncherError> {
-    let safe_staging = validators.safe_staging_path(staging_path)?;
+    setup_staging_dir_impl(
+        staging_path,
+        validators,
+        plugin_uid,
+        plugin_gid,
+        run_command,
+        chown_path,
+    )
+}
 
+fn setup_staging_dir_impl(
+    staging_path: &str,
+    validators: &Validators,
+    plugin_uid: u32,
+    plugin_gid: u32,
+    mut run: impl FnMut(&[String]) -> Result<CommandOutput, String>,
+    mut chown: impl FnMut(&str, u32, u32) -> Result<(), LauncherError>,
+) -> Result<(), LauncherError> {
+    let safe_staging = validators.safe_staging_path(staging_path)?;
     fs::create_dir_all(&safe_staging).map_err(|err| {
         LauncherError::Internal(format!(
             "failed to create staging dir {safe_staging}: {err}"
@@ -24,9 +41,9 @@ pub fn setup_staging_dir(
             "failed to set permissions on {safe_staging}: {err}"
         ))
     })?;
-    chown_path(&safe_staging, plugin_uid, plugin_gid)?;
+    chown(&safe_staging, plugin_uid, plugin_gid)?;
 
-    let bind = run_command(&[
+    let bind = run(&[
         "mount".to_string(),
         "--bind".to_string(),
         safe_staging.clone(),
@@ -40,7 +57,7 @@ pub fn setup_staging_dir(
         )));
     }
 
-    let shared = run_command(&[
+    let shared = run(&[
         "mount".to_string(),
         "--make-rshared".to_string(),
         safe_staging.clone(),
@@ -64,6 +81,26 @@ pub fn bind_agent(
     plugin_uid: u32,
     plugin_gid: u32,
 ) -> Result<(), LauncherError> {
+    bind_agent_impl(
+        staging_path,
+        agent_dir,
+        validators,
+        plugin_uid,
+        plugin_gid,
+        run_command,
+        chown_path,
+    )
+}
+
+fn bind_agent_impl(
+    staging_path: &str,
+    agent_dir: &str,
+    validators: &Validators,
+    plugin_uid: u32,
+    plugin_gid: u32,
+    mut run: impl FnMut(&[String]) -> Result<CommandOutput, String>,
+    mut chown: impl FnMut(&str, u32, u32) -> Result<(), LauncherError>,
+) -> Result<(), LauncherError> {
     let safe_staging = validators.safe_staging_path(staging_path)?;
     let safe_agent = validators.safe_agent_dir(agent_dir)?;
 
@@ -73,7 +110,7 @@ pub fn bind_agent(
     fs::set_permissions(&safe_agent, fs::Permissions::from_mode(0o700)).map_err(|err| {
         LauncherError::Internal(format!("failed to set permissions on {safe_agent}: {err}"))
     })?;
-    chown_path(&safe_agent, plugin_uid, plugin_gid)?;
+    chown(&safe_agent, plugin_uid, plugin_gid)?;
 
     let staging_stat = fs::metadata(&safe_staging).map_err(|err| {
         LauncherError::Internal(format!("failed to stat staging_path {safe_staging}: {err}"))
@@ -133,7 +170,7 @@ pub fn bind_agent(
         }
     }
 
-    let bind = run_command(&[
+    let bind = run(&[
         "mount".to_string(),
         "--bind".to_string(),
         safe_agent.clone(),
@@ -178,7 +215,65 @@ fn chown_path(path: &str, uid: u32, gid: u32) -> Result<(), LauncherError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_message, is_not_mounted_or_einval};
+    use std::os::unix::fs::MetadataExt;
+
+    use tempfile::TempDir;
+
+    use super::{
+        bind_agent_impl, fallback_message, is_not_mounted_or_einval, setup_staging_dir_impl,
+        CommandOutput,
+    };
+    use crate::error::LauncherError;
+    use crate::validate::Validators;
+
+    // ── helpers ─────────────────────────────────────────────────────────────
+
+    /// Make a Validators that accepts paths rooted at `base`.
+    fn validators_for_base(base: &str) -> Validators {
+        Validators::new_with_bases(".*", base, base).expect("validators")
+    }
+
+    /// A mock run_command that always returns success (rc=0, empty output).
+    fn run_ok(args: &[String]) -> Result<CommandOutput, String> {
+        let _ = args;
+        Ok(CommandOutput {
+            returncode: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
+    /// A mock run_command that returns a non-zero exit code with a message.
+    fn run_fail(args: &[String]) -> Result<CommandOutput, String> {
+        let _ = args;
+        Ok(CommandOutput {
+            returncode: 1,
+            stdout: String::new(),
+            stderr: "mount: operation not permitted".into(),
+        })
+    }
+
+    /// A mock chown that always succeeds.
+    fn chown_ok(_path: &str, _uid: u32, _gid: u32) -> Result<(), LauncherError> {
+        Ok(())
+    }
+
+    /// A mock chown that always returns an error.
+    fn chown_fail(path: &str, uid: u32, gid: u32) -> Result<(), LauncherError> {
+        Err(LauncherError::Internal(format!(
+            "mock: failed to chown {path} to {uid}:{gid}"
+        )))
+    }
+
+    /// Get the current process uid and gid (by reading the metadata of a
+    /// freshly-created temp file we own).
+    fn current_uid_gid() -> (u32, u32) {
+        let f = tempfile::NamedTempFile::new().expect("temp file");
+        let m = std::fs::metadata(f.path()).expect("metadata");
+        (m.uid(), m.gid())
+    }
+
+    // ── is_not_mounted_or_einval ─────────────────────────────────────────────
 
     #[test]
     fn umount_stderr_classification_matches_python_behavior() {
@@ -218,5 +313,344 @@ mod tests {
     fn fallback_message_returns_stderr_content_verbatim_when_already_trimmed() {
         let msg = "mount: /staging: device or resource busy";
         assert_eq!(fallback_message(msg, "ignored fallback".to_string()), msg);
+    }
+
+    // ── setup_staging_dir_impl ───────────────────────────────────────────────
+
+    #[test]
+    fn setup_staging_dir_rejects_invalid_staging_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        // Path does not match the regex (no staging/ segment)
+        let err = setup_staging_dir_impl("/bad/path", &validators, 1000, 1000, run_ok, chown_ok)
+            .unwrap_err();
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn setup_staging_dir_creates_dir_and_calls_mount_commands() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let result = setup_staging_dir_impl(
+            &staging,
+            &validators,
+            1000,
+            1000,
+            |args| {
+                calls.push(args.to_vec());
+                Ok(CommandOutput {
+                    returncode: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+            chown_ok,
+        );
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        // The directory must have been created.
+        assert!(std::path::Path::new(&staging).is_dir(), "dir must exist");
+        // Two run_command calls: mount --bind, mount --make-rshared.
+        assert_eq!(calls.len(), 2, "expected 2 mount calls, got {calls:?}");
+        assert!(calls[0].contains(&"--bind".to_string()), "{calls:?}");
+        assert!(
+            calls[1].contains(&"--make-rshared".to_string()),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn setup_staging_dir_propagates_chown_failure() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+
+        let err = setup_staging_dir_impl(&staging, &validators, 1000, 1000, run_ok, chown_fail)
+            .unwrap_err();
+        assert!(
+            matches!(err, LauncherError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn setup_staging_dir_returns_error_when_bind_mount_fails() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+
+        let err = setup_staging_dir_impl(&staging, &validators, 1000, 1000, run_fail, chown_ok)
+            .unwrap_err();
+        assert!(
+            matches!(err, LauncherError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("mount: operation not permitted"),
+            "error must surface mount stderr: {msg}"
+        );
+    }
+
+    #[test]
+    fn setup_staging_dir_returns_error_when_rshared_fails() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+
+        let call_count = std::cell::Cell::new(0u32);
+        let err = setup_staging_dir_impl(
+            &staging,
+            &validators,
+            1000,
+            1000,
+            |_args| {
+                let n = call_count.get();
+                call_count.set(n + 1);
+                if n == 0 {
+                    Ok(CommandOutput {
+                        returncode: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                } else {
+                    Ok(CommandOutput {
+                        returncode: 1,
+                        stdout: String::new(),
+                        stderr: "make-shared failed".into(),
+                    })
+                }
+            },
+            chown_ok,
+        )
+        .unwrap_err();
+        assert!(matches!(err, LauncherError::Internal(_)));
+    }
+
+    #[test]
+    fn setup_staging_dir_uses_real_chown_for_self_ownership() {
+        // This test exercises the real chown_path by using the current
+        // process's own uid/gid (chowning to yourself always succeeds
+        // on Linux without CAP_CHOWN).
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let (uid, gid) = current_uid_gid();
+
+        let result =
+            setup_staging_dir_impl(&staging, &validators, uid, gid, run_ok, super::chown_path);
+        assert!(
+            result.is_ok(),
+            "chown to own uid/gid must succeed: {result:?}"
+        );
+    }
+
+    // ── bind_agent_impl ──────────────────────────────────────────────────────
+
+    #[test]
+    fn bind_agent_rejects_invalid_staging_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let valid_agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
+        let err = bind_agent_impl(
+            "/bad/path",
+            &valid_agent,
+            &validators,
+            1000,
+            1000,
+            run_ok,
+            chown_ok,
+        )
+        .unwrap_err();
+        assert!(matches!(err, LauncherError::BadRequest(_)));
+    }
+
+    #[test]
+    fn bind_agent_rejects_invalid_agent_dir() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let valid_staging = format!("{base}/acme/staging/aabbccddeeff");
+        let err = bind_agent_impl(
+            &valid_staging,
+            "/bad/agent/path",
+            &validators,
+            1000,
+            1000,
+            run_ok,
+            chown_ok,
+        )
+        .unwrap_err();
+        assert!(matches!(err, LauncherError::BadRequest(_)));
+    }
+
+    #[test]
+    fn bind_agent_binds_when_staging_and_agent_are_different() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
+
+        // Pre-create the staging dir so metadata can be read.
+        std::fs::create_dir_all(&staging).expect("mkdir staging");
+
+        let mut mount_calls: Vec<Vec<String>> = Vec::new();
+        let result = bind_agent_impl(
+            &staging,
+            &agent,
+            &validators,
+            1000,
+            1000,
+            |args| {
+                mount_calls.push(args.to_vec());
+                Ok(CommandOutput {
+                    returncode: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+            chown_ok,
+        );
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        // Exactly one mount --bind call.
+        assert_eq!(
+            mount_calls.len(),
+            1,
+            "expected 1 mount call, got {mount_calls:?}"
+        );
+        assert!(
+            mount_calls[0].contains(&"--bind".to_string()),
+            "{mount_calls:?}"
+        );
+    }
+
+    #[test]
+    fn bind_agent_succeeds_when_agents_parent_is_empty() {
+        // When no sibling agent dirs exist, the conflict-detection loop
+        // should complete without errors and the bind call should proceed.
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
+
+        std::fs::create_dir_all(&staging).expect("mkdir staging");
+
+        let result = bind_agent_impl(&staging, &agent, &validators, 1000, 1000, run_ok, chown_ok);
+        assert!(
+            result.is_ok(),
+            "expected Ok with empty sibling set: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bind_agent_succeeds_with_unrelated_sibling_agent() {
+        // When a sibling agent dir exists but its inode differs from
+        // the staging dir's inode (the normal non-bind-mount case),
+        // the conflict-detection loop must not produce a false positive.
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent1 = format!("{base}/acme/workspaces/ws/agents/agent-1");
+        let agent2 = format!("{base}/acme/workspaces/ws/agents/agent-2");
+
+        std::fs::create_dir_all(&staging).expect("mkdir staging");
+        std::fs::create_dir_all(&agent1).expect("mkdir agent1");
+
+        // Without actual bind-mounts, agent1's inode won't match staging's.
+        // The loop should complete without raising a conflict error.
+        let result = bind_agent_impl(&staging, &agent2, &validators, 1000, 1000, run_ok, chown_ok);
+        assert!(
+            result.is_ok(),
+            "no conflict expected for unrelated sibling: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bind_agent_returns_error_when_mount_fails() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
+
+        std::fs::create_dir_all(&staging).expect("mkdir staging");
+
+        let err = bind_agent_impl(
+            &staging,
+            &agent,
+            &validators,
+            1000,
+            1000,
+            run_fail,
+            chown_ok,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, LauncherError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_agent_propagates_chown_failure() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
+
+        std::fs::create_dir_all(&staging).expect("mkdir staging");
+
+        let err = bind_agent_impl(
+            &staging,
+            &agent,
+            &validators,
+            1000,
+            1000,
+            run_ok,
+            chown_fail,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, LauncherError::Internal(_)),
+            "expected Internal on chown failure"
+        );
+    }
+
+    #[test]
+    fn bind_agent_error_when_staging_stat_fails() {
+        // If the staging dir doesn't exist, fs::metadata fails after
+        // create_dir_all on the agent side.
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff"); // NOT created
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
+
+        let err = bind_agent_impl(&staging, &agent, &validators, 1000, 1000, run_ok, chown_ok)
+            .unwrap_err();
+        // Either BadRequest (if the path was rejected) or Internal (stat failed).
+        assert!(
+            matches!(
+                err,
+                LauncherError::Internal(_) | LauncherError::BadRequest(_)
+            ),
+            "expected Internal or BadRequest, got {err:?}"
+        );
     }
 }
