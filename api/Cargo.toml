@@ -55,6 +55,15 @@ http = "1"
 # session-broker uses to stub control-plane's POST /sessions in its
 # own integration tests (post-#92).
 wiremock = "0.6"
+sea-orm = { version = "1.1.20", default-features = false, features = [
+    "mock",
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
 sea-orm-migration = { version = "1.1.20", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",

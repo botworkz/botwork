@@ -15,5 +15,7 @@
 //! caller authentication in v0; see README for the full posture.
 
 pub mod handler;
+#[cfg(test)]
+mod test_support;
 
 pub use handler::{build_router, AppState};

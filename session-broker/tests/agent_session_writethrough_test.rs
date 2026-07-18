@@ -160,23 +160,25 @@ async fn write_through_record_bind_agent_inserts_then_updates() {
     let (_pg, url) = start_postgres()
         .await
         .expect("postgres container must start");
-    let db = connect_with_retry(&url)
-        .await
-        .expect("connect to ephemeral postgres");
-    Migrator::up(&db, None)
+    let db = Arc::new(
+        connect_with_retry(&url)
+            .await
+            .expect("connect to ephemeral postgres"),
+    );
+    Migrator::up(db.as_ref(), None)
         .await
         .expect("migrations must apply");
-    apply(&db, &seed_config())
+    apply(db.as_ref(), &seed_config())
         .await
         .expect("seed tenant + workspace");
 
-    let (tenant_id, workspace_id) = workspace_id_for(&db, "phlax", "mcp").await;
-    let writer = AgentSessionWriter::new(Arc::new(db.clone()));
+    let (tenant_id, workspace_id) = workspace_id_for(db.as_ref(), "phlax", "mcp").await;
+    let writer = AgentSessionWriter::new(Arc::clone(&db));
 
     // First bind-agent: INSERT path. New row in `state=active` with
     // `reactivation_count=0`.
     writer.record_bind_agent("phlax", "mcp", "goose-abc").await;
-    let row = fetch_row(&db, tenant_id, workspace_id, "goose-abc").await;
+    let row = fetch_row(db.as_ref(), tenant_id, workspace_id, "goose-abc").await;
     assert_eq!(row.state, agent_session::state::ACTIVE);
     assert_eq!(row.reactivation_count, 0);
     assert_eq!(row.tenant_id, tenant_id);
@@ -190,7 +192,7 @@ async fn write_through_record_bind_agent_inserts_then_updates() {
     // `last_active_at` must move forward.
     tokio::time::sleep(Duration::from_millis(20)).await;
     writer.record_bind_agent("phlax", "mcp", "goose-abc").await;
-    let row = fetch_row(&db, tenant_id, workspace_id, "goose-abc").await;
+    let row = fetch_row(db.as_ref(), tenant_id, workspace_id, "goose-abc").await;
     assert_eq!(
         row.reactivation_count, 0,
         "bind on already-active row must not bump reactivation_count"
@@ -217,20 +219,22 @@ async fn write_through_lifecycle_active_grace_inactive_reactivate() {
     let (_pg, url) = start_postgres()
         .await
         .expect("postgres container must start");
-    let db = connect_with_retry(&url)
-        .await
-        .expect("connect to ephemeral postgres");
-    Migrator::up(&db, None).await.expect("migrations");
-    apply(&db, &seed_config()).await.expect("seed");
+    let db = Arc::new(
+        connect_with_retry(&url)
+            .await
+            .expect("connect to ephemeral postgres"),
+    );
+    Migrator::up(db.as_ref(), None).await.expect("migrations");
+    apply(db.as_ref(), &seed_config()).await.expect("seed");
 
-    let (tenant_id, workspace_id) = workspace_id_for(&db, "phlax", "mcp").await;
-    let writer = AgentSessionWriter::new(Arc::new(db.clone()));
+    let (tenant_id, workspace_id) = workspace_id_for(db.as_ref(), "phlax", "mcp").await;
+    let writer = AgentSessionWriter::new(Arc::clone(&db));
 
     writer
         .record_bind_agent("phlax", "mcp", "goose-lifecycle")
         .await;
     assert_eq!(
-        fetch_row(&db, tenant_id, workspace_id, "goose-lifecycle")
+        fetch_row(db.as_ref(), tenant_id, workspace_id, "goose-lifecycle")
             .await
             .state,
         agent_session::state::ACTIVE
@@ -239,7 +243,7 @@ async fn write_through_lifecycle_active_grace_inactive_reactivate() {
     // active → grace (transport closed).
     writer.record_grace("phlax", "mcp", "goose-lifecycle").await;
     assert_eq!(
-        fetch_row(&db, tenant_id, workspace_id, "goose-lifecycle")
+        fetch_row(db.as_ref(), tenant_id, workspace_id, "goose-lifecycle")
             .await
             .state,
         agent_session::state::GRACE
@@ -250,7 +254,7 @@ async fn write_through_lifecycle_active_grace_inactive_reactivate() {
         .record_inactive("phlax", "mcp", "goose-lifecycle")
         .await;
     assert_eq!(
-        fetch_row(&db, tenant_id, workspace_id, "goose-lifecycle")
+        fetch_row(db.as_ref(), tenant_id, workspace_id, "goose-lifecycle")
             .await
             .state,
         agent_session::state::INACTIVE
@@ -262,7 +266,7 @@ async fn write_through_lifecycle_active_grace_inactive_reactivate() {
     writer
         .record_bind_agent("phlax", "mcp", "goose-lifecycle")
         .await;
-    let row = fetch_row(&db, tenant_id, workspace_id, "goose-lifecycle").await;
+    let row = fetch_row(db.as_ref(), tenant_id, workspace_id, "goose-lifecycle").await;
     assert_eq!(row.state, agent_session::state::ACTIVE);
     assert_eq!(
         row.reactivation_count, 1,
@@ -276,7 +280,7 @@ async fn write_through_lifecycle_active_grace_inactive_reactivate() {
     writer
         .record_bind_agent("phlax", "mcp", "goose-lifecycle")
         .await;
-    let row = fetch_row(&db, tenant_id, workspace_id, "goose-lifecycle").await;
+    let row = fetch_row(db.as_ref(), tenant_id, workspace_id, "goose-lifecycle").await;
     assert_eq!(row.state, agent_session::state::ACTIVE);
     assert_eq!(
         row.reactivation_count, 2,
@@ -296,13 +300,15 @@ async fn write_through_unknown_tenant_fails_soft() {
     let (_pg, url) = start_postgres()
         .await
         .expect("postgres container must start");
-    let db = connect_with_retry(&url)
-        .await
-        .expect("connect to ephemeral postgres");
-    Migrator::up(&db, None).await.expect("migrations");
-    apply(&db, &seed_config()).await.expect("seed");
+    let db = Arc::new(
+        connect_with_retry(&url)
+            .await
+            .expect("connect to ephemeral postgres"),
+    );
+    Migrator::up(db.as_ref(), None).await.expect("migrations");
+    apply(db.as_ref(), &seed_config()).await.expect("seed");
 
-    let writer = AgentSessionWriter::new(Arc::new(db.clone()));
+    let writer = AgentSessionWriter::new(Arc::clone(&db));
 
     // Unknown tenant — the writer must NOT panic; it logs a warn
     // and carries on. This is the "fail-soft observability mode"
@@ -314,7 +320,7 @@ async fn write_through_unknown_tenant_fails_soft() {
     // And the agent_session table stays empty for that triple.
     let count = agent_session::Entity::find()
         .filter(agent_session::Column::AgentSessionId.eq("goose-orphan"))
-        .all(&db)
+        .all(db.as_ref())
         .await
         .expect("query")
         .len();

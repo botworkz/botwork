@@ -515,3 +515,70 @@ async fn get_session_worker(
     }
     Ok(Json(row))
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{to_bytes, Body};
+    use http::{Request, StatusCode};
+    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    fn admin_get(path: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri(path)
+            .header(crate::handler::ADMIN_HEADER, "ops")
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn list_tenants_uses_mock_database_results() {
+        let tenant_row = tenant::Model {
+            id: Uuid::new_v4(),
+            name: "phlax".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![tenant_row]]),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_get("/api/tenants"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["items"][0]["name"], "phlax");
+    }
+
+    #[tokio::test]
+    async fn list_tenants_maps_db_errors_to_internal() {
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([DbErr::Custom("boom".to_string())]),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_get("/api/tenants"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["error"]["code"], "internal");
+    }
+}

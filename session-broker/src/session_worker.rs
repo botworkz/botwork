@@ -295,6 +295,8 @@ pub enum SessionWorkerWriteError {
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
+
     use super::*;
 
     #[test]
@@ -304,5 +306,20 @@ mod tests {
 
         let err = SessionWorkerWriteError::UnknownContainer("mcp_session_abc".into());
         assert!(err.to_string().contains("mcp_session_abc"));
+    }
+
+    #[tokio::test]
+    async fn record_spawn_swallows_db_error() {
+        let writer = crate::test_support::mock_session_worker_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([DbErr::Custom("boom".to_string())]),
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_spawn("mcp-bash", "mcp_session_1", "10.0.0.1"),
+        )
+        .await
+        .expect("writer should warn-and-carry-on on db errors");
     }
 }

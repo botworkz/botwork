@@ -447,6 +447,8 @@ enum AgentSessionWriteError {
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
+
     use super::*;
 
     #[test]
@@ -468,5 +470,20 @@ mod tests {
 
         let err = AgentSessionWriteError::MissingRow;
         assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn record_bind_agent_swallows_db_error() {
+        let writer = crate::test_support::mock_agent_session_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([DbErr::Custom("boom".to_string())]),
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_bind_agent("phlax", "mcp", "agent-1"),
+        )
+        .await
+        .expect("writer should warn-and-carry-on on db errors");
     }
 }
