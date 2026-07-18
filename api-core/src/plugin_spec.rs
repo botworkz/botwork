@@ -974,8 +974,7 @@ mod tests {
 
     #[test]
     fn env_rejects_invalid_name_shapes_and_values() {
-        let mut oversized = "x".repeat(MAX_ENV_VALUE_BYTES + 1);
-        oversized.push('x');
+        let oversized = "x".repeat(MAX_ENV_VALUE_BYTES + 1);
         let cases = [
             "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  lower: x\n",
             "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  PATH: x\n",
