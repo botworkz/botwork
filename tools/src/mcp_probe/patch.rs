@@ -189,6 +189,32 @@ mod tests {
     }
 
     #[test]
+    fn io_error_display_includes_message() {
+        let err = PatchError::Io("write failed: disk full".into());
+        let msg = format!("{err}");
+        assert!(msg.contains("write failed"), "{msg}");
+        assert!(msg.contains("disk full"), "{msg}");
+    }
+
+    #[test]
+    fn crane_failed_display_includes_stderr() {
+        let err = PatchError::CraneFailed {
+            stderr: "registry auth failed".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("registry auth failed"), "{msg}");
+    }
+
+    #[test]
+    fn buildx_failed_display_includes_stderr() {
+        let err = PatchError::BuildxFailed {
+            stderr: "buildx daemon not running".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("buildx daemon not running"), "{msg}");
+    }
+
+    #[test]
     fn both_missing_surfaces_when_crane_and_buildx_unavailable() {
         // Force the fallback chain to traverse a missing crane and
         // a missing docker by running with a PATH that contains

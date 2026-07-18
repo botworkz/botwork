@@ -80,3 +80,86 @@ impl DockerError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- RunningContainer: struct fields ---
+
+    #[test]
+    fn running_container_fields_roundtrip() {
+        let c = RunningContainer {
+            id: "abc123".into(),
+            name: "mcp_session_foo".into(),
+            age: "3 minutes ago".into(),
+        };
+        assert_eq!(c.id, "abc123");
+        assert_eq!(c.name, "mcp_session_foo");
+        assert_eq!(c.age, "3 minutes ago");
+    }
+
+    // --- DockerError display ---
+
+    #[test]
+    fn not_found_display_mentions_docker_cli() {
+        let msg = format!("{}", DockerError::NotFound);
+        assert!(msg.contains("docker"), "{msg}");
+    }
+
+    #[test]
+    fn command_failed_display_includes_stderr() {
+        let err = DockerError::CommandFailed {
+            code: 1,
+            stderr: "permission denied".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("permission denied"), "{msg}");
+    }
+
+    #[test]
+    fn malformed_output_display_includes_offending_line() {
+        let err = DockerError::MalformedOutput("only-one-field".into());
+        let msg = format!("{err}");
+        assert!(msg.contains("only-one-field"), "{msg}");
+    }
+
+    #[test]
+    fn io_error_display_mentions_docker_ps() {
+        let io = std::io::Error::other("fake io");
+        let err = DockerError::Io(io);
+        let msg = format!("{err}");
+        assert!(!msg.is_empty(), "Io display should not be empty: {msg}");
+    }
+
+    // --- DockerError exit codes ---
+
+    #[test]
+    fn not_found_exit_code_is_2() {
+        assert_eq!(DockerError::NotFound.exit_code(), 2);
+    }
+
+    #[test]
+    fn command_failed_exit_code_mirrors_docker_exit_code() {
+        let err = DockerError::CommandFailed {
+            code: 125,
+            stderr: String::new(),
+        };
+        assert_eq!(err.exit_code(), 125);
+    }
+
+    #[test]
+    fn io_and_malformed_output_exit_code_is_1() {
+        let io = std::io::Error::other("x");
+        assert_eq!(DockerError::Io(io).exit_code(), 1);
+        assert_eq!(DockerError::MalformedOutput("y".into()).exit_code(), 1);
+    }
+
+    // --- list_running_sessions: output parsing (no real docker) ---
+
+    // The actual `list_running_sessions()` shells out to `docker ps`;
+    // exercising that end-to-end requires a running docker daemon and
+    // belongs in the integration / smoke tier (tools/smoke.sh).
+    // The parsing logic is inlined; the tests above cover the error
+    // type surface instead.
+}

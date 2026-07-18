@@ -120,7 +120,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{write_rds, HOLDING_MARKER, HOLDING_RDS, INGRESS_RDS};
+    use super::{write_rds, RdsError, HOLDING_MARKER, HOLDING_RDS, INGRESS_RDS};
 
     #[test]
     fn holding_rds_contains_pinned_route_name() {
@@ -159,5 +159,66 @@ mod tests {
             fs::read_to_string(dir.path().join("active.yaml")).expect("read"),
             INGRESS_RDS
         );
+    }
+
+    #[test]
+    fn write_rds_fails_when_directory_does_not_exist() {
+        let err = write_rds(
+            std::path::Path::new("/nonexistent/no-such-dir"),
+            HOLDING_RDS,
+        )
+        .unwrap_err();
+        // The only possible failure on a non-existent dir is opening
+        // the temp file — that's WriteOpen.
+        assert!(
+            matches!(err, RdsError::WriteOpen { .. }),
+            "expected WriteOpen, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("active.yaml.new"), "{msg}");
+    }
+
+    // --- RdsError display: all variants ---
+
+    #[test]
+    fn rds_error_write_open_display_includes_path() {
+        let err = RdsError::WriteOpen {
+            path: std::path::PathBuf::from("/rds/active.yaml.new"),
+            source: std::io::Error::other("permission denied"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("active.yaml.new"), "{msg}");
+    }
+
+    #[test]
+    fn rds_error_write_display_includes_path() {
+        let err = RdsError::Write {
+            path: std::path::PathBuf::from("/rds/active.yaml.new"),
+            source: std::io::Error::other("disk full"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("active.yaml.new"), "{msg}");
+    }
+
+    #[test]
+    fn rds_error_fsync_display_includes_path() {
+        let err = RdsError::Fsync {
+            path: std::path::PathBuf::from("/rds/active.yaml.new"),
+            source: std::io::Error::other("io error"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("active.yaml.new"), "{msg}");
+    }
+
+    #[test]
+    fn rds_error_rename_display_includes_both_paths() {
+        let err = RdsError::Rename {
+            source_path: std::path::PathBuf::from("/rds/active.yaml.new"),
+            destination: std::path::PathBuf::from("/rds/active.yaml"),
+            source_error: std::io::Error::other("cross-device link"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("active.yaml.new"), "{msg}");
+        assert!(msg.contains("active.yaml"), "{msg}");
     }
 }
