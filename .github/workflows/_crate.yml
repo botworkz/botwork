@@ -95,9 +95,8 @@ on:
       binary:
         description: >-
           Name of the binary cargo produces under `target/release/`.
-          Usually identical to `package`. Required for artifact=binary
-          and artifact=container (validated by the `Validate artifact
-          inputs` step because artifact=none does not need a binary).
+          Usually identical to `package`. Used by artifact=binary and
+          artifact=container; artifact=none ignores this input.
         required: false
         type: string
         default: ''

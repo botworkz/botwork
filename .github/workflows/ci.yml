@@ -121,7 +121,6 @@ jobs:
         - crate: opaque-handshake
           service: botwork-opaque-handshake
           package: botwork-opaque-handshake
-          binary: ''
           artifact: none
     uses: ./.github/workflows/_crate.yml
     with:
