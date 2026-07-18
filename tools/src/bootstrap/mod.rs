@@ -58,6 +58,7 @@ use std::path::PathBuf;
 
 use botwork_api_core::config::LoadError;
 use thiserror::Error;
+use tracing::info;
 
 use crate::bootstrap::apply::ApplyOutcome;
 use crate::bootstrap::client::AdminClient;
@@ -172,8 +173,12 @@ pub fn run(argv: &[String]) -> Result<i32, BootstrapError> {
 }
 
 fn print_summary(outcome: &ApplyOutcome, dry_run: bool) {
+    info!("{}", summary_message(outcome, dry_run));
+}
+
+fn summary_message(outcome: &ApplyOutcome, dry_run: bool) -> String {
     let verb = if dry_run { "would apply" } else { "applied" };
-    eprintln!(
+    format!(
         "[bootstrap] {verb}: tenants={}/{} workspaces={}/{} plugins={}/{} bindings={}/{}",
         outcome.tenants_created,
         outcome.tenants_total,
@@ -183,7 +188,7 @@ fn print_summary(outcome: &ApplyOutcome, dry_run: bool) {
         outcome.plugins_total,
         outcome.bindings_created,
         outcome.bindings_total,
-    );
+    )
 }
 
 /// Errors emitted by the bootstrap subcommand.
@@ -216,5 +221,36 @@ impl BootstrapError {
             Self::Client(client::ClientError::Transport(_)) => 7,
             Self::Client(_) => 6,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summary_message;
+    use crate::bootstrap::apply::ApplyOutcome;
+
+    #[test]
+    fn summary_message_preserves_operator_facing_text() {
+        let outcome = ApplyOutcome {
+            tenants_total: 2,
+            tenants_created: 1,
+            workspaces_total: 3,
+            workspaces_created: 2,
+            plugins_total: 4,
+            plugins_created: 1,
+            plugins_updated: 0,
+            bindings_total: 5,
+            bindings_created: 2,
+            bindings_updated: 0,
+        };
+
+        assert_eq!(
+            summary_message(&outcome, false),
+            "[bootstrap] applied: tenants=1/2 workspaces=2/3 plugins=1/4 bindings=2/5"
+        );
+        assert_eq!(
+            summary_message(&outcome, true),
+            "[bootstrap] would apply: tenants=1/2 workspaces=2/3 plugins=1/4 bindings=2/5"
+        );
     }
 }
