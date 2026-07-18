@@ -21,6 +21,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use listenfd::ListenFd;
 use nix::sys::socket::{getsockopt, sockopt};
 use tokio::net::{UnixListener, UnixStream};
+use tracing::info;
 
 use crate::cmd::{log_info, log_warn};
 use crate::server::handle_request;
@@ -39,7 +40,7 @@ pub fn version_string() -> String {
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run() -> Result<(), String> {
-    eprintln!("{PREFIX} botwork-launcher {}", version_string());
+    info!("{PREFIX} botwork-launcher {}", version_string());
     let config = Config::from_env()?;
     let validators = Validators::new(&config.image_allowlist_regex)
         .map_err(|err| format!("invalid BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX: {err}"))?;
