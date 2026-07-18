@@ -42,12 +42,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use sea_orm::DatabaseConnection;
 use tracing::warn;
 
 use crate::config_broker;
 use crate::log_info;
-use crate::session_worker::{LiveWorker, SessionWorkerWriter};
+use crate::session_worker::LiveWorker;
 use crate::{AppState, TransportState};
 
 /// Pull the running `mcp_session_*` set out of `docker ps`. Returns
@@ -159,7 +158,7 @@ where
     // Production always wires both. Tests use `None` for either; in
     // both cases we have nothing to do here. (Pre-PR2 tests + the
     // ext_proc_test suite intentionally hand AppState without DB.)
-    let (Some(writer), Some(db)) = (state.session_worker_writer.as_ref(), state.db.as_ref()) else {
+    let Some(writer) = state.session_worker_writer.as_ref() else {
         log_info("recovery: session_worker_writer not configured; skipping");
         return;
     };
@@ -206,7 +205,12 @@ where
                 "recovery: marking session_worker row reaped (container={} not running)",
                 row.container_name
             ));
-            writer.record_reap(&row.container_name).await;
+            if let Err(err) = writer.record_reap(&row.container_name).await {
+                warn!(
+                    "[session-broker] recovery: record_reap failed for container={}: {err}",
+                    row.container_name
+                );
+            }
         }
     }
 
@@ -225,13 +229,21 @@ where
         // Row carries `plugin_id`, not the plugin name. Resolve the
         // name from the DB (single SELECT per recovered container —
         // recovery is rare, so the lack of caching is acceptable).
-        let plugin_name = match resolve_plugin_name(db, row.plugin_id).await {
-            Some(name) => name,
-            None => {
+        let plugin_name = match writer.resolve_plugin_name(row.plugin_id).await {
+            Ok(Some(name)) => name,
+            Ok(None) => {
                 warn!(
                     "[session-broker] recovery: cannot resolve plugin name for \
                      container={container} plugin_id={plugin_id}; row will be \
                      reaped on next cycle once container exits",
+                    plugin_id = row.plugin_id
+                );
+                continue;
+            }
+            Err(err) => {
+                warn!(
+                    "[session-broker] recovery: plugin-name lookup failed for \
+                     container={container} plugin_id={plugin_id}: {err}",
                     plugin_id = row.plugin_id
                 );
                 continue;
@@ -329,7 +341,7 @@ where
         "recovery: seeded {seeded} transport session(s) into in-memory map"
     ));
 
-    let _ = (db, writer);
+    let _ = writer;
 }
 
 /// Result of `docker inspect <container>` filtered down to the bits
@@ -434,18 +446,6 @@ fn inspect_container_for_recovery(container_name: &str) -> Option<InspectResult>
     parse_inspect_json(&raw)
 }
 
-/// Single-shot SELECT to resolve `plugin.id` → `plugin.name` during
-/// recovery. Not cached because recovery is a one-shot operation.
-async fn resolve_plugin_name(db: &DatabaseConnection, plugin_id: uuid::Uuid) -> Option<String> {
-    use sea_orm::EntityTrait;
-    botwork_entity::plugin::Entity::find_by_id(plugin_id)
-        .one(db)
-        .await
-        .ok()
-        .flatten()
-        .map(|row| row.name)
-}
-
 /// Soft-handle a sessions.json file left from the pre-cutover broker.
 ///
 /// Round-3 PR2 deletes the JSON write path entirely, but a fresh
@@ -481,19 +481,16 @@ pub fn migrate_legacy_sessions_json(path: &str) {
     }
 }
 
-// Silence the unused-imports lint for the SessionWorkerWriter / Arc /
+// Silence the unused-imports lint for the SessionWorkerStore / Arc /
 // LiveWorker symbols we deliberately keep in scope for readability
 // even when the cfg gates don't end up using them.
 #[allow(dead_code)]
-fn _imports_keepalive(_: Arc<SessionWorkerWriter>, _: LiveWorker) {}
+fn _imports_keepalive(_: Arc<dyn crate::store::SessionWorkerStore>, _: LiveWorker) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_worker::SessionWorkerWriter;
-    use botwork_entity::{plugin, session_worker};
-    use chrono::Utc;
-    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
+    use crate::store::mock::MockSessionWorkerStore;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -503,8 +500,7 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     fn app_state_with_writer(
-        writer: Option<Arc<SessionWorkerWriter>>,
-        db: Option<Arc<sea_orm::DatabaseConnection>>,
+        writer: Option<Arc<dyn crate::store::SessionWorkerStore>>,
     ) -> AppState {
         AppState {
             transport_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -519,43 +515,7 @@ mod tests {
             disconnect_grace: std::time::Duration::from_secs(30),
             agent_session_writer: None,
             session_worker_writer: writer,
-            db,
-        }
-    }
-
-    fn worker_row(
-        id: Uuid,
-        plugin_id: Uuid,
-        container_name: &str,
-        container_ip: &str,
-        mcp_session_id: &str,
-    ) -> session_worker::Model {
-        session_worker::Model {
-            id,
-            agent_session_id: None,
-            plugin_id,
-            container_name: container_name.to_string(),
-            container_ip: container_ip.to_string(),
-            mcp_session_id: mcp_session_id.to_string(),
-            spawned_at: Utc::now(),
-            reaped_at: None,
-        }
-    }
-
-    fn plugin_row(id: Uuid, name: &str) -> plugin::Model {
-        plugin::Model {
-            id,
-            name: name.to_string(),
-            image: "ghcr.io/example/plugin:1.0".to_string(),
-            port: 8000,
-            path: "/mcp".to_string(),
-            upstream_auth: "none".to_string(),
-            env: serde_json::json!([]),
-            resources: None,
-            egress: serde_json::json!({"mode": "none"}),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            current_facet_id: None,
+            db: None,
         }
     }
 
@@ -835,44 +795,6 @@ mod tests {
         assert!(parse_inspect_json(&json).is_none());
     }
 
-    // ── resolve_plugin_name ──────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn resolve_plugin_name_returns_name_when_row_found() {
-        let pid = Uuid::new_v4();
-        let db = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
-                .into_connection(),
-        );
-        let name = resolve_plugin_name(&db, pid).await;
-        assert_eq!(name, Some("mcp-bash".to_string()));
-    }
-
-    #[tokio::test]
-    async fn resolve_plugin_name_returns_none_when_not_found() {
-        let pid = Uuid::new_v4();
-        let db = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<plugin::Model>::new()])
-                .into_connection(),
-        );
-        let name = resolve_plugin_name(&db, pid).await;
-        assert!(name.is_none());
-    }
-
-    #[tokio::test]
-    async fn resolve_plugin_name_returns_none_on_db_error() {
-        let pid = Uuid::new_v4();
-        let db = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_errors([DbErr::Custom("boom".to_string())])
-                .into_connection(),
-        );
-        let name = resolve_plugin_name(&db, pid).await;
-        assert!(name.is_none());
-    }
-
     // ── force_remove_container ────────────────────────────────────────────────
 
     #[test]
@@ -887,18 +809,16 @@ mod tests {
 
     #[tokio::test]
     async fn recover_live_workers_noops_when_writer_or_db_missing() {
-        let state = app_state_with_writer(None, None);
+        let state = app_state_with_writer(None);
         recover_live_workers(&state).await;
         assert!(state.transport_sessions.lock().await.is_empty());
     }
 
     #[tokio::test]
     async fn recover_live_workers_noops_when_docker_unavailable() {
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
-        )));
-        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
-        let state = app_state_with_writer(Some(writer), Some(db));
+        let writer: Arc<dyn crate::store::SessionWorkerStore> =
+            Arc::new(MockSessionWorkerStore::new());
+        let state = app_state_with_writer(Some(writer));
 
         recover_live_workers(&state).await;
         assert!(state.transport_sessions.lock().await.is_empty());
@@ -908,11 +828,9 @@ mod tests {
 
     #[tokio::test]
     async fn recover_with_seam_noops_when_lister_returns_none() {
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
-        )));
-        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
-        let state = app_state_with_writer(Some(writer), Some(db));
+        let writer: Arc<dyn crate::store::SessionWorkerStore> =
+            Arc::new(MockSessionWorkerStore::new());
+        let state = app_state_with_writer(Some(writer));
 
         recover_live_workers_with(&state, || None, |_| None).await;
         assert!(state.transport_sessions.lock().await.is_empty());
@@ -921,13 +839,9 @@ mod tests {
     #[tokio::test]
     async fn recover_with_seam_skips_on_db_error() {
         // list_live() returns a DB error → skip reconciliation.
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_errors([DbErr::Custom("db-fail".to_string())])
-                .into_connection(),
-        )));
-        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
-        let state = app_state_with_writer(Some(writer), Some(db));
+        let writer: Arc<dyn crate::store::SessionWorkerStore> =
+            Arc::new(MockSessionWorkerStore::always_error("db-fail"));
+        let state = app_state_with_writer(Some(writer));
 
         recover_live_workers_with(
             &state,
@@ -943,13 +857,9 @@ mod tests {
         // Running container "mcp_session_orphan" has no DB row → should be force-removed.
         // We can verify the call path runs without panicking (force_remove_container
         // calls docker which isn't available — it will warn, not crash).
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<session_worker::Model>::new()])
-                .into_connection(),
-        )));
-        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
-        let state = app_state_with_writer(Some(writer), Some(db));
+        let writer: Arc<dyn crate::store::SessionWorkerStore> =
+            Arc::new(MockSessionWorkerStore::new());
+        let state = app_state_with_writer(Some(writer));
 
         recover_live_workers_with(
             &state,
@@ -967,28 +877,21 @@ mod tests {
         // DB has one live row for "mcp_session_gone" but docker set is empty
         // → record_reap should be called.  MockDatabase records the UPDATE.
         let pid = Uuid::new_v4();
-        let cid = Uuid::new_v4();
-        let row = worker_row(cid, pid, "mcp_session_gone", "10.0.0.1", "sess-1");
-
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                // list_live()
-                .append_query_results([vec![row.clone()]])
-                // find_by_container_name inside record_reap()
-                .append_query_results([vec![row]])
-                // record_reap UPDATE (exec result)
-                .append_exec_results([sea_orm::MockExecResult {
-                    last_insert_id: 0,
-                    rows_affected: 1,
-                }])
-                .into_connection(),
-        )));
-        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
-        let state = app_state_with_writer(Some(writer), Some(db));
+        let writer = MockSessionWorkerStore::new().with_live_worker(
+            "mcp_session_gone",
+            "10.0.0.1",
+            "sess-1",
+            pid,
+        );
+        let state = app_state_with_writer(Some(Arc::new(writer.clone())));
 
         // Empty running set → every DB row should be marked reaped.
         recover_live_workers_with(&state, || Some(HashSet::new()), |_| None).await;
         assert!(state.transport_sessions.lock().await.is_empty());
+        assert_eq!(
+            writer.drain_recorded_reaps().await,
+            vec!["mcp_session_gone".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -996,21 +899,14 @@ mod tests {
         // Container in running set + matching DB row, but plugin lookup fails
         // (DB returns empty) → warn + skip, no session seeded.
         let pid = Uuid::new_v4();
-        let cid = Uuid::new_v4();
-        let row = worker_row(cid, pid, "mcp_session_x", "10.0.0.2", "sess-x");
-
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![row]])
-                .into_connection(),
+        let state = app_state_with_writer(Some(Arc::new(
+            MockSessionWorkerStore::new().with_live_worker(
+                "mcp_session_x",
+                "10.0.0.2",
+                "sess-x",
+                pid,
+            ),
         )));
-        // DB returns no plugin row for the resolve_plugin_name call.
-        let db = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<plugin::Model>::new()])
-                .into_connection(),
-        );
-        let state = app_state_with_writer(Some(writer), Some(db));
 
         recover_live_workers_with(
             &state,
@@ -1026,20 +922,11 @@ mod tests {
         // Container in running + DB row present + plugin resolved, but
         // inspector returns None (docker inspect failed) → warn + skip.
         let pid = Uuid::new_v4();
-        let cid = Uuid::new_v4();
-        let row = worker_row(cid, pid, "mcp_session_y", "10.0.0.3", "sess-y");
-
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![row]])
-                .into_connection(),
+        let state = app_state_with_writer(Some(Arc::new(
+            MockSessionWorkerStore::new()
+                .with_plugin(pid, "mcp-bash")
+                .with_live_worker("mcp_session_y", "10.0.0.3", "sess-y", pid),
         )));
-        let db = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
-                .into_connection(),
-        );
-        let state = app_state_with_writer(Some(writer), Some(db));
 
         recover_live_workers_with(
             &state,
@@ -1056,21 +943,11 @@ mod tests {
         // but mcp_session_id is empty (spawn-to-init-response window) →
         // skip, no session seeded.
         let pid = Uuid::new_v4();
-        let cid = Uuid::new_v4();
-        // Empty mcp_session_id
-        let row = worker_row(cid, pid, "mcp_session_z", "10.0.0.4", "");
-
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![row]])
-                .into_connection(),
+        let state = app_state_with_writer(Some(Arc::new(
+            MockSessionWorkerStore::new()
+                .with_plugin(pid, "mcp-bash")
+                .with_live_worker("mcp_session_z", "10.0.0.4", "", pid),
         )));
-        let db = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
-                .into_connection(),
-        );
-        let state = app_state_with_writer(Some(writer), Some(db));
         crate::test_support::start_log_capture();
 
         recover_live_workers_with(
@@ -1099,23 +976,13 @@ mod tests {
     async fn recover_with_seam_logs_ip_drift() {
         // IP in DB row differs from inspect result → log the drift.
         let pid = Uuid::new_v4();
-        let cid = Uuid::new_v4();
-        // Row has DB IP "10.0.0.99", inspect will return "10.0.0.50"
-        let row = worker_row(cid, pid, "mcp_session_drift", "10.0.0.99", "sess-drift");
-
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![row]])
-                .into_connection(),
-        )));
-        let db = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
-                .into_connection(),
-        );
         // config_broker_endpoint is unreachable (port 1), so config-broker
         // call will fail → the intersection is skipped after the IP-drift log.
-        let state = app_state_with_writer(Some(writer), Some(db));
+        let state = app_state_with_writer(Some(Arc::new(
+            MockSessionWorkerStore::new()
+                .with_plugin(pid, "mcp-bash")
+                .with_live_worker("mcp_session_drift", "10.0.0.99", "sess-drift", pid),
+        )));
         crate::test_support::start_log_capture();
 
         recover_live_workers_with(
@@ -1145,20 +1012,11 @@ mod tests {
         // config-broker is unreachable (port 1 as set in app_state_with_writer)
         // → config-broker resolve fails, warn + skip.
         let pid = Uuid::new_v4();
-        let cid = Uuid::new_v4();
-        let row = worker_row(cid, pid, "mcp_session_cb_fail", "10.0.0.5", "sess-cb");
-
-        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![row]])
-                .into_connection(),
+        let state = app_state_with_writer(Some(Arc::new(
+            MockSessionWorkerStore::new()
+                .with_plugin(pid, "mcp-bash")
+                .with_live_worker("mcp_session_cb_fail", "10.0.0.5", "sess-cb", pid),
         )));
-        let db = Arc::new(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
-                .into_connection(),
-        );
-        let state = app_state_with_writer(Some(writer), Some(db));
 
         recover_live_workers_with(
             &state,

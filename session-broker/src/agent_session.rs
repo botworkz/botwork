@@ -127,6 +127,16 @@ impl AgentSessionWriter {
         }
     }
 
+    pub async fn try_record_bind_agent(
+        &self,
+        tenant_name: &str,
+        workspace_name: &str,
+        agent_session_id: &str,
+    ) -> Result<(), AgentSessionWriteError> {
+        self.record_bind_agent_inner(tenant_name, workspace_name, agent_session_id)
+            .await
+    }
+
     async fn record_bind_agent_inner(
         &self,
         tenant_name: &str,
@@ -210,6 +220,21 @@ impl AgentSessionWriter {
         .await;
     }
 
+    pub async fn try_record_grace(
+        &self,
+        tenant_name: &str,
+        workspace_name: &str,
+        agent_session_id: &str,
+    ) -> Result<(), AgentSessionWriteError> {
+        self.transition_state_inner(
+            tenant_name,
+            workspace_name,
+            agent_session_id,
+            agent_session::state::GRACE,
+        )
+        .await
+    }
+
     /// Move the row to `state = 'inactive'`. Called by the reap path
     /// once the grace timer fires and the container is torn down.
     pub async fn record_inactive(
@@ -226,6 +251,21 @@ impl AgentSessionWriter {
             "record_inactive",
         )
         .await;
+    }
+
+    pub async fn try_record_inactive(
+        &self,
+        tenant_name: &str,
+        workspace_name: &str,
+        agent_session_id: &str,
+    ) -> Result<(), AgentSessionWriteError> {
+        self.transition_state_inner(
+            tenant_name,
+            workspace_name,
+            agent_session_id,
+            agent_session::state::INACTIVE,
+        )
+        .await
     }
 
     /// Bump `last_active_at` without changing `state`. Hot-path
@@ -252,6 +292,16 @@ impl AgentSessionWriter {
                  agent_session_id={agent_session_id}: {err}"
             );
         }
+    }
+
+    pub async fn try_touch_last_active(
+        &self,
+        tenant_name: &str,
+        workspace_name: &str,
+        agent_session_id: &str,
+    ) -> Result<(), AgentSessionWriteError> {
+        self.touch_last_active_inner(tenant_name, workspace_name, agent_session_id)
+            .await
     }
 
     async fn touch_last_active_inner(
@@ -355,51 +405,36 @@ impl AgentSessionWriter {
         workspace_name: &str,
         agent_session_id: &str,
     ) -> Option<Uuid> {
-        let tenant_id = match self.tenant_id(tenant_name).await {
-            Ok(id) => id,
-            Err(err) => {
-                warn!(
-                    "{PREFIX} resolve_pk tenant lookup failed for \
-                     tenant={tenant_name}: {err}"
-                );
-                return None;
-            }
-        };
-        let workspace_id = match self.workspace_id(tenant_id, workspace_name).await {
-            Ok(id) => id,
-            Err(err) => {
-                warn!(
-                    "{PREFIX} resolve_pk workspace lookup failed for \
-                     tenant={tenant_name} workspace={workspace_name}: {err}"
-                );
-                return None;
-            }
-        };
-        match agent_session::Entity::find()
-            .filter(agent_session::Column::TenantId.eq(tenant_id))
-            .filter(agent_session::Column::WorkspaceId.eq(workspace_id))
-            .filter(agent_session::Column::AgentSessionId.eq(agent_session_id))
-            .one(self.db.as_ref())
+        match self
+            .try_resolve_pk(tenant_name, workspace_name, agent_session_id)
             .await
         {
-            Ok(Some(row)) => Some(row.id),
-            Ok(None) => {
-                warn!(
-                    "{PREFIX} resolve_pk found no agent_session row for \
-                     tenant={tenant_name} workspace={workspace_name} \
-                     agent_session_id={agent_session_id}"
-                );
-                None
-            }
+            Ok(pk) => pk,
             Err(err) => {
                 warn!(
-                    "{PREFIX} resolve_pk DB query failed for \
-                     tenant={tenant_name} workspace={workspace_name} \
-                     agent_session_id={agent_session_id}: {err}"
+                    "{PREFIX} resolve_pk failed for tenant={tenant_name} \
+                     workspace={workspace_name} agent_session_id={agent_session_id}: {err}"
                 );
                 None
             }
         }
+    }
+
+    pub async fn try_resolve_pk(
+        &self,
+        tenant_name: &str,
+        workspace_name: &str,
+        agent_session_id: &str,
+    ) -> Result<Option<Uuid>, AgentSessionWriteError> {
+        let tenant_id = self.tenant_id(tenant_name).await?;
+        let workspace_id = self.workspace_id(tenant_id, workspace_name).await?;
+        Ok(agent_session::Entity::find()
+            .filter(agent_session::Column::TenantId.eq(tenant_id))
+            .filter(agent_session::Column::WorkspaceId.eq(workspace_id))
+            .filter(agent_session::Column::AgentSessionId.eq(agent_session_id))
+            .one(self.db.as_ref())
+            .await?
+            .map(|row| row.id))
     }
 
     async fn workspace_id(
@@ -429,7 +464,7 @@ impl AgentSessionWriter {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum AgentSessionWriteError {
+pub enum AgentSessionWriteError {
     #[error("unknown tenant: {0}")]
     UnknownTenant(String),
     #[error("unknown workspace under tenant {tenant_id}: {name}")]
