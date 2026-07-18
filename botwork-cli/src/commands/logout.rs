@@ -28,3 +28,69 @@ pub async fn run(args: LogoutArgs) -> Result<String, LoginError> {
         Ok(format!("(no keyring entry for {})", args.tenant))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keyring_store::{KeyringEntry, KeyringStore};
+    use chrono::Utc;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    fn env_lock() -> &'static Mutex<()> {
+        crate::test_env_lock::env_lock()
+    }
+
+    fn fixture_entry() -> KeyringEntry {
+        KeyringEntry {
+            bearer: "token".into(),
+            lease_id: uuid::Uuid::nil(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            server: "https://broker.example".into(),
+            credential_identifier: "phlax".into(),
+            suite_version: botwork_opaque_handshake::SUITE_VERSION,
+        }
+    }
+
+    fn run_async<F: std::future::Future<Output = T>, T>(future: F) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn run_removes_existing_entry() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+        KeyringStore::new()
+            .write("phlax", &fixture_entry())
+            .unwrap();
+
+        let output = run_async(run(LogoutArgs {
+            tenant: "phlax".into(),
+        }))
+        .unwrap();
+        assert_eq!(output, "✓ Removed keyring entry for phlax.");
+        assert!(KeyringStore::new().read("phlax").unwrap().is_none());
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+    }
+
+    #[test]
+    fn run_is_idempotent_when_entry_is_missing() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+
+        let output = run_async(run(LogoutArgs {
+            tenant: "phlax".into(),
+        }))
+        .unwrap();
+        assert_eq!(output, "(no keyring entry for phlax)");
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+    }
+}

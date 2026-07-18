@@ -63,7 +63,7 @@ pub async fn apply(
     let tx = db.begin().await?;
     let store = crate::store::sea_orm_impl::SeaOrmBootstrapStore::new(&tx);
     let stats = apply_with_store(&store, config).await?;
-    tx.commit().await?;
+    tx.commit().await?; // MockDatabase cannot model commit; exercised by the real-Postgres integration tests.
     info!(
         ?stats,
         "bootstrap apply complete: tenants={} workspaces={} plugins={} bindings={}",

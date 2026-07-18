@@ -270,7 +270,9 @@ mod tests {
     /// behind a `Mutex` so each env-mutating test gets a clean
     /// window. `std::sync::Mutex` is enough — these tests are
     /// sub-millisecond so lock contention is trivial.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    fn env_lock() -> &'static Mutex<()> {
+        crate::test_env_lock::env_lock()
+    }
 
     fn fixture_entry() -> KeyringEntry {
         KeyringEntry {
@@ -310,7 +312,7 @@ mod tests {
 
     #[test]
     fn store_round_trips_via_env_dir() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock().lock().unwrap();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
 
@@ -343,7 +345,7 @@ mod tests {
 
     #[test]
     fn rejects_path_traversal_in_tenant_name() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock().lock().unwrap();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
         for bad in ["..", ".", "../escape", "with/slash", r"win\slash"] {
@@ -358,7 +360,7 @@ mod tests {
 
     #[test]
     fn missing_dir_env_is_an_error_at_resolve_time() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = env_lock().lock().unwrap();
         // Save + clear all three env vars the resolver consults.
         let saved_keyring = std::env::var("BOTWORK_LOGIN_KEYRING_DIR").ok();
         let saved_xdg = std::env::var("XDG_CONFIG_HOME").ok();

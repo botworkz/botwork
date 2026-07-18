@@ -277,4 +277,38 @@ mod tests {
             2
         );
     }
+
+    #[test]
+    fn display_messages_are_stable() {
+        let err = LoginError::LeaseExpired {
+            tenant: "phlax".into(),
+            expires_at: "2026-07-18T16:00:00Z".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "lease for tenant 'phlax' expired at 2026-07-18T16:00:00Z; run `bw --tenant phlax` again"
+        );
+
+        let invalid_server = LoginError::InvalidServer {
+            value: "127.0.0.1:9100".into(),
+            reason: "a scheme is required".into(),
+        };
+        assert_eq!(
+            invalid_server.to_string(),
+            "invalid --server value '127.0.0.1:9100': a scheme is required"
+        );
+    }
+
+    #[test]
+    fn keyring_storage_error_display_messages_are_stable() {
+        assert_eq!(
+            keyring_storage_error::KeyringStorageError::NoBackend("missing".into()).to_string(),
+            "no usable keyring backend: missing"
+        );
+        assert!(keyring_storage_error::KeyringStorageError::Serde(
+            serde_json::from_str::<serde_json::Value>("not-json").unwrap_err()
+        )
+        .to_string()
+        .contains("keyring entry serialization error"));
+    }
 }

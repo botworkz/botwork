@@ -314,6 +314,22 @@ mod tests {
         assert_eq!(exit_code, None);
     }
 
+    #[test]
+    fn parse_event_line_accepts_lowercase_action_key() {
+        // Docker may emit lowercase "action" instead of "Action" in some versions.
+        // The parser tries "Action" first, then falls back to "action".
+        let line = r#"{"Type":"container","action":"die","Actor":{"ID":"abc","Attributes":{"name":"mcp_session_5ea57ab800c5","exitCode":"137"}},"time":1234567890}"#;
+        let result = parse_event_line(line);
+        assert!(
+            result.is_some(),
+            "lowercase 'action' key should be accepted"
+        );
+        let (name, event, exit_code) = result.unwrap();
+        assert_eq!(name, "mcp_session_5ea57ab800c5");
+        assert_eq!(event, "die");
+        assert_eq!(exit_code, Some(137));
+    }
+
     // ── build_exit_payload ──────────────────────────────────────────────────
 
     #[test]

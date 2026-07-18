@@ -94,10 +94,14 @@ async fn handle_exit_request(
     Ok(response)
 }
 
-async fn dispatch_exit_request(
-    request: Request<Incoming>,
+async fn dispatch_exit_request<B>(
+    request: Request<B>,
     state: &AppState,
-) -> Result<Response<Full<Bytes>>, String> {
+) -> Result<Response<Full<Bytes>>, String>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
     if request.method() != Method::POST || request.uri().path() != "/container-exit" {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
@@ -409,6 +413,70 @@ mod tests {
         assert_eq!(
             mock.drain_recorded_reaps().await,
             vec!["mcp-session-reap".to_string()]
+        );
+    }
+
+    // ── dispatch_exit_request routing and parse branches ─────────────────────
+
+    #[tokio::test]
+    async fn dispatch_exit_request_non_post_method_returns_404() {
+        use http_body_util::Full;
+        let state = bare_state();
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/container-exit")
+            .body(Full::new(Bytes::new()))
+            .expect("build request");
+        let resp = dispatch_exit_request(req, &state).await.expect("no Err");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn dispatch_exit_request_wrong_path_returns_404() {
+        use http_body_util::Full;
+        let state = bare_state();
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/wrong-path")
+            .body(Full::new(Bytes::new()))
+            .expect("build request");
+        let resp = dispatch_exit_request(req, &state).await.expect("no Err");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn dispatch_exit_request_invalid_json_returns_err() {
+        use http_body_util::Full;
+        let state = bare_state();
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/container-exit")
+            .body(Full::new(Bytes::from_static(b"not-json")))
+            .expect("build request");
+        let err = dispatch_exit_request(req, &state)
+            .await
+            .expect_err("should return Err for invalid JSON");
+        assert!(
+            err.contains("invalid JSON body"),
+            "expected 'invalid JSON body' in error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_exit_request_missing_name_field_returns_err() {
+        use http_body_util::Full;
+        let state = bare_state();
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/container-exit")
+            .body(Full::new(Bytes::from_static(b"{\"event\":\"die\"}")))
+            .expect("build request");
+        let err = dispatch_exit_request(req, &state)
+            .await
+            .expect_err("should return Err for missing name");
+        assert!(
+            err.contains("missing 'name'"),
+            "expected \"missing 'name'\" in error: {err}"
         );
     }
 }

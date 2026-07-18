@@ -59,6 +59,9 @@ fn format_export(token_env: &str, bearer: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyring_store::{KeyringEntry, KeyringStore};
+    use std::sync::Mutex;
+    use tempfile::TempDir;
 
     #[test]
     fn format_export_shape() {
@@ -66,5 +69,107 @@ mod tests {
             format_export("BOTWORK_BEARER", "ABCDEF0123456789"),
             "export BOTWORK_BEARER='ABCDEF0123456789'"
         );
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        crate::test_env_lock::env_lock()
+    }
+
+    fn fixture_entry(expires_at: chrono::DateTime<Utc>) -> KeyringEntry {
+        KeyringEntry {
+            bearer: "ABCDEF0123456789".into(),
+            lease_id: uuid::Uuid::nil(),
+            expires_at,
+            server: "https://broker.example".into(),
+            credential_identifier: "phlax@example.com".into(),
+            suite_version: botwork_opaque_handshake::SUITE_VERSION,
+        }
+    }
+
+    fn run_async<F: std::future::Future<Output = T>, T>(future: F) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn run_uses_explicit_token_env_override() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+        KeyringStore::new()
+            .write(
+                "phlax",
+                &fixture_entry(Utc::now() + chrono::Duration::hours(1)),
+            )
+            .unwrap();
+
+        let output = run_async(run(EnvArgs {
+            tenant: "phlax".into(),
+            token_env: Some("CUSTOM_TOKEN".into()),
+        }))
+        .unwrap();
+        assert_eq!(output, "export CUSTOM_TOKEN='ABCDEF0123456789'");
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+    }
+
+    #[test]
+    fn run_reads_token_env_from_config_when_not_overridden() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "token_env = \"ALT_TOKEN\"\n").unwrap();
+        std::env::set_var("BOTWORK_LOGIN_CONFIG", &config);
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path().join("keyring"));
+        KeyringStore::new()
+            .write(
+                "phlax",
+                &fixture_entry(Utc::now() + chrono::Duration::hours(1)),
+            )
+            .unwrap();
+
+        let output = run_async(run(EnvArgs {
+            tenant: "phlax".into(),
+            token_env: None,
+        }))
+        .unwrap();
+        assert_eq!(output, "export ALT_TOKEN='ABCDEF0123456789'");
+
+        std::env::remove_var("BOTWORK_LOGIN_CONFIG");
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+    }
+
+    #[test]
+    fn run_errors_for_missing_or_expired_lease() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+
+        let missing = run_async(run(EnvArgs {
+            tenant: "phlax".into(),
+            token_env: None,
+        }))
+        .unwrap_err();
+        assert!(matches!(missing, LoginError::NoLease(ref tenant) if tenant == "phlax"));
+
+        KeyringStore::new()
+            .write(
+                "phlax",
+                &fixture_entry(Utc::now() - chrono::Duration::seconds(1)),
+            )
+            .unwrap();
+        let expired = run_async(run(EnvArgs {
+            tenant: "phlax".into(),
+            token_env: None,
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(expired, LoginError::LeaseExpired { ref tenant, .. } if tenant == "phlax")
+        );
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
     }
 }
