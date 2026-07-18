@@ -26,7 +26,7 @@ fn app_state_with_db(db: DatabaseConnection) -> AppState {
     }
 }
 
-fn make_store(mock: MockDatabase) -> SeaOrmApiStore {
+fn mock_api_store(mock: MockDatabase) -> SeaOrmApiStore {
     SeaOrmApiStore::new(mock.into_connection())
 }
 
@@ -152,7 +152,7 @@ async fn sea_orm_api_store_tenant_read_methods_cover_some_none_and_error() {
     let tenant_id = Uuid::new_v4();
     let when = Utc::now();
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![tenant_row(tenant_id, "phlax", when)]]),
     );
@@ -161,7 +161,7 @@ async fn sea_orm_api_store_tenant_read_methods_cover_some_none_and_error() {
         Some(tenant_id)
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<tenant::Model>::new()]),
     );
@@ -170,7 +170,7 @@ async fn sea_orm_api_store_tenant_read_methods_cover_some_none_and_error() {
         None
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("boom".to_string())]),
     );
@@ -185,12 +185,12 @@ async fn sea_orm_api_store_tenant_read_methods_cover_some_none_and_error() {
         tenant_row(Uuid::new_v4(), "a", when),
         tenant_row(Uuid::new_v4(), "b", when),
     ];
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([rows.clone()]),
     );
     assert_eq!(store.list_tenants().await.expect("list"), rows);
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("list boom".to_string())]),
     );
@@ -202,18 +202,18 @@ async fn sea_orm_api_store_tenant_read_methods_cover_some_none_and_error() {
         .contains("list boom"));
 
     let row = tenant_row(tenant_id, "phlax", when);
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![row.clone()]]),
     );
     assert_eq!(store.get_tenant(tenant_id).await.expect("get"), Some(row));
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<tenant::Model>::new()]),
     );
     assert_eq!(store.get_tenant(tenant_id).await.expect("get"), None);
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("get boom".to_string())]),
     );
@@ -234,7 +234,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     let worker_id = Uuid::new_v4();
 
     let workspaces = vec![workspace_row(workspace_id, tenant_id, "mcp")];
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([workspaces.clone()]),
     );
     assert_eq!(
@@ -246,7 +246,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     );
 
     let workspace = workspace_row(workspace_id, tenant_id, "mcp");
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![workspace.clone()]]),
     );
@@ -256,12 +256,12 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     );
 
     let plugins = vec![plugin_row(plugin_id, "mcp-fetch")];
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([plugins.clone()]),
     );
     assert_eq!(store.list_plugins().await.expect("list"), plugins);
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]]),
     );
@@ -276,7 +276,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     );
 
     let store =
-        make_store(
+        mock_api_store(
             MockDatabase::new(DatabaseBackend::Postgres)
                 .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]]),
         );
@@ -289,7 +289,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     );
 
     let bindings = vec![workspace_plugin_row(workspace_id, plugin_id)];
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([bindings.clone()]),
     );
     assert_eq!(
@@ -301,7 +301,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     );
 
     let binding = workspace_plugin_row(workspace_id, plugin_id);
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![binding.clone()]]),
     );
     assert_eq!(
@@ -313,7 +313,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     );
 
     let sessions = vec![agent_session_row(agent_session_id, tenant_id, workspace_id)];
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([sessions.clone()]),
     );
     assert_eq!(
@@ -329,7 +329,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     );
 
     let session = agent_session_row(agent_session_id, tenant_id, workspace_id);
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![session.clone()]]),
     );
     assert_eq!(
@@ -340,7 +340,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
         Some(session)
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
             agent_session_row(agent_session_id, tenant_id, workspace_id),
         ]]),
@@ -358,7 +358,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
         Some(agent_session_id),
         plugin_id,
     )];
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([workers.clone()]),
     );
     assert_eq!(
@@ -375,7 +375,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
     );
 
     let worker = session_worker_row(worker_id, Some(agent_session_id), plugin_id);
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![worker.clone()]]),
     );
     assert_eq!(
@@ -383,7 +383,7 @@ async fn sea_orm_api_store_workspace_plugin_and_session_read_methods_cover_resul
         Some(worker)
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("worker boom".to_string())]),
     );
@@ -401,7 +401,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
     let tenant_id = Uuid::new_v4();
     let lock = Utc::now();
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![count_row(0)]])
             .append_query_results([vec![tenant_row(Uuid::new_v4(), "phlax", Utc::now())]]),
@@ -415,7 +415,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         "phlax"
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![count_row(1)]]),
     );
     assert_eq!(
@@ -428,7 +428,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         StatusCode::CONFLICT
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("count boom".to_string())]),
     );
@@ -443,7 +443,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
     );
 
     let live = tenant_row(tenant_id, "phlax", lock);
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![live.clone()]])
             .append_query_results([vec![count_row(0)]])
@@ -458,7 +458,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         "renamed"
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<tenant::Model>::new()]),
     );
@@ -472,7 +472,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         StatusCode::NOT_FOUND
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![live.clone()]]),
     );
     assert_eq!(
@@ -489,7 +489,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         StatusCode::CONFLICT
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![live.clone()]])
             .append_query_results([vec![count_row(1)]]),
@@ -504,7 +504,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         StatusCode::CONFLICT
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("update boom".to_string())]),
     );
@@ -518,7 +518,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         StatusCode::INTERNAL_SERVER_ERROR
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![live.clone()]])
             .append_query_results([Vec::<workspace::Model>::new()])
@@ -536,7 +536,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         tenant_id
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![live.clone()]])
             .append_query_results([vec![workspace_row(Uuid::new_v4(), tenant_id, "mcp")]]),
@@ -551,7 +551,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         StatusCode::CONFLICT
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<tenant::Model>::new()]),
     );
@@ -565,8 +565,9 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         StatusCode::NOT_FOUND
     );
 
-    let store =
-        make_store(MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![live]]));
+    let store = mock_api_store(
+        MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![live]]),
+    );
     assert_eq!(
         store
             .delete_tenant(tenant_id, Some(lock - chrono::TimeDelta::seconds(1)))
@@ -577,7 +578,7 @@ async fn sea_orm_api_store_tenant_write_methods_cover_free_taken_not_found_stale
         StatusCode::CONFLICT
     );
 
-    let store = make_store(
+    let store = mock_api_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("delete boom".to_string())]),
     );

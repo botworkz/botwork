@@ -78,6 +78,8 @@ async fn sea_orm_bootstrap_store_upsert_plugin_covers_insert_update_unchanged_an
         .append_query_results([Vec::<plugin::Model>::new()])
         .append_query_results([vec![plugin_row(plugin_id, &entry)]])
         .into_connection();
+    // MockDatabase can drive the inner upsert body; the real-Postgres
+    // integration tests that call bootstrap::apply() cover commit semantics.
     let tx = db.begin().await.expect("begin");
     let store = SeaOrmBootstrapStore::new(&tx);
     let (id, outcome) = store.upsert_plugin(&entry).await.expect("insert");

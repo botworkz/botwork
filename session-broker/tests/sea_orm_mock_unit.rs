@@ -9,11 +9,11 @@ use chrono::Utc;
 use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
 use uuid::Uuid;
 
-fn agent_store(mock: MockDatabase) -> SeaOrmAgentSessionStore {
+fn mock_agent_store(mock: MockDatabase) -> SeaOrmAgentSessionStore {
     SeaOrmAgentSessionStore::new(mock.into_connection())
 }
 
-fn worker_store(mock: MockDatabase) -> SeaOrmSessionWorkerStore {
+fn mock_worker_store(mock: MockDatabase) -> SeaOrmSessionWorkerStore {
     SeaOrmSessionWorkerStore::new(mock.into_connection())
 }
 
@@ -98,7 +98,7 @@ async fn sea_orm_agent_session_store_methods_cover_success_missing_and_error() {
     let workspace_id = Uuid::new_v4();
     let existing_id = Uuid::new_v4();
 
-    let store = agent_store(
+    let store = mock_agent_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
             .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
@@ -116,7 +116,7 @@ async fn sea_orm_agent_session_store_methods_cover_success_missing_and_error() {
         .await
         .expect("insert");
 
-    let store = agent_store(
+    let store = mock_agent_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
             .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
@@ -140,7 +140,7 @@ async fn sea_orm_agent_session_store_methods_cover_success_missing_and_error() {
         .await
         .expect("grace");
 
-    let store = agent_store(
+    let store = mock_agent_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
             .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
@@ -164,7 +164,7 @@ async fn sea_orm_agent_session_store_methods_cover_success_missing_and_error() {
         .await
         .expect("inactive");
 
-    let store = agent_store(
+    let store = mock_agent_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
             .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
@@ -175,7 +175,7 @@ async fn sea_orm_agent_session_store_methods_cover_success_missing_and_error() {
         Err(AgentSessionWriteError::MissingRow)
     ));
 
-    let store = agent_store(
+    let store = mock_agent_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
             .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
@@ -203,7 +203,7 @@ async fn sea_orm_agent_session_store_methods_cover_success_missing_and_error() {
         None
     );
 
-    let store = agent_store(
+    let store = mock_agent_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("boom".to_string())]),
     );
@@ -221,7 +221,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
     let worker_id = Uuid::new_v4();
     let agent_session_id = Uuid::new_v4();
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]])
             // Spawn-time rows start with an empty mcp_session_id until the
@@ -240,7 +240,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         .await
         .expect("spawn");
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             // Before record_mcp_session_id runs, the persisted row still carries
             // the spawn-time empty sentinel.
@@ -266,7 +266,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         .await
         .expect("mcp sid");
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![worker_row(
                 worker_id,
@@ -290,7 +290,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         .await
         .expect("binding");
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![worker_row(
             worker_id,
             plugin_id,
@@ -316,7 +316,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         ),
         worker_row(Uuid::new_v4(), plugin_id, "mcp_session_2", "", None, None),
     ];
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres).append_query_results([live_rows.clone()]),
     );
     assert_eq!(
@@ -339,7 +339,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         ]
     );
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]]),
     );
@@ -348,7 +348,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         Some("mcp-fetch".to_string())
     );
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<plugin::Model>::new()]),
     );
@@ -357,7 +357,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         None
     );
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<session_worker::Model>::new()]),
     );
@@ -366,7 +366,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         Err(SessionWorkerWriteError::UnknownContainer(name)) if name == "missing"
     ));
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("boom".to_string())]),
     );
@@ -377,7 +377,7 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
         .to_string()
         .contains("boom"));
 
-    let store = worker_store(
+    let store = mock_worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_errors([DbErr::Custom("resolve boom".to_string())]),
     );
