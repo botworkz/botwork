@@ -27,6 +27,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use botwork_api::store::sea_orm_impl::SeaOrmApiStore;
 use botwork_api::{
     build_router, AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient,
 };
@@ -175,6 +176,7 @@ async fn spawn_server_with(control_plane: Option<ControlPlaneClient>) -> Option<
 
     let db_arc = Arc::new(db);
     let state = AppState {
+        store: Arc::new(SeaOrmApiStore::new(db_arc.clone())),
         db: db_arc.clone(),
         control_plane: control_plane.unwrap_or_else(ControlPlaneClient::disabled),
         secret_store: SecretStoreClient::disabled(),

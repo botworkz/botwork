@@ -40,7 +40,7 @@ use axum::http::header::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -112,11 +112,7 @@ async fn list_tenants(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&headers)?;
-    // Order by name so the response is deterministic across calls.
-    let items = tenant::Entity::find()
-        .order_by_asc(tenant::Column::Name)
-        .all(state.db.as_ref())
-        .await?;
+    let items = state.store.list_tenants().await?;
     Ok(Json(ListResponse::from_vec(items)))
 }
 
@@ -128,8 +124,9 @@ async fn get_tenant(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&headers)?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid tenant id", err))?;
-    let row = tenant::Entity::find_by_id(id)
-        .one(state.db.as_ref())
+    let row = state
+        .store
+        .get_tenant(id)
         .await?
         .or_not_found("tenant", format!("no tenant with id {id}"))?;
     Ok(Json(row))
@@ -151,20 +148,16 @@ async fn list_workspaces(
     Query(params): Query<WorkspaceListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_tenant_consistency(&headers, &tenant_name)?;
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
 
-    let mut query = workspace::Entity::find().filter(workspace::Column::TenantId.eq(tenant_id));
-
-    if let Some(raw) = params.workspace_id {
-        let ws_id = Uuid::from_str(&raw)
-            .map_err(|err| bad_request("invalid workspace_id query param", err))?;
-        query = query.filter(workspace::Column::Id.eq(ws_id));
-    }
-
-    let items = query
-        .order_by_asc(workspace::Column::Name)
-        .all(state.db.as_ref())
-        .await?;
+    let ws_filter = match params.workspace_id {
+        Some(raw) => Some(
+            Uuid::from_str(&raw)
+                .map_err(|err| bad_request("invalid workspace_id query param", err))?,
+        ),
+        None => None,
+    };
+    let items = state.store.list_workspaces(tenant_id, ws_filter).await?;
     Ok(Json(ListResponse::from_vec(items)))
 }
 
@@ -175,10 +168,11 @@ async fn get_workspace(
     Path((tenant_name, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_tenant_consistency(&headers, &tenant_name)?;
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid workspace id", err))?;
-    let row = workspace::Entity::find_by_id(id)
-        .one(state.db.as_ref())
+    let row = state
+        .store
+        .get_workspace(id)
         .await?
         .or_not_found("workspace", format!("no workspace with id {id}"))?;
     // Ownership check: workspace must belong to the path tenant.
@@ -199,10 +193,7 @@ async fn list_plugins(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&headers)?;
-    let items = plugin::Entity::find()
-        .order_by_asc(plugin::Column::Name)
-        .all(state.db.as_ref())
-        .await?;
+    let items = state.store.list_plugins().await?;
     Ok(Json(ListResponse::from_vec(items)))
 }
 
@@ -214,8 +205,9 @@ async fn get_plugin(
 ) -> Result<impl IntoResponse, ApiError> {
     require_admin(&headers)?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid plugin id", err))?;
-    let row = plugin::Entity::find_by_id(id)
-        .one(state.db.as_ref())
+    let row = state
+        .store
+        .get_plugin(id)
         .await?
         .or_not_found("plugin", format!("no plugin with id {id}"))?;
     Ok(Json(row))
@@ -255,35 +247,19 @@ async fn list_workspace_plugins(
         None => None,
     };
 
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
 
     // Collect workspace IDs belonging to this tenant so we can filter
     // workspace_plugins to only those under this tenant.
-    let tenant_workspace_ids: Vec<Uuid> = workspace::Entity::find()
-        .filter(workspace::Column::TenantId.eq(tenant_id))
-        .all(state.db.as_ref())
-        .await?
-        .into_iter()
-        .map(|w| w.id)
-        .collect();
+    let tenant_workspace_ids = state.store.list_workspace_ids_for_tenant(tenant_id).await?;
 
     if tenant_workspace_ids.is_empty() {
         return Ok(Json(ListResponse::from_vec(vec![])));
     }
 
-    let mut query = workspace_plugin::Entity::find()
-        .filter(workspace_plugin::Column::WorkspaceId.is_in(tenant_workspace_ids));
-
-    if let Some(workspace_id) = workspace_filter {
-        query = query.filter(workspace_plugin::Column::WorkspaceId.eq(workspace_id));
-    }
-    if let Some(plugin_id) = plugin_filter {
-        query = query.filter(workspace_plugin::Column::PluginId.eq(plugin_id));
-    }
-    let items = query
-        .order_by_asc(workspace_plugin::Column::WorkspaceId)
-        .order_by_asc(workspace_plugin::Column::PluginId)
-        .all(state.db.as_ref())
+    let items = state
+        .store
+        .list_workspace_plugins(tenant_workspace_ids, workspace_filter, plugin_filter)
         .await?;
     Ok(Json(ListResponse::from_vec(items)))
 }
@@ -295,15 +271,16 @@ async fn get_workspace_plugin(
     Path((tenant_name, workspace_id, plugin_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_tenant_consistency(&headers, &tenant_name)?;
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
     let workspace_id = Uuid::from_str(&workspace_id)
         .map_err(|err| bad_request("invalid workspace_id path param", err))?;
     let plugin_id = Uuid::from_str(&plugin_id)
         .map_err(|err| bad_request("invalid plugin_id path param", err))?;
 
     // Ownership check: workspace must belong to the path tenant.
-    let workspace = workspace::Entity::find_by_id(workspace_id)
-        .one(state.db.as_ref())
+    let workspace = state
+        .store
+        .get_workspace(workspace_id)
         .await?
         .or_not_found("workspace", format!("no workspace with id {workspace_id}"))?;
     if workspace.tenant_id != tenant_id {
@@ -313,8 +290,9 @@ async fn get_workspace_plugin(
         ));
     }
 
-    let row = workspace_plugin::Entity::find_by_id((workspace_id, plugin_id))
-        .one(state.db.as_ref())
+    let row = state
+        .store
+        .get_workspace_plugin(workspace_id, plugin_id)
         .await?
         .or_not_found(
             "workspace_plugin",
@@ -351,22 +329,10 @@ async fn list_agent_sessions(
         None => None,
     };
 
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
-
-    let mut query =
-        agent_session::Entity::find().filter(agent_session::Column::TenantId.eq(tenant_id));
-
-    if let Some(workspace_id) = workspace_filter {
-        query = query.filter(agent_session::Column::WorkspaceId.eq(workspace_id));
-    }
-    if let Some(state_val) = params.state {
-        query = query.filter(agent_session::Column::State.eq(state_val));
-    }
-    // Order by last_active_at DESC: most-recently-active first.
-    let items = query
-        .order_by_desc(agent_session::Column::LastActiveAt)
-        .order_by_asc(agent_session::Column::Id)
-        .all(state.db.as_ref())
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
+    let items = state
+        .store
+        .list_agent_sessions(tenant_id, workspace_filter, params.state)
         .await?;
     Ok(Json(ListResponse::from_vec(items)))
 }
@@ -378,10 +344,11 @@ async fn get_agent_session(
     Path((tenant_name, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_tenant_consistency(&headers, &tenant_name)?;
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid agent_session id", err))?;
-    let row = agent_session::Entity::find_by_id(id)
-        .one(state.db.as_ref())
+    let row = state
+        .store
+        .get_agent_session(id)
         .await?
         .or_not_found("agent_session", format!("no agent_session with id {id}"))?;
     // Ownership check: session must belong to the path tenant.
@@ -438,42 +405,21 @@ async fn list_session_workers(
         None => None,
     };
 
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
 
     // Collect agent_session IDs for this tenant so we can filter workers.
-    let session_ids: Vec<Uuid> = agent_session::Entity::find()
-        .filter(agent_session::Column::TenantId.eq(tenant_id))
-        .all(state.db.as_ref())
-        .await?
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
+    let session_ids = state
+        .store
+        .list_agent_session_ids_for_tenant(tenant_id)
+        .await?;
 
     if session_ids.is_empty() {
         return Ok(Json(ListResponse::from_vec(vec![])));
     }
 
-    let mut query = session_worker::Entity::find()
-        .filter(session_worker::Column::AgentSessionId.is_in(session_ids));
-
-    if let Some(agent_session_id) = session_filter {
-        query = query.filter(session_worker::Column::AgentSessionId.eq(agent_session_id));
-    }
-    if let Some(plugin_id) = plugin_filter {
-        query = query.filter(session_worker::Column::PluginId.eq(plugin_id));
-    }
-    if let Some(live) = params.live {
-        query = if live {
-            query.filter(session_worker::Column::ReapedAt.is_null())
-        } else {
-            query.filter(session_worker::Column::ReapedAt.is_not_null())
-        };
-    }
-    // Order by spawned_at DESC: most-recent activity first.
-    let items = query
-        .order_by_desc(session_worker::Column::SpawnedAt)
-        .order_by_asc(session_worker::Column::Id)
-        .all(state.db.as_ref())
+    let items = state
+        .store
+        .list_session_workers(session_ids, session_filter, plugin_filter, params.live)
         .await?;
     Ok(Json(ListResponse::from_vec(items)))
 }
@@ -485,10 +431,11 @@ async fn get_session_worker(
     Path((tenant_name, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     check_tenant_consistency(&headers, &tenant_name)?;
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid session_worker id", err))?;
-    let row = session_worker::Entity::find_by_id(id)
-        .one(state.db.as_ref())
+    let row = state
+        .store
+        .get_session_worker(id)
         .await?
         .or_not_found("session_worker", format!("no session_worker with id {id}"))?;
     // Ownership check: worker must link to a session owned by the path tenant.
@@ -500,8 +447,9 @@ async fn get_session_worker(
             format!("no session_worker with id {id} under tenant {tenant_name:?}"),
         ));
     };
-    let session = agent_session::Entity::find_by_id(session_id)
-        .one(state.db.as_ref())
+    let session = state
+        .store
+        .get_agent_session(session_id)
         .await?
         .or_not_found(
             "agent_session",
@@ -516,14 +464,189 @@ async fn get_session_worker(
     Ok(Json(row))
 }
 
+pub(crate) async fn db_resolve_tenant_id(
+    db: &DatabaseConnection,
+    tenant_name: &str,
+) -> Result<Option<Uuid>, DbErr> {
+    tenant::Entity::find()
+        .filter(tenant::Column::Name.eq(tenant_name))
+        .one(db)
+        .await
+        .map(|row| row.map(|t| t.id))
+}
+
+pub(crate) async fn db_list_tenants(db: &DatabaseConnection) -> Result<Vec<tenant::Model>, DbErr> {
+    tenant::Entity::find()
+        .order_by_asc(tenant::Column::Name)
+        .all(db)
+        .await
+}
+
+pub(crate) async fn db_get_tenant(
+    db: &DatabaseConnection,
+    id: Uuid,
+) -> Result<Option<tenant::Model>, DbErr> {
+    tenant::Entity::find_by_id(id).one(db).await
+}
+
+pub(crate) async fn db_list_workspaces(
+    db: &DatabaseConnection,
+    tenant_id: Uuid,
+    workspace_id: Option<Uuid>,
+) -> Result<Vec<workspace::Model>, DbErr> {
+    let mut query = workspace::Entity::find().filter(workspace::Column::TenantId.eq(tenant_id));
+    if let Some(ws_id) = workspace_id {
+        query = query.filter(workspace::Column::Id.eq(ws_id));
+    }
+    query.order_by_asc(workspace::Column::Name).all(db).await
+}
+
+pub(crate) async fn db_get_workspace(
+    db: &DatabaseConnection,
+    id: Uuid,
+) -> Result<Option<workspace::Model>, DbErr> {
+    workspace::Entity::find_by_id(id).one(db).await
+}
+
+pub(crate) async fn db_list_plugins(db: &DatabaseConnection) -> Result<Vec<plugin::Model>, DbErr> {
+    plugin::Entity::find()
+        .order_by_asc(plugin::Column::Name)
+        .all(db)
+        .await
+}
+
+pub(crate) async fn db_get_plugin(
+    db: &DatabaseConnection,
+    id: Uuid,
+) -> Result<Option<plugin::Model>, DbErr> {
+    plugin::Entity::find_by_id(id).one(db).await
+}
+
+pub(crate) async fn db_list_workspace_ids_for_tenant(
+    db: &DatabaseConnection,
+    tenant_id: Uuid,
+) -> Result<Vec<Uuid>, DbErr> {
+    workspace::Entity::find()
+        .filter(workspace::Column::TenantId.eq(tenant_id))
+        .all(db)
+        .await
+        .map(|rows| rows.into_iter().map(|w| w.id).collect())
+}
+
+pub(crate) async fn db_list_workspace_plugins(
+    db: &DatabaseConnection,
+    workspace_ids: Vec<Uuid>,
+    workspace_id: Option<Uuid>,
+    plugin_id: Option<Uuid>,
+) -> Result<Vec<workspace_plugin::Model>, DbErr> {
+    let mut query = workspace_plugin::Entity::find()
+        .filter(workspace_plugin::Column::WorkspaceId.is_in(workspace_ids));
+    if let Some(id) = workspace_id {
+        query = query.filter(workspace_plugin::Column::WorkspaceId.eq(id));
+    }
+    if let Some(id) = plugin_id {
+        query = query.filter(workspace_plugin::Column::PluginId.eq(id));
+    }
+    query
+        .order_by_asc(workspace_plugin::Column::WorkspaceId)
+        .order_by_asc(workspace_plugin::Column::PluginId)
+        .all(db)
+        .await
+}
+
+pub(crate) async fn db_get_workspace_plugin(
+    db: &DatabaseConnection,
+    workspace_id: Uuid,
+    plugin_id: Uuid,
+) -> Result<Option<workspace_plugin::Model>, DbErr> {
+    workspace_plugin::Entity::find_by_id((workspace_id, plugin_id))
+        .one(db)
+        .await
+}
+
+pub(crate) async fn db_list_agent_sessions(
+    db: &DatabaseConnection,
+    tenant_id: Uuid,
+    workspace_id: Option<Uuid>,
+    state: Option<String>,
+) -> Result<Vec<agent_session::Model>, DbErr> {
+    let mut query =
+        agent_session::Entity::find().filter(agent_session::Column::TenantId.eq(tenant_id));
+    if let Some(id) = workspace_id {
+        query = query.filter(agent_session::Column::WorkspaceId.eq(id));
+    }
+    if let Some(state) = state {
+        query = query.filter(agent_session::Column::State.eq(state));
+    }
+    query
+        .order_by_desc(agent_session::Column::LastActiveAt)
+        .order_by_asc(agent_session::Column::Id)
+        .all(db)
+        .await
+}
+
+pub(crate) async fn db_get_agent_session(
+    db: &DatabaseConnection,
+    id: Uuid,
+) -> Result<Option<agent_session::Model>, DbErr> {
+    agent_session::Entity::find_by_id(id).one(db).await
+}
+
+pub(crate) async fn db_list_agent_session_ids_for_tenant(
+    db: &DatabaseConnection,
+    tenant_id: Uuid,
+) -> Result<Vec<Uuid>, DbErr> {
+    agent_session::Entity::find()
+        .filter(agent_session::Column::TenantId.eq(tenant_id))
+        .all(db)
+        .await
+        .map(|rows| rows.into_iter().map(|s| s.id).collect())
+}
+
+pub(crate) async fn db_list_session_workers(
+    db: &DatabaseConnection,
+    session_ids: Vec<Uuid>,
+    agent_session_id: Option<Uuid>,
+    plugin_id: Option<Uuid>,
+    live: Option<bool>,
+) -> Result<Vec<session_worker::Model>, DbErr> {
+    let mut query = session_worker::Entity::find()
+        .filter(session_worker::Column::AgentSessionId.is_in(session_ids));
+    if let Some(id) = agent_session_id {
+        query = query.filter(session_worker::Column::AgentSessionId.eq(id));
+    }
+    if let Some(id) = plugin_id {
+        query = query.filter(session_worker::Column::PluginId.eq(id));
+    }
+    if let Some(live) = live {
+        query = if live {
+            query.filter(session_worker::Column::ReapedAt.is_null())
+        } else {
+            query.filter(session_worker::Column::ReapedAt.is_not_null())
+        };
+    }
+    query
+        .order_by_desc(session_worker::Column::SpawnedAt)
+        .order_by_asc(session_worker::Column::Id)
+        .all(db)
+        .await
+}
+
+pub(crate) async fn db_get_session_worker(
+    db: &DatabaseConnection,
+    id: Uuid,
+) -> Result<Option<session_worker::Model>, DbErr> {
+    session_worker::Entity::find_by_id(id).one(db).await
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::{to_bytes, Body};
     use http::{Request, StatusCode};
-    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
     use tower::ServiceExt;
 
     use super::*;
+    use crate::store::mock::MockApiStore;
 
     fn admin_get(path: &str) -> Request<Body> {
         Request::builder()
@@ -632,8 +755,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![tenant_row]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row),
         );
         let app = crate::handler::build_router(state);
 
@@ -653,10 +776,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_tenants_maps_db_errors_to_internal() {
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_errors([DbErr::Custom("boom".to_string())]),
-        );
+        let state =
+            crate::test_support::app_state_with_mock_store(MockApiStore::always_error("boom"));
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -674,9 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tenants_requires_admin_header() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -690,9 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_tenant_invalid_uuid_is_bad_request() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -707,9 +824,8 @@ mod tests {
     #[tokio::test]
     async fn get_tenant_returns_mocked_row() {
         let id = Uuid::new_v4();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(id, "phlax")]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row(id, "phlax")),
         );
         let app = crate::handler::build_router(state);
 
@@ -725,9 +841,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_workspaces_requires_tenant_header_match() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -742,9 +856,8 @@ mod tests {
     #[tokio::test]
     async fn list_workspaces_invalid_workspace_id_is_bad_request() {
         let tenant_id = Uuid::new_v4();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(tenant_id, "phlax")]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row(tenant_id, "phlax")),
         );
         let app = crate::handler::build_router(state);
 
@@ -765,10 +878,10 @@ mod tests {
         let path_tenant_id = Uuid::new_v4();
         let other_tenant_id = Uuid::new_v4();
         let workspace_id = Uuid::new_v4();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(path_tenant_id, "phlax")]])
-                .append_query_results([vec![workspace_row(workspace_id, other_tenant_id, "mcp")]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(path_tenant_id, "phlax"))
+                .with_workspace(workspace_row(workspace_id, other_tenant_id, "mcp")),
         );
         let app = crate::handler::build_router(state);
 
@@ -786,9 +899,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_plugins_requires_admin_header() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -803,9 +914,8 @@ mod tests {
     #[tokio::test]
     async fn get_plugin_returns_mocked_row() {
         let plugin_id = Uuid::new_v4();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_plugin(plugin_row(plugin_id, "mcp-fetch")),
         );
         let app = crate::handler::build_router(state);
 
@@ -821,9 +931,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_workspace_plugins_invalid_query_param_is_bad_request() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -841,10 +949,8 @@ mod tests {
     #[tokio::test]
     async fn list_workspace_plugins_empty_workspace_set_short_circuits() {
         let tenant_id = Uuid::new_v4();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
-                .append_query_results([Vec::<workspace::Model>::new()]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row(tenant_id, "phlax")),
         );
         let app = crate::handler::build_router(state);
 
@@ -860,9 +966,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_workspace_plugin_invalid_workspace_uuid_is_bad_request() {
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(Uuid::new_v4(), "phlax")]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row(Uuid::new_v4(), "phlax")),
         );
         let app = crate::handler::build_router(state);
 
@@ -880,9 +985,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_agent_sessions_invalid_workspace_id_is_bad_request() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -903,14 +1006,10 @@ mod tests {
         let other_tenant_id = Uuid::new_v4();
         let workspace_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(path_tenant_id, "phlax")]])
-                .append_query_results([vec![agent_session_row(
-                    session_id,
-                    other_tenant_id,
-                    workspace_id,
-                )]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(path_tenant_id, "phlax"))
+                .with_agent_session(agent_session_row(session_id, other_tenant_id, workspace_id)),
         );
         let app = crate::handler::build_router(state);
 
@@ -928,9 +1027,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_session_workers_invalid_plugin_id_is_bad_request() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -948,10 +1045,8 @@ mod tests {
     #[tokio::test]
     async fn list_session_workers_empty_session_set_short_circuits() {
         let tenant_id = Uuid::new_v4();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
-                .append_query_results([Vec::<agent_session::Model>::new()]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row(tenant_id, "phlax")),
         );
         let app = crate::handler::build_router(state);
 
@@ -974,19 +1069,11 @@ mod tests {
         let session_id = Uuid::new_v4();
         let workspace_id = Uuid::new_v4();
 
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(path_tenant_id, "phlax")]])
-                .append_query_results([vec![session_worker_row(
-                    worker_id,
-                    Some(session_id),
-                    plugin_id,
-                )]])
-                .append_query_results([vec![agent_session_row(
-                    session_id,
-                    other_tenant_id,
-                    workspace_id,
-                )]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(path_tenant_id, "phlax"))
+                .with_session_worker(session_worker_row(worker_id, Some(session_id), plugin_id))
+                .with_agent_session(agent_session_row(session_id, other_tenant_id, workspace_id)),
         );
         let app = crate::handler::build_router(state);
 
