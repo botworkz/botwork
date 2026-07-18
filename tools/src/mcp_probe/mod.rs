@@ -257,12 +257,7 @@ pub fn run(argv: &[String]) -> Result<i32, McpProbeError> {
                 .as_deref()
                 .expect("--out required in generate mode (validated in Args::from_argv)");
             patch::patch_image(&args.image_in, dest, &labels)?;
-            info!(
-                n_labels = labels.len(),
-                dest,
-                "{}",
-                generate_success_message(dest, labels.len())
-            );
+            info!("{}", generate_success_message(dest, labels.len()));
             Ok(0)
         }
         Mode::Verify => {
@@ -271,12 +266,7 @@ pub fn run(argv: &[String]) -> Result<i32, McpProbeError> {
             // produced. Drift surfaces as exit 6, not exit 0 — so
             // CI can wire the action's status straight to a gate.
             verify::verify(&args.image_in, &args.runtime, &labels)?;
-            info!(
-                n_labels = labels.len(),
-                image = %args.image_in,
-                "{}",
-                verify_success_message(&args.image_in, labels.len())
-            );
+            info!("{}", verify_success_message(&args.image_in, labels.len()));
             Ok(0)
         }
     }

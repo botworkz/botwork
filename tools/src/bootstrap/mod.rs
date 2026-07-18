@@ -173,18 +173,7 @@ pub fn run(argv: &[String]) -> Result<i32, BootstrapError> {
 }
 
 fn print_summary(outcome: &ApplyOutcome, dry_run: bool) {
-    info!(
-        tenants_created = outcome.tenants_created,
-        tenants_total = outcome.tenants_total,
-        workspaces_created = outcome.workspaces_created,
-        workspaces_total = outcome.workspaces_total,
-        plugins_created = outcome.plugins_created,
-        plugins_total = outcome.plugins_total,
-        bindings_created = outcome.bindings_created,
-        bindings_total = outcome.bindings_total,
-        "{}",
-        summary_message(outcome, dry_run)
-    );
+    info!("{}", summary_message(outcome, dry_run));
 }
 
 fn summary_message(outcome: &ApplyOutcome, dry_run: bool) -> String {
