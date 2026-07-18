@@ -1,0 +1,74 @@
+[package]
+name = "botwork-opaque-handshake"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "botwork_opaque_handshake"
+path = "src/lib.rs"
+
+[dependencies]
+# OPAQUE PAKE primitive.
+#
+# Pinned to the 3.x line. The issue body asked for `opaque-ke = "2"`,
+# but 2.x transitively requires `voprf 0.4.0-pre.3`, which fails to
+# build on a modern rustc (`missing lifetime specifier` in
+# `voprf::serialization::take_ext`). 3.0.0 is the first published
+# release that builds end-to-end on this workspace's toolchain
+# (rustc 1.96 here, opaque-ke MSRV 1.74). The CipherSuite shape and
+# the high-level `ServerSetup` / `ClientLogin` / `ServerLogin` /
+# `ServerRegistration` / `ClientRegistration` API are unchanged
+# between 2.0.0 and 3.0.0 — 3.0.0 syncs to draft-irtf-cfrg-opaque-16
+# (vs draft-10 in 2.0.0), pulls argon2 / curve25519-dalek / voprf
+# forward to their stable releases, bumps MSRV to 1.74, and renames
+# x25519 → curve25519. None of those move the surface this crate
+# touches.
+#
+# Feature selection (default-features disabled and re-enabled
+# explicitly):
+#   * `ristretto255-voprf` — selects ristretto255 + SHA-512 OPRF and
+#     wires voprf's ristretto255 ciphersuite. Pulls in the
+#     `ristretto255` feature transitively.
+#   * `argon2`             — Argon2id KSF impl in `opaque_ke::ksf`.
+#   * `serde`              — derive serde on the message types so
+#     callers can persist `PasswordFile` / `ServerSetup` without
+#     reaching into private fields.
+opaque-ke = { version = "3", default-features = false, features = [
+    "ristretto255-voprf",
+    "argon2",
+    "serde",
+] }
+# `argon2` 0.5 — matches both opaque-ke 3.x's `Ksf` impl
+# (`impl Ksf for argon2::Argon2<'_>`) AND the version the vault crate
+# already pins. Naming `argon2::Argon2<'static>` in our
+# `CipherSuite::Ksf` assignment must resolve to the same crate
+# version opaque-ke compiled its trait impl against, so this stays
+# strictly in lockstep with the opaque-ke pin above.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+# Re-exported from opaque-ke transitively; pinned explicitly because
+# the message types expose `GenericArray<u8, _>` lengths in their
+# public signatures and we don't want a silent passive bump.
+generic-array = "0.14"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+# Constant-time byte comparison for the `SessionKey` and `ExportKey`
+# `PartialEq` impls. Comparing two derived keys with slice `==` is a
+# textbook timing side channel (it short-circuits on the first
+# non-matching byte). `subtle::ConstantTimeEq` makes the comparison
+# constant-time at the type level so callers can write `k1 == k2`
+# without thinking about it. `subtle` is already in the workspace's
+# resolved graph (transitive via opaque-ke → curve25519-dalek →
+# voprf, and a direct dep of `botwork-vault`), so naming it here
+# doesn't widen the dependency closure — it just locks the API of
+# `SessionKey` / `ExportKey` against an accidental future drop of
+# the transitive.
+subtle = "2"
+thiserror = "2"
+# Wraps every key-material byte buffer the crate exposes.
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true
