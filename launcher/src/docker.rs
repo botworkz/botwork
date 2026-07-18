@@ -381,6 +381,28 @@ mod tests {
         sensitive_env_stdin, ContainerLaunch,
     };
 
+    fn minimal_launch<'a>(
+        name: &'a str,
+        env: &'a [(String, String)],
+        labels: &'a [(String, String)],
+    ) -> ContainerLaunch<'a> {
+        ContainerLaunch {
+            name,
+            image: "botwork/mcp-echo:local",
+            network: "botwork",
+            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            with_workspace: false,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            pids_limit: 256,
+            cpu_limit: "1.0",
+            memory_limit: "512m",
+            read_only_rootfs: false,
+            env,
+            labels,
+        }
+    }
+
     #[test]
     fn docker_stderr_classification_matches_python_behavior() {
         assert!(is_no_such_object(
@@ -391,6 +413,20 @@ mod tests {
         ));
         assert!(!is_no_such_object("permission denied"));
         assert!(!is_no_such_container("cannot connect to docker daemon"));
+    }
+
+    #[test]
+    fn is_no_such_object_is_case_insensitive() {
+        assert!(is_no_such_object("NO SUCH OBJECT: abc"));
+        assert!(is_no_such_object("no such object"));
+        assert!(!is_no_such_object("object not found"));
+    }
+
+    #[test]
+    fn is_no_such_container_is_case_insensitive() {
+        assert!(is_no_such_container("NO SUCH CONTAINER: abc"));
+        assert!(is_no_such_container("no such container"));
+        assert!(!is_no_such_container("container not found"));
     }
 
     #[test]
@@ -768,5 +804,56 @@ mod tests {
                 "must accept network name {ok:?}"
             );
         }
+    }
+
+    // ── docker_run_args: without workspace / without read-only ───────────────
+
+    #[test]
+    fn docker_run_args_no_workspace_no_readonly() {
+        let args = docker_run_args(&minimal_launch("mcp_session_aabbccddeeff", &[], &[]));
+        // Without workspace there must be no -v flag.
+        assert!(
+            !args.contains(&"-v".to_string()),
+            "-v must not appear when with_workspace is false"
+        );
+        // Without read-only rootfs there must be no --read-only flag.
+        assert!(
+            !args.contains(&"--read-only".to_string()),
+            "--read-only must not appear when read_only_rootfs is false"
+        );
+    }
+
+    #[test]
+    fn docker_run_args_image_is_last_positional() {
+        // docker is strict: any arg after the image is the container CMD.
+        let args = docker_run_args(&minimal_launch("mcp_session_aabbccddeeff", &[], &[]));
+        assert_eq!(
+            args.last().expect("args must not be empty"),
+            "botwork/mcp-echo:local",
+            "image must be the last element in the arg vector"
+        );
+    }
+
+    #[test]
+    fn docker_run_args_starts_with_docker_run() {
+        let args = docker_run_args(&minimal_launch("mcp_session_aabbccddeeff", &[], &[]));
+        assert_eq!(args[0], "docker");
+        assert_eq!(args[1], "run");
+    }
+
+    #[test]
+    fn sensitive_env_stdin_empty_for_no_vars() {
+        let content = sensitive_env_stdin(&[]);
+        assert!(content.is_empty(), "stdin must be empty when env is empty");
+    }
+
+    #[test]
+    fn sensitive_env_stdin_empty_for_non_sensitive_only() {
+        let env = vec![("FOO".to_string(), "bar".to_string())];
+        let content = sensitive_env_stdin(&env);
+        assert!(
+            content.is_empty(),
+            "stdin must be empty when there are no sensitive vars"
+        );
     }
 }
