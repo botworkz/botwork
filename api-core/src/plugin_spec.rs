@@ -949,4 +949,119 @@ mod tests {
             .unwrap()
             .is_none());
     }
+
+    #[test]
+    fn validates_name_image_and_port_boundaries() {
+        let cases = [
+            ("", "image: ghcr.io/example/p:1.0\negress: all\n"),
+            ("NotValid", "image: ghcr.io/example/p:1.0\negress: all\n"),
+            ("p", "egress: all\n"),
+            ("p", "image: \"\"\negress: all\n"),
+            ("p", "image: ghcr.io/example/p:1.0\negress: all\nport: 0\n"),
+            (
+                "p",
+                "image: ghcr.io/example/p:1.0\negress: all\nport: 65536\n",
+            ),
+        ];
+        for (name, yaml) in cases {
+            let err = validate_one(&raw(name, yaml)).unwrap_err();
+            assert!(matches!(
+                err,
+                ValidationError::PluginInvalid { .. } | ValidationError::EmptyName(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn env_rejects_invalid_name_shapes_and_values() {
+        let mut oversized = "x".repeat(MAX_ENV_VALUE_BYTES + 1);
+        oversized.push('x');
+        let cases = [
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  lower: x\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  PATH: x\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  DOCKER_HOST: x\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  X: true\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  X: 1\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  X:\n    nested: true\n",
+        ];
+        for yaml in cases {
+            assert!(
+                validate_one(&raw("p", yaml)).is_err(),
+                "case should fail: {yaml}"
+            );
+        }
+        let too_big = raw(
+            "p",
+            &format!("image: ghcr.io/example/p:1.0\negress: all\nenv:\n  X: \"{oversized}\"\n"),
+        );
+        assert!(validate_one(&too_big).is_err());
+    }
+
+    #[test]
+    fn resources_reject_invalid_shapes_and_ranges() {
+        let cases = [
+            "image: ghcr.io/example/p:1.0\negress: all\nresources: []\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  gpu: 1\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  cpus: \"\"\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  pids: 0\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  pids: 4294967296\n",
+            "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  pids: not-a-number\n",
+        ];
+        for yaml in cases {
+            assert!(
+                validate_one(&raw("p", yaml)).is_err(),
+                "case should fail: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn egress_rejects_invalid_mapping_forms_table_driven() {
+        let cases = [
+            "image: ghcr.io/example/p:1.0\negress: maybe\n",
+            "image: ghcr.io/example/p:1.0\negress: 5\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  mode: all\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  other: true\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow: foo\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: \"\"\n    ports: [443]\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: ex ample.com\n    ports: [443]\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: https://example.com\n    ports: [443]\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com/path\n    ports: [443]\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com\n    ports: []\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com\n    ports: [0]\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com\n    ports: [65536]\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com\n    ports: [\"443\"]\n",
+        ];
+        for yaml in cases {
+            assert!(
+                validate_one(&raw("p", yaml)).is_err(),
+                "case should fail: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn egress_rejects_oversized_serialized_json() {
+        let host = "x".repeat(MAX_ENV_VALUE_BYTES + 128);
+        let r = raw(
+            "p",
+            &format!(
+                "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: {host}\n    ports: [443]\n"
+            ),
+        );
+        assert!(validate_one(&r).is_err());
+    }
+
+    #[test]
+    fn binding_config_rejects_non_object_values() {
+        for yaml in ["1", "[]", "\"x\"", "true"] {
+            let raw_val: serde_yaml::Value = serde_yaml::from_str(yaml).expect("parse yaml value");
+            let err = validate_workspace_plugin_config("ctx", Some(&raw_val)).unwrap_err();
+            assert!(
+                matches!(err, ValidationError::BindingInvalid { .. }),
+                "{yaml}"
+            );
+        }
+    }
 }

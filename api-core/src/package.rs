@@ -486,6 +486,55 @@ mod tests {
     }
 
     #[test]
+    fn spill_rejects_blank_include_entries() {
+        let yaml = minimal_yaml("");
+        let mut p = parse(&yaml).expect("parse");
+        p.spill = SpillEntry {
+            mode: SpillMode::Always,
+            threshold_bytes: None,
+            include_methods: Some(vec!["tools/call".to_string(), " ".to_string()]),
+            include_tools: None,
+        };
+        assert!(matches!(
+            validate_package(&p).unwrap_err(),
+            ValidationError::PackageInvalid { .. }
+        ));
+
+        p.spill = SpillEntry {
+            mode: SpillMode::Always,
+            threshold_bytes: None,
+            include_methods: None,
+            include_tools: Some(vec!["fetch".to_string(), "".to_string()]),
+        };
+        assert!(matches!(
+            validate_package(&p).unwrap_err(),
+            ValidationError::PackageInvalid { .. }
+        ));
+    }
+
+    #[test]
+    fn spill_size_accepts_threshold_and_allowlists() {
+        let yaml = minimal_yaml("");
+        let mut p = parse(&yaml).expect("parse");
+        p.spill = SpillEntry {
+            mode: SpillMode::Size,
+            threshold_bytes: Some(123),
+            include_methods: Some(vec!["tools/call".to_string()]),
+            include_tools: Some(vec!["fetch".to_string()]),
+        };
+        let validated = validate_package(&p).expect("validate");
+        assert_eq!(validated.spill.threshold_bytes, Some(123));
+        assert_eq!(
+            validated.spill.include_methods,
+            Some(vec!["tools/call".to_string()])
+        );
+        assert_eq!(
+            validated.spill.include_tools,
+            Some(vec!["fetch".to_string()])
+        );
+    }
+
+    #[test]
     fn package_default_path_is_slash_mcp_not_slash() {
         // RFE-stated divergence from bootstrap.yaml plugin defaults
         // (which use `/`). Pinning the default here prevents a
