@@ -244,3 +244,179 @@ fn json_response(status: StatusCode, body: &'static str) -> Response<Full<Bytes>
         .body(Full::new(Bytes::from(body)))
         .expect("response builder")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::Mutex;
+
+    use super::*;
+    use crate::{AppState, TransportState, UpstreamAuth};
+
+    fn bare_state() -> AppState {
+        AppState {
+            transport_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_init: Arc::new(Mutex::new(HashMap::new())),
+            launcher_socket_path: "/tmp/exit-listener-unit-launcher.sock".to_string(),
+            auth_broker_url: "http://127.0.0.1:1".to_string(),
+            config_broker_endpoint: "http://127.0.0.1:1".to_string(),
+            control_plane_endpoint: "http://127.0.0.1:1".to_string(),
+            tombstones: Arc::new(Mutex::new(HashMap::new())),
+            liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+            stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+            disconnect_grace: Duration::from_secs(300),
+            agent_session_writer: None,
+            session_worker_writer: None,
+            db: None,
+        }
+    }
+
+    fn sample_transport(container_name: &str) -> TransportState {
+        TransportState {
+            container_name: container_name.to_string(),
+            container_ip: "10.0.0.1".to_string(),
+            tenant_name: "acme".to_string(),
+            workspace: "mcp".to_string(),
+            plugin_name: "mcp-bash".to_string(),
+            staging_token: "tok-abc".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::None,
+            upstream_authorization: None,
+            agent_id: None,
+            egress_policy: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_container_exit_unknown_container_returns_404() {
+        let state = bare_state();
+        let resp = handle_container_exit(&state, "nonexistent-container", "die", None)
+            .await
+            .expect("no error");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handle_container_exit_known_container_returns_200() {
+        let state = bare_state();
+        let transport = sample_transport("mcp-session-abc");
+        state
+            .transport_sessions
+            .lock()
+            .await
+            .insert("sess-123".to_string(), transport);
+
+        let resp = handle_container_exit(&state, "mcp-session-abc", "die", Some(0))
+            .await
+            .expect("no error");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn handle_container_exit_removes_transport_and_tombstones_session() {
+        let state = bare_state();
+        let transport = sample_transport("mcp-session-xyz");
+        state
+            .transport_sessions
+            .lock()
+            .await
+            .insert("sess-xyz".to_string(), transport);
+
+        handle_container_exit(&state, "mcp-session-xyz", "die", None)
+            .await
+            .expect("no error");
+
+        // Transport entry must be removed.
+        assert!(
+            !state
+                .transport_sessions
+                .lock()
+                .await
+                .contains_key("sess-xyz"),
+            "transport should be removed"
+        );
+        // Tombstone must be set.
+        assert!(
+            state.tombstones.lock().await.contains_key("sess-xyz"),
+            "tombstone should be set"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_container_exit_tombstone_expiry_is_in_the_future() {
+        let state = bare_state();
+        let transport = sample_transport("mcp-session-exp");
+        state
+            .transport_sessions
+            .lock()
+            .await
+            .insert("sess-exp".to_string(), transport);
+
+        handle_container_exit(&state, "mcp-session-exp", "die", None)
+            .await
+            .expect("no error");
+
+        let expiry = state
+            .tombstones
+            .lock()
+            .await
+            .get("sess-exp")
+            .copied()
+            .expect("tombstone must exist");
+        assert!(expiry > Instant::now(), "tombstone expiry should be future");
+    }
+
+    #[tokio::test]
+    async fn handle_container_exit_with_db_writer_calls_record_reap() {
+        use sea_orm::{DbBackend, MockDatabase, MockExecResult};
+
+        // record_reap calls find_by_container_name (1 SELECT) then UPDATE (1 EXEC)
+        let mock = MockDatabase::new(DbBackend::Postgres)
+            .append_query_results::<botwork_entity::session_worker::Model, _, _>([vec![
+                botwork_entity::session_worker::Model {
+                    id: uuid::Uuid::new_v4(),
+                    agent_session_id: None,
+                    plugin_id: uuid::Uuid::new_v4(),
+                    container_name: "mcp-session-reap".to_string(),
+                    container_ip: "10.0.0.2".to_string(),
+                    mcp_session_id: "sess-reap-db".to_string(),
+                    spawned_at: chrono::Utc::now(),
+                    reaped_at: None,
+                },
+            ]])
+            .append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }]);
+
+        let mut state = bare_state();
+        state.session_worker_writer = Some(Arc::new(
+            crate::test_support::mock_session_worker_writer(mock),
+        ));
+
+        let transport = sample_transport("mcp-session-reap");
+        state
+            .transport_sessions
+            .lock()
+            .await
+            .insert("sess-reap-db".to_string(), transport);
+
+        let resp = handle_container_exit(&state, "mcp-session-reap", "die", Some(1))
+            .await
+            .expect("no error");
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Transport should be gone.
+        assert!(
+            !state
+                .transport_sessions
+                .lock()
+                .await
+                .contains_key("sess-reap-db"),
+            "transport removed after reap"
+        );
+    }
+}

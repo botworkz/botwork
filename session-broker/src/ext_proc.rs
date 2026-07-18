@@ -2006,7 +2006,9 @@ mod tests {
         LOG_CAPTURE_LOCK
             .get_or_init(|| StdMutex::new(()))
             .lock()
-            .expect("lock log capture guard")
+            // Recover from poisoning: if a prior test panicked while holding
+            // this lock, the data (a unit `()`) is still valid and safe to use.
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
@@ -2498,5 +2500,1349 @@ mod tests {
         let logs = take_log_capture().join("\n");
         assert!(logs.contains("session="));
         assert!(logs.contains("upstream_auth=none stripped"));
+    }
+
+    // ── transport helpers ─────────────────────────────────────────────────────
+
+    fn sample_transport_state() -> TransportState {
+        TransportState {
+            container_name: "mcp_session_test".to_string(),
+            container_ip: "10.0.0.10".to_string(),
+            staging_token: "tok1".to_string(),
+            tenant_name: "acme".to_string(),
+            workspace: "mcp".to_string(),
+            plugin_name: "mcp-bash".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::None,
+            upstream_authorization: None,
+            agent_id: None,
+            egress_policy: None,
+        }
+    }
+
+    fn make_headers(
+        pairs: &[(&str, &str)],
+    ) -> envoy_proto::envoy::service::ext_proc::v3::HttpHeaders {
+        use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
+        envoy_proto::envoy::service::ext_proc::v3::HttpHeaders {
+            headers: Some(HeaderMap {
+                headers: pairs
+                    .iter()
+                    .map(|(k, v)| HeaderValue {
+                        key: k.to_string(),
+                        value: v.to_string(),
+                        raw_value: Vec::new(),
+                    })
+                    .collect(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn make_body(body: &[u8], end_of_stream: bool) -> HttpBody {
+        HttpBody {
+            body: body.to_vec(),
+            end_of_stream,
+            ..Default::default()
+        }
+    }
+
+    fn immediate_status(resp: &ProcessingResponse) -> i32 {
+        match &resp.response {
+            Some(processing_response::Response::ImmediateResponse(ir)) => {
+                ir.status.as_ref().map(|s| s.code).unwrap_or(0)
+            }
+            _ => -1,
+        }
+    }
+
+    fn is_continue_request_headers(resp: &ProcessingResponse) -> bool {
+        matches!(
+            resp.response,
+            Some(processing_response::Response::RequestHeaders(_))
+        )
+    }
+
+    fn is_continue_request_body(resp: &ProcessingResponse) -> bool {
+        matches!(
+            resp.response,
+            Some(processing_response::Response::RequestBody(_))
+        )
+    }
+
+    fn is_continue_response_headers(resp: &ProcessingResponse) -> bool {
+        matches!(
+            resp.response,
+            Some(processing_response::Response::ResponseHeaders(_))
+        )
+    }
+
+    async fn seed_transport(state: &AppState, mcp_session_id: &str, transport: TransportState) {
+        state
+            .transport_sessions
+            .lock()
+            .await
+            .insert(mcp_session_id.to_string(), transport);
+    }
+
+    // ── handle_request_headers: missing / invalid tenant ─────────────────────
+
+    #[tokio::test]
+    async fn request_headers_missing_tenant_returns_401() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[(":method", "POST"), (":path", "/acme/mcp/mcp-bash")]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 401);
+    }
+
+    #[tokio::test]
+    async fn request_headers_invalid_tenant_returns_400() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "INVALID_TENANT!!"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 400);
+    }
+
+    // ── handle_request_headers: GET path ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn request_headers_get_missing_session_id_returns_400() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "GET"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 400);
+    }
+
+    #[tokio::test]
+    async fn request_headers_get_tombstoned_session_returns_404() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        // Tombstone the session
+        {
+            let mut t = state.tombstones.lock().await;
+            t.insert(
+                "sess-tombstoned".to_string(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "GET"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-tombstoned"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 404);
+    }
+
+    #[tokio::test]
+    async fn request_headers_get_unknown_session_returns_404() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "GET"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-unknown"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 404);
+    }
+
+    #[tokio::test]
+    async fn request_headers_get_tenant_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "other-tenant".to_string(); // different from x-botwork-tenant
+        seed_transport(&state, "sess-1", transport).await;
+        // Seed liveness so liveness_bump doesn't panic
+        state.stream_liveness.lock().await.insert(
+            "sess-1".to_string(),
+            Arc::new(crate::SessionLiveness::default()),
+        );
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "GET"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-1"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    async fn request_headers_get_workspace_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "different-ws".to_string(); // path has "mcp"
+        seed_transport(&state, "sess-ws-mismatch", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "GET"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-ws-mismatch"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    async fn request_headers_get_path_tenant_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "mcp".to_string();
+        seed_transport(&state, "sess-ptmm", transport).await;
+
+        let mut stream = PerStreamState::default();
+        // x-botwork-tenant says "acme" but path says "other-tenant"
+        let msg = make_headers(&[
+            (":method", "GET"),
+            (":path", "/other-tenant/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-ptmm"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    async fn request_headers_get_known_session_routes() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "mcp".to_string();
+        transport.plugin_name = "mcp-bash".to_string();
+        seed_transport(&state, "sess-get-ok", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "GET"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-get-ok"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert!(
+            is_continue_request_headers(&resp),
+            "expected RequestHeaders route response"
+        );
+        // Liveness should have been bumped
+        let liveness = state.stream_liveness.lock().await;
+        assert!(liveness.contains_key("sess-get-ok"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn request_headers_get_different_plugin_name_logs_but_routes() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "mcp".to_string();
+        transport.plugin_name = "mcp-python".to_string(); // bound to different plugin
+        seed_transport(&state, "sess-plugin-diff", transport).await;
+
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let mut stream = PerStreamState::default();
+        // Path requests mcp-bash but session bound to mcp-python
+        let msg = make_headers(&[
+            (":method", "GET"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-plugin-diff"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        let logs = take_log_capture().join("\n");
+        // Should still route (log a mismatch but don't reject)
+        assert!(is_continue_request_headers(&resp));
+        assert!(
+            logs.contains("bound_plugin=mcp-python") && logs.contains("request_plugin=mcp-bash"),
+            "expected plugin mismatch log, got: {logs}"
+        );
+    }
+
+    // ── handle_request_headers: DELETE path ──────────────────────────────────
+
+    #[tokio::test]
+    async fn request_headers_delete_missing_session_id_returns_404() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "DELETE"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 404);
+    }
+
+    #[tokio::test]
+    async fn request_headers_delete_tombstoned_returns_404() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        {
+            let mut t = state.tombstones.lock().await;
+            t.insert(
+                "sess-del-tomb".to_string(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "DELETE"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-del-tomb"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 404);
+    }
+
+    #[tokio::test]
+    async fn request_headers_delete_unknown_session_returns_404() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "DELETE"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-del-unknown"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 404);
+    }
+
+    #[tokio::test]
+    async fn request_headers_delete_tenant_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "other".to_string();
+        // Seed liveness cache so liveness check passes
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-del-tmm", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "DELETE"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-del-tmm"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    async fn request_headers_delete_known_session_sets_teardown_on_response() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "mcp".to_string();
+        transport.plugin_name = "mcp-bash".to_string();
+        // Seed liveness cache so container-liveness check passes
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-del-ok", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "DELETE"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-del-ok"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert!(
+            is_continue_request_headers(&resp),
+            "expected route response"
+        );
+        assert!(
+            stream.teardown_on_response.is_some(),
+            "teardown should be armed on DELETE"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_headers_delete_workspace_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "other-ws".to_string(); // different from path "mcp"
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-del-wsmm", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "DELETE"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-del-wsmm"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    async fn request_headers_delete_path_tenant_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "mcp".to_string();
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-del-ptmm", transport).await;
+
+        let mut stream = PerStreamState::default();
+        // Path tenant ≠ header tenant
+        let msg = make_headers(&[
+            (":method", "DELETE"),
+            (":path", "/other-tenant/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-del-ptmm"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    // ── handle_request_headers: POST with existing session ───────────────────
+
+    #[tokio::test]
+    async fn request_headers_post_known_session_tombstoned_returns_404() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        {
+            let mut t = state.tombstones.lock().await;
+            t.insert(
+                "sess-post-tomb".to_string(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-post-tomb"),
+            ("content-type", "application/json"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 404);
+    }
+
+    #[tokio::test]
+    async fn request_headers_post_known_session_no_transport_returns_404() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-post-no-transport"),
+            ("content-type", "application/json"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 404);
+    }
+
+    #[tokio::test]
+    async fn request_headers_post_known_session_tenant_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "other".to_string();
+        // Seed liveness cache so liveness check passes
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-post-tmm", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-post-tmm"),
+            ("content-type", "application/json"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    async fn request_headers_post_known_session_workspace_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "other-ws".to_string();
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-post-wsmm", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-post-wsmm"),
+            ("content-type", "application/json"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    async fn request_headers_post_known_session_path_tenant_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "mcp".to_string();
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-post-ptmm", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/other-tenant/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-post-ptmm"),
+            ("content-type", "application/json"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    async fn request_headers_post_known_session_routes_ok() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "mcp".to_string();
+        transport.plugin_name = "mcp-bash".to_string();
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-post-ok", transport).await;
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-post-ok"),
+            ("content-type", "application/json"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert!(
+            is_continue_request_headers(&resp),
+            "expected route response"
+        );
+        assert_eq!(stream.liveness_session_id.as_deref(), Some("sess-post-ok"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn request_headers_post_known_session_different_plugin_logs() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.tenant_name = "acme".to_string();
+        transport.workspace = "mcp".to_string();
+        transport.plugin_name = "mcp-python".to_string();
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                transport.container_name.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        seed_transport(&state, "sess-post-diff-plugin", transport).await;
+
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("mcp-session-id", "sess-post-diff-plugin"),
+            ("content-type", "application/json"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        let logs = take_log_capture().join("\n");
+        assert!(is_continue_request_headers(&resp));
+        assert!(
+            logs.contains("mcp-python"),
+            "expected plugin mismatch log: {logs}"
+        );
+    }
+
+    // ── handle_request_headers: POST without session (new spawn) ─────────────
+
+    #[tokio::test]
+    async fn request_headers_post_no_session_invalid_path_returns_400() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme"), // not /<tenant>/<workspace>/<plugin>
+            ("x-botwork-tenant", "acme"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 400);
+    }
+
+    #[tokio::test]
+    async fn request_headers_post_no_session_invalid_workspace_returns_400() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/INVALID_WS/mcp-bash"), // uppercase invalid
+            ("x-botwork-tenant", "acme"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 400);
+    }
+
+    #[tokio::test]
+    async fn request_headers_post_no_session_tenant_mismatch_returns_403() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/other-tenant/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"), // header says acme, path says other-tenant
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        assert_eq!(immediate_status(&resp), 403);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn request_headers_post_no_session_missing_cap_returns_503() {
+        // To reach the cap check, config-broker must succeed first.
+        // Spin up a minimal TCP server that returns a valid descriptor.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock config-broker");
+        let port = listener.local_addr().unwrap().port();
+        let descriptor_json = r#"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 69\r\n\r\n{"image":"img:1","port":8000,"path":"/mcp","upstream_auth":"none"}"#;
+        let descriptor_body = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            r#"{"image":"img:1","port":8000,"path":"/mcp","upstream_auth":"none"}"#.len(),
+            r#"{"image":"img:1","port":8000,"path":"/mcp","upstream_auth":"none"}"#
+        );
+        let _ = descriptor_json; // suppress warning
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = stream.write_all(descriptor_body.as_bytes()).await;
+            }
+        });
+        let mut state = test_app_state("p", UpstreamAuth::None);
+        state.config_broker_endpoint = format!("http://127.0.0.1:{port}");
+
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "POST"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+            ("content-type", "application/json"),
+            // deliberately no x-botwork-cap
+        ]);
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        let logs = take_log_capture().join("\n");
+        assert_eq!(immediate_status(&resp), 503, "missing cap should 503");
+        assert!(logs.contains("no_cap_on_spawn"), "expected cap log: {logs}");
+    }
+
+    // ── handle_request_headers: non-POST/GET/DELETE → continue ───────────────
+
+    #[tokio::test]
+    async fn request_headers_other_method_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[
+            (":method", "OPTIONS"),
+            (":path", "/acme/mcp/mcp-bash"),
+            ("x-botwork-tenant", "acme"),
+        ]);
+        let resp = ExternalProcessorService::handle_request_headers(&state, &mut stream, msg).await;
+        // Not POST/GET/DELETE falls through to continue
+        assert!(is_continue_request_headers(&resp));
+    }
+
+    // ── handle_request_body ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn request_body_non_post_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "GET".to_string(),
+            ..PerStreamState::default()
+        };
+        let msg = make_body(b"irrelevant", true);
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+    }
+
+    #[tokio::test]
+    async fn request_body_partial_body_continues_without_processing() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-1".to_string()),
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        let msg = make_body(b"{\"partial\":", false); // end_of_stream = false
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+        // Body accumulates even on partial chunk
+        assert!(!stream.request_body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_body_non_json_content_type_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-1".to_string()),
+            content_type_is_json: false, // not JSON
+            ..PerStreamState::default()
+        };
+        let msg = make_body(b"plain text", true);
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+    }
+
+    #[tokio::test]
+    async fn request_body_no_session_id_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: None, // no session id
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        let msg = make_body(b"{}", true);
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+    }
+
+    #[tokio::test]
+    async fn request_body_invalid_json_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-1".to_string()),
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        let msg = make_body(b"not-json{{{", true);
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+    }
+
+    #[tokio::test]
+    async fn request_body_non_object_json_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-1".to_string()),
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        let msg = make_body(b"[1,2,3]", true); // array, not object
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+    }
+
+    #[tokio::test]
+    async fn request_body_invalid_agent_session_id_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-1".to_string()),
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        // agent-session-id is a number, not a string
+        let body = br#"{"params":{"_meta":{"agent-session-id":42}}}"#;
+        let msg = make_body(body, true);
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+    }
+
+    #[tokio::test]
+    async fn request_body_no_agent_session_id_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-1".to_string()),
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        // Valid JSON object, no params at all
+        let body = br#"{"method":"tools/list"}"#;
+        let msg = make_body(body, true);
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+    }
+
+    #[tokio::test]
+    async fn request_body_session_missing_from_transport_continues() {
+        // mcp_session_id set but not in transport_sessions → no bind call
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-no-transport".to_string()),
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        let body = br#"{"params":{"_meta":{"agent-session-id":"agent-1"}}}"#;
+        let msg = make_body(body, true);
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+    }
+
+    #[tokio::test]
+    async fn request_body_agent_already_bound_skips_bind() {
+        // Transport has agent_id already set → no bind_agent call
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut transport = sample_transport_state();
+        transport.agent_id = Some("existing-agent".to_string()); // already bound
+        seed_transport(&state, "sess-already-bound", transport).await;
+
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-already-bound".to_string()),
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        let body = br#"{"params":{"_meta":{"agent-session-id":"new-agent"}}}"#;
+        let msg = make_body(body, true);
+        let resp = ExternalProcessorService::handle_request_body(&state, &mut stream, msg).await;
+        assert!(is_continue_request_body(&resp));
+        // Original agent_id should remain unchanged
+        let sessions = state.transport_sessions.lock().await;
+        let transport = sessions.get("sess-already-bound").unwrap();
+        assert_eq!(transport.agent_id.as_deref(), Some("existing-agent"));
+    }
+
+    #[tokio::test]
+    async fn request_body_chunked_accumulation() {
+        // Two chunks, only process on end_of_stream
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sess-chunk".to_string()),
+            content_type_is_json: true,
+            ..PerStreamState::default()
+        };
+        // First chunk (no EOS)
+        let chunk1 = make_body(b"{\"method\":", false);
+        let resp1 =
+            ExternalProcessorService::handle_request_body(&state, &mut stream, chunk1).await;
+        assert!(is_continue_request_body(&resp1));
+        assert_eq!(&stream.request_body, b"{\"method\":");
+
+        // Second chunk with EOS
+        let chunk2 = make_body(b"\"ping\"}", true);
+        let resp2 =
+            ExternalProcessorService::handle_request_body(&state, &mut stream, chunk2).await;
+        assert!(is_continue_request_body(&resp2));
+        assert_eq!(&stream.request_body, b"{\"method\":\"ping\"}");
+    }
+
+    // ── handle_response_headers ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn response_headers_no_pending_continues() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState::default();
+        let msg = make_headers(&[(":status", "200"), ("content-type", "application/json")]);
+        let resp =
+            ExternalProcessorService::handle_response_headers(&state, &mut stream, msg).await;
+        assert!(is_continue_response_headers(&resp));
+    }
+
+    #[tokio::test]
+    async fn response_headers_missing_mcp_session_id_discards_pending() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            stream_id: "stream-rh-1".to_string(),
+            ..PerStreamState::default()
+        };
+        // Insert a pending init
+        let pending = crate::PendingInit {
+            container_name: "mcp_session_rh1".to_string(),
+            container_ip: "10.0.0.1".to_string(),
+            staging_token: "tok".to_string(),
+            tenant_name: "acme".to_string(),
+            workspace: "mcp".to_string(),
+            plugin_name: "mcp-bash".to_string(),
+            descriptor: crate::config_broker::PluginDescriptor {
+                image: "img".to_string(),
+                port: 8000,
+                path: "/mcp".to_string(),
+                upstream_auth: crate::config_broker::UpstreamAuth::None,
+                resources: Default::default(),
+                env: Vec::new(),
+                config_blob: None,
+                egress: None,
+            },
+            upstream_authorization: None,
+            created_at: "now".to_string(),
+        };
+        state
+            .pending_init
+            .lock()
+            .await
+            .insert("stream-rh-1".to_string(), pending);
+
+        // Response headers without Mcp-Session-Id → discard pending
+        let msg = make_headers(&[(":status", "200")]);
+        let resp =
+            ExternalProcessorService::handle_response_headers(&state, &mut stream, msg).await;
+        assert!(is_continue_response_headers(&resp));
+        // pending should be removed
+        assert!(state.pending_init.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn response_headers_with_mcp_session_id_seeds_transport() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let mut stream = PerStreamState {
+            stream_id: "stream-rh-2".to_string(),
+            ..PerStreamState::default()
+        };
+        let pending = crate::PendingInit {
+            container_name: "mcp_session_rh2".to_string(),
+            container_ip: "10.0.0.2".to_string(),
+            staging_token: "tok2".to_string(),
+            tenant_name: "acme".to_string(),
+            workspace: "mcp".to_string(),
+            plugin_name: "mcp-bash".to_string(),
+            descriptor: crate::config_broker::PluginDescriptor {
+                image: "img".to_string(),
+                port: 8000,
+                path: "/mcp".to_string(),
+                upstream_auth: crate::config_broker::UpstreamAuth::None,
+                resources: Default::default(),
+                env: Vec::new(),
+                config_blob: None,
+                egress: None,
+            },
+            upstream_authorization: None,
+            created_at: "now".to_string(),
+        };
+        state
+            .pending_init
+            .lock()
+            .await
+            .insert("stream-rh-2".to_string(), pending);
+
+        let msg = make_headers(&[(":status", "200"), ("mcp-session-id", "mcp-sess-new")]);
+        let resp =
+            ExternalProcessorService::handle_response_headers(&state, &mut stream, msg).await;
+        assert!(is_continue_response_headers(&resp));
+
+        // Transport should be seeded
+        let sessions = state.transport_sessions.lock().await;
+        assert!(
+            sessions.contains_key("mcp-sess-new"),
+            "transport should be seeded"
+        );
+        let t = sessions.get("mcp-sess-new").unwrap();
+        assert_eq!(t.container_name, "mcp_session_rh2");
+        assert_eq!(t.tenant_name, "acme");
+
+        // Liveness should be bumped
+        assert_eq!(stream.liveness_session_id.as_deref(), Some("mcp-sess-new"));
+    }
+
+    #[tokio::test]
+    async fn response_headers_with_teardown_on_response_fires_teardown() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        // Seed a transport that will be torn down
+        let transport = sample_transport_state();
+        seed_transport(&state, "sess-teardown", transport).await;
+
+        let mut stream = PerStreamState {
+            teardown_on_response: Some(TeardownInfo {
+                mcp_session_id: "sess-teardown".to_string(),
+                container_name: "mcp_session_test".to_string(),
+                staging_path: "/var/lib/botwork/tenants/acme/staging/tok1".to_string(),
+            }),
+            ..PerStreamState::default()
+        };
+        let msg = make_headers(&[(":status", "200")]);
+        let resp =
+            ExternalProcessorService::handle_response_headers(&state, &mut stream, msg).await;
+        assert!(is_continue_response_headers(&resp));
+        assert!(
+            stream.teardown_on_response.is_none(),
+            "teardown_on_response should be consumed"
+        );
+        // Session should be tombstoned and removed
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    // ── is_tombstoned ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn is_tombstoned_live_tombstone_returns_true() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        {
+            let mut t = state.tombstones.lock().await;
+            t.insert(
+                "live-tomb".to_string(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        assert!(is_tombstoned(&state, "live-tomb").await);
+    }
+
+    #[tokio::test]
+    async fn is_tombstoned_expired_tombstone_returns_false_and_removes() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        {
+            let mut t = state.tombstones.lock().await;
+            // Expired: subtract duration (already in the past)
+            t.insert(
+                "expired-tomb".to_string(),
+                std::time::Instant::now() - std::time::Duration::from_secs(1),
+            );
+        }
+        assert!(!is_tombstoned(&state, "expired-tomb").await);
+        // Should have been removed
+        assert!(state.tombstones.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn is_tombstoned_unknown_returns_false() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        assert!(!is_tombstoned(&state, "unknown").await);
+    }
+
+    // ── liveness_bump / liveness_drop ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn liveness_bump_creates_entry_and_increments_counter() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        liveness_bump(&state, "sess-bump").await;
+        let liveness = state.stream_liveness.lock().await;
+        let entry = liveness.get("sess-bump").expect("entry");
+        assert_eq!(
+            entry.open_streams.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_drop_when_counter_is_one_arms_grace_timer() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        // Bump first so there's something to drop
+        liveness_bump(&state, "sess-drop-grace").await;
+        // Drop → counter 1→0 → grace timer armed
+        liveness_drop(&state, "sess-drop-grace").await;
+        let liveness = state.stream_liveness.lock().await;
+        let entry = liveness
+            .get("sess-drop-grace")
+            .expect("entry should still exist");
+        let has_handle = entry.grace_handle.lock().await.is_some();
+        assert!(has_handle, "grace timer should be armed after drop to 0");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn liveness_drop_when_counter_already_zero_logs_underflow() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        // Insert entry with counter = 0 directly
+        state.stream_liveness.lock().await.insert(
+            "sess-underflow".to_string(),
+            Arc::new(crate::SessionLiveness::default()),
+        );
+        let _guard = log_capture_guard();
+        start_log_capture();
+        // Drop without prior bump → underflow guard triggers
+        liveness_drop(&state, "sess-underflow").await;
+        let logs = take_log_capture().join("\n");
+        assert!(
+            logs.contains("underflow guard"),
+            "expected underflow log: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_drop_unknown_session_is_noop() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        // Should not panic
+        liveness_drop(&state, "sess-unknown-drop").await;
+    }
+
+    #[tokio::test]
+    async fn liveness_drop_counter_above_one_stays_above_zero() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        liveness_bump(&state, "sess-multi-stream").await;
+        liveness_bump(&state, "sess-multi-stream").await; // 2 streams
+        liveness_drop(&state, "sess-multi-stream").await; // back to 1
+        let liveness = state.stream_liveness.lock().await;
+        let entry = liveness.get("sess-multi-stream").expect("entry");
+        assert_eq!(
+            entry.open_streams.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "counter should be 1 after one drop from 2"
+        );
+        let has_handle = entry.grace_handle.lock().await.is_some();
+        assert!(!has_handle, "grace should NOT be armed when counter > 0");
+    }
+
+    #[tokio::test]
+    async fn liveness_bump_cancels_pending_grace_timer() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        liveness_bump(&state, "sess-reconnect").await;
+        liveness_drop(&state, "sess-reconnect").await; // arms grace
+                                                       // Verify grace armed
+        {
+            let liveness = state.stream_liveness.lock().await;
+            let entry = liveness.get("sess-reconnect").expect("entry");
+            assert!(
+                entry.grace_handle.lock().await.is_some(),
+                "grace should be armed"
+            );
+        }
+        // Re-bump (reconnect) → grace should be cancelled
+        liveness_bump(&state, "sess-reconnect").await;
+        {
+            let liveness = state.stream_liveness.lock().await;
+            let entry = liveness.get("sess-reconnect").expect("entry");
+            assert!(
+                entry.grace_handle.lock().await.is_none(),
+                "grace should be cancelled on reconnect"
+            );
+        }
+    }
+
+    // ── liveness_remove ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn liveness_remove_cancels_grace_and_removes_entry() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        liveness_bump(&state, "sess-remove").await;
+        liveness_drop(&state, "sess-remove").await; // arms grace
+        liveness_remove(&state, "sess-remove").await;
+        assert!(!state
+            .stream_liveness
+            .lock()
+            .await
+            .contains_key("sess-remove"));
+    }
+
+    #[tokio::test]
+    async fn liveness_remove_unknown_is_noop() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        liveness_remove(&state, "sess-remove-unknown").await; // should not panic
+    }
+
+    // ── seed_startup_liveness ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn seed_startup_liveness_arms_grace_for_recovered_sessions() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        // Seed a transport session (simulates recover_live_workers output)
+        seed_transport(&state, "recovered-sess", sample_transport_state()).await;
+        seed_startup_liveness(&state).await;
+        // A grace timer should have been armed for the session
+        let liveness = state.stream_liveness.lock().await;
+        assert!(
+            liveness.contains_key("recovered-sess"),
+            "seed_startup_liveness should create liveness entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_startup_liveness_empty_transport_map_is_noop() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        seed_startup_liveness(&state).await;
+        assert!(state.stream_liveness.lock().await.is_empty());
+    }
+
+    // ── reap_session ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reap_session_with_transport_does_teardown() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        seed_transport(&state, "sess-reap", sample_transport_state()).await;
+        reap_session(&state, "sess-reap").await;
+        // Transport should be removed (tombstoned + removed from map)
+        assert!(state.transport_sessions.lock().await.is_empty());
+        // Tombstone should be set
+        assert!(state.tombstones.lock().await.contains_key("sess-reap"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn reap_session_without_transport_logs_and_skips() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let _guard = log_capture_guard();
+        start_log_capture();
+        reap_session(&state, "sess-reap-missing").await;
+        let logs = take_log_capture().join("\n");
+        assert!(
+            logs.contains("no teardown info found"),
+            "expected skip log: {logs}"
+        );
+    }
+
+    // ── evict_sessions_for_tenant ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn evict_sessions_for_tenant_returns_zero_when_no_sessions() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        let count = evict_sessions_for_tenant(&state, "acme").await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn evict_sessions_for_tenant_evicts_matching_sessions() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        // Two sessions for "acme", one for "other"
+        let mut t1 = sample_transport_state();
+        t1.tenant_name = "acme".to_string();
+        let mut t2 = sample_transport_state();
+        t2.tenant_name = "acme".to_string();
+        t2.container_name = "mcp_session_t2".to_string();
+        let mut t3 = sample_transport_state();
+        t3.tenant_name = "other".to_string();
+        t3.container_name = "mcp_session_t3".to_string();
+        seed_transport(&state, "sess-acme-1", t1).await;
+        seed_transport(&state, "sess-acme-2", t2).await;
+        seed_transport(&state, "sess-other", t3).await;
+
+        let count = evict_sessions_for_tenant(&state, "acme").await;
+        assert_eq!(count, 2);
+        let sessions = state.transport_sessions.lock().await;
+        assert!(!sessions.contains_key("sess-acme-1"));
+        assert!(!sessions.contains_key("sess-acme-2"));
+        assert!(
+            sessions.contains_key("sess-other"),
+            "other tenant session should remain"
+        );
+    }
+
+    // ── check_container_liveness ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn check_container_liveness_cache_hit_returns_true() {
+        let state = test_app_state("p", UpstreamAuth::None);
+        {
+            let mut cache = state.liveness_cache.lock().await;
+            cache.insert(
+                "mcp_session_live".to_string(),
+                std::time::Instant::now() + std::time::Duration::from_secs(300),
+            );
+        }
+        assert!(check_container_liveness(&state, "mcp_session_live").await);
+    }
+
+    #[tokio::test]
+    async fn check_container_liveness_cache_miss_calls_docker() {
+        // Cache miss: docker inspect runs (returns false for non-existent container
+        // if docker available, or true if docker unavailable per unwrap_or(true)).
+        let state = test_app_state("p", UpstreamAuth::None);
+        // No cache entry → falls through to docker inspect
+        let result = check_container_liveness(&state, "mcp_session_definitely_nonexistent").await;
+        // If docker not available → true (unwrap_or(true)). If docker available → false.
+        // Either way, function is total (doesn't panic).
+        let _ = result;
+    }
+
+    // ── utc_now / staging_path / upstream helpers ─────────────────────────────
+
+    #[test]
+    fn utc_now_is_formatted_correctly() {
+        let s = utc_now();
+        // Should match %Y-%m-%dT%H:%M:%SZ
+        assert!(s.ends_with('Z'), "utc_now should end with Z");
+        assert!(s.len() == 20, "utc_now should be 20 chars");
+    }
+
+    #[test]
+    fn staging_path_format() {
+        let p = staging_path("acme", "token123");
+        assert_eq!(p, "/var/lib/botwork/tenants/acme/staging/token123");
+    }
+
+    #[test]
+    fn agent_dir_format() {
+        let d = agent_dir("acme", "mcp", "agent-1");
+        assert_eq!(
+            d,
+            "/var/lib/botwork/tenants/acme/workspaces/mcp/agents/agent-1"
+        );
+    }
+
+    #[test]
+    fn upstream_format() {
+        assert_eq!(upstream("mcp_session_abc", 8000), "mcp_session_abc:8000");
     }
 }
