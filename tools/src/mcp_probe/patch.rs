@@ -165,6 +165,52 @@ pub enum PatchError {
 mod tests {
     use super::*;
 
+    /// Mutex that serialises every test that mutates the process-global
+    /// PATH environment variable. Tests in a single crate share one
+    /// process and run concurrently by default; without this guard
+    /// they race on `set_var`/`remove_var` and flake unpredictably.
+    static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Helper: write a shell script to `dir/<name>` and make it executable.
+    #[cfg(unix)]
+    fn write_fake_bin(dir: &std::path::Path, name: &str, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, script).expect("write fake binary");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake binary");
+    }
+
+    /// RAII guard that holds `PATH_MUTEX` while also restoring the
+    /// original PATH value on drop.  Always construct via `lock_path`.
+    struct PathGuard(
+        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+        Option<std::ffi::OsString>,
+    );
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+            // MutexGuard drops after the PATH is restored.
+        }
+    }
+
+    /// Acquire the PATH mutex and return a guard that restores the
+    /// original PATH when dropped.
+    fn lock_path() -> PathGuard {
+        let guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("PATH");
+        PathGuard(guard, prior)
+    }
+
+    fn minimal_labels() -> BTreeMap<String, String> {
+        let mut labels = BTreeMap::new();
+        labels.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
+        labels
+    }
+
     #[test]
     fn variants_have_distinct_display_strings() {
         // Sanity test on the error surface: the operator pages on
@@ -231,32 +277,247 @@ mod tests {
         let Ok(tmp) = tempfile::TempDir::new() else {
             return;
         };
-        let prior_path = std::env::var_os("PATH");
-        // SAFETY: setting PATH within a single-threaded unit test
-        // is fine; we restore it before returning.
-        // Restricted PATH = no `crane`, no `docker`. Both branches
-        // of the fallback see NotFound and BothMissing surfaces.
-        // SAFETY: setting PATH within a single-threaded unit test
-        // is fine; we restore it before returning via the
-        // PathGuard's Drop impl.
-        struct PathGuard(Option<std::ffi::OsString>);
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(v) => std::env::set_var("PATH", v),
-                    None => std::env::remove_var("PATH"),
-                }
-            }
-        }
-        let _guard = PathGuard(prior_path);
+        let _guard = lock_path();
         std::env::set_var("PATH", tmp.path());
 
-        let mut labels = BTreeMap::new();
-        labels.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
-        let err = patch_image("in:tag", "out:tag", &labels).unwrap_err();
+        let err = patch_image("in:tag", "out:tag", &minimal_labels()).unwrap_err();
         assert!(
             matches!(err, PatchError::BothMissing),
             "expected BothMissing, got {err:?}"
         );
+    }
+
+    // ── crane_mutate: success and failure paths ─────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn crane_mutate_succeeds_when_crane_exits_zero() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        write_fake_bin(tmp.path(), "crane", "#!/bin/sh\nexit 0\n");
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let result = crane_mutate("in:tag", "out:tag", &minimal_labels());
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crane_mutate_returns_crane_failed_when_crane_exits_nonzero() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        write_fake_bin(
+            tmp.path(),
+            "crane",
+            "#!/bin/sh\necho 'registry error' >&2\nexit 1\n",
+        );
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let err = crane_mutate("in:tag", "out:tag", &minimal_labels()).unwrap_err();
+        assert!(
+            matches!(err, PatchError::CraneFailed { .. }),
+            "expected CraneFailed, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("registry error"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crane_mutate_returns_crane_missing_when_not_on_path() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        // Empty tempdir: no crane binary at all
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let err = crane_mutate("in:tag", "out:tag", &minimal_labels()).unwrap_err();
+        assert!(
+            matches!(err, PatchError::CraneMissing),
+            "expected CraneMissing, got {err:?}"
+        );
+    }
+
+    // ── buildx_label: success and failure paths ─────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn buildx_label_succeeds_when_docker_exits_zero() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        // The buildx_label fn runs `docker buildx build ...` and pipes a
+        // Dockerfile via stdin. The fake docker just exits 0 regardless.
+        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\nexit 0\n");
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let result = buildx_label("in:tag", "out:tag", &minimal_labels());
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn buildx_label_returns_buildx_failed_when_docker_exits_nonzero() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        write_fake_bin(
+            tmp.path(),
+            "docker",
+            "#!/bin/sh\necho 'buildx daemon not running' >&2\nexit 1\n",
+        );
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let err = buildx_label("in:tag", "out:tag", &minimal_labels()).unwrap_err();
+        assert!(
+            matches!(err, PatchError::BuildxFailed { .. }),
+            "expected BuildxFailed, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("buildx daemon not running"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn buildx_label_returns_buildx_missing_when_docker_not_on_path() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        // Empty tempdir: no docker binary
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let err = buildx_label("in:tag", "out:tag", &minimal_labels()).unwrap_err();
+        assert!(
+            matches!(err, PatchError::BuildxMissing),
+            "expected BuildxMissing, got {err:?}"
+        );
+    }
+
+    // ── patch_image: fallback chain ─────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_image_uses_crane_when_available_and_succeeds() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        write_fake_bin(tmp.path(), "crane", "#!/bin/sh\nexit 0\n");
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let result = patch_image("in:tag", "out:tag", &minimal_labels());
+        assert!(
+            result.is_ok(),
+            "expected Ok when crane succeeds: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_image_falls_back_to_buildx_when_crane_missing() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        // No crane; docker buildx exits 0
+        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\nexit 0\n");
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let result = patch_image("in:tag", "out:tag", &minimal_labels());
+        assert!(
+            result.is_ok(),
+            "expected Ok via buildx fallback: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_image_surfaces_crane_failure_without_falling_back() {
+        // crane exists but fails → should NOT fall back to buildx, but
+        // surface the crane error directly.
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        write_fake_bin(
+            tmp.path(),
+            "crane",
+            "#!/bin/sh\necho 'push failed' >&2\nexit 1\n",
+        );
+        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\nexit 0\n");
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let err = patch_image("in:tag", "out:tag", &minimal_labels()).unwrap_err();
+        assert!(
+            matches!(err, PatchError::CraneFailed { .. }),
+            "expected CraneFailed (no fallback to buildx when crane fails), got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_image_buildx_fallback_failure_returns_buildx_failed() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        // No crane; docker buildx fails
+        write_fake_bin(
+            tmp.path(),
+            "docker",
+            "#!/bin/sh\necho 'daemon error' >&2\nexit 1\n",
+        );
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let err = patch_image("in:tag", "out:tag", &minimal_labels()).unwrap_err();
+        assert!(
+            matches!(err, PatchError::BuildxFailed { .. }),
+            "expected BuildxFailed, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crane_mutate_passes_all_labels_as_flag_pairs() {
+        // Verify that for N labels, 2×N `--label k=v` flag pairs appear
+        // in the args the fake crane receives (via its stdin/argv).
+        // The fake crane prints its argv to stdout for inspection.
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        let script_path = tmp.path().join("crane_args.txt");
+        let script_path_str = script_path.to_string_lossy();
+        write_fake_bin(
+            tmp.path(),
+            "crane",
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {script_path_str}\nexit 0\n"),
+        );
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let mut labels = BTreeMap::new();
+        labels.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
+        labels.insert("org.botwork.mcp.port".to_string(), "8000".to_string());
+        crane_mutate("in:tag", "out:tag", &labels).expect("should succeed");
+
+        let written = std::fs::read_to_string(&script_path).expect("crane_args.txt");
+        assert!(written.contains("--label"), "args must include --label");
+        assert!(
+            written.contains("org.botwork.mcp.name=echo"),
+            "must include name label"
+        );
+        assert!(
+            written.contains("org.botwork.mcp.port=8000"),
+            "must include port label"
+        );
+        assert!(written.contains("--tag"), "args must include --tag out:tag");
     }
 }

@@ -34,6 +34,14 @@ pub fn list_running_sessions() -> Result<Vec<RunningContainer>, DockerError> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_ps_output(&stdout)
+}
+
+/// Parse the stdout of `docker ps --format '{{.ID}}\t{{.Names}}\t{{.RunningFor}}'`
+/// into a list of [`RunningContainer`]s.  Extracted from [`list_running_sessions`]
+/// so the row-assembly logic is unit-testable against synthetic output without
+/// a running docker daemon.
+pub(crate) fn parse_ps_output(stdout: &str) -> Result<Vec<RunningContainer>, DockerError> {
     let mut containers = Vec::new();
 
     for line in stdout.lines() {
@@ -155,11 +163,92 @@ mod tests {
         assert_eq!(DockerError::MalformedOutput("y".into()).exit_code(), 1);
     }
 
+    // --- parse_ps_output: row-assembly logic ---
+
+    #[test]
+    fn parse_ps_output_empty_string_yields_empty_vec() {
+        let containers = parse_ps_output("").expect("parse");
+        assert!(containers.is_empty());
+    }
+
+    #[test]
+    fn parse_ps_output_blank_lines_are_skipped() {
+        let stdout = "\n   \n";
+        let containers = parse_ps_output(stdout).expect("parse");
+        assert!(containers.is_empty());
+    }
+
+    #[test]
+    fn parse_ps_output_single_container() {
+        let stdout = "abc123\tmcp_session_aabbccddeeff\t3 minutes ago\n";
+        let containers = parse_ps_output(stdout).expect("parse");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(
+            containers[0],
+            RunningContainer {
+                id: "abc123".into(),
+                name: "mcp_session_aabbccddeeff".into(),
+                age: "3 minutes ago".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ps_output_multiple_containers_preserves_order() {
+        let stdout =
+            "id1\tname1\t1 minute ago\nid2\tname2\t2 minutes ago\nid3\tname3\t3 hours ago\n";
+        let containers = parse_ps_output(stdout).expect("parse");
+        assert_eq!(containers.len(), 3);
+        assert_eq!(containers[0].id, "id1");
+        assert_eq!(containers[1].id, "id2");
+        assert_eq!(containers[2].id, "id3");
+    }
+
+    #[test]
+    fn parse_ps_output_age_with_spaces_parsed_correctly() {
+        // "RunningFor" can contain spaces, e.g. "3 minutes ago".
+        // splitn(3, '\t') ensures the age is not split further.
+        let stdout = "abc\tmcp_session_aabbccddeeff\tAbout an hour ago\n";
+        let containers = parse_ps_output(stdout).expect("parse");
+        assert_eq!(containers[0].age, "About an hour ago");
+    }
+
+    #[test]
+    fn parse_ps_output_malformed_line_missing_tab_fields_returns_error() {
+        let stdout = "only-one-field\n";
+        let err = parse_ps_output(stdout).unwrap_err();
+        assert!(
+            matches!(err, DockerError::MalformedOutput(_)),
+            "expected MalformedOutput, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("only-one-field"), "{msg}");
+    }
+
+    #[test]
+    fn parse_ps_output_malformed_line_missing_age_field_returns_error() {
+        let stdout = "id1\tname1\n"; // only two tab-separated fields
+        let err = parse_ps_output(stdout).unwrap_err();
+        assert!(
+            matches!(err, DockerError::MalformedOutput(_)),
+            "expected MalformedOutput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_ps_output_mixes_good_and_bad_lines_stops_on_first_bad() {
+        // A well-formed first line followed by a malformed second line
+        // should return an error (not partial results).
+        let stdout = "id1\tname1\tage1\nmalformed\n";
+        let err = parse_ps_output(stdout).unwrap_err();
+        assert!(matches!(err, DockerError::MalformedOutput(_)));
+    }
+
     // --- list_running_sessions: output parsing (no real docker) ---
 
     // The actual `list_running_sessions()` shells out to `docker ps`;
     // exercising that end-to-end requires a running docker daemon and
     // belongs in the integration / smoke tier (tools/smoke.sh).
-    // The parsing logic is inlined; the tests above cover the error
-    // type surface instead.
+    // The parsing logic is extracted into `parse_ps_output` above; the
+    // tests there cover the full row-assembly surface.
 }

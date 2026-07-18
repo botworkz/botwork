@@ -380,4 +380,124 @@ mod tests {
         // Just the prefix with no hex part
         assert!(!re.is_match("mcp_session_"));
     }
+
+    // ── forward_exit_event and post_to_stream ──────────────────────────────
+
+    #[tokio::test]
+    async fn forward_exit_event_sends_http_request_to_broker_socket() {
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket_path = tmp.path().join("broker.sock");
+        let socket_path_str = socket_path.to_string_lossy().to_string();
+
+        // Spawn a minimal Unix socket server that reads the HTTP request
+        // and writes a 200 response.
+        let listener = UnixListener::bind(&socket_path).expect("bind");
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut reader = BufReader::new(&mut stream);
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .await
+                .expect("read request line");
+            // Drain remaining headers + body
+            let mut buf = vec![0u8; 4096];
+            let _ = tokio::time::timeout(Duration::from_millis(100), reader.read(&mut buf)).await;
+            // Send a minimal 200 response
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("write response");
+            request_line
+        });
+
+        // Wait briefly for the server to be ready
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        forward_exit_event(
+            &socket_path_str,
+            "mcp_session_aabbccddeeff",
+            "die",
+            Some(137),
+        )
+        .await;
+
+        let request_line = tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server task timeout")
+            .expect("server task join");
+
+        assert!(
+            request_line.starts_with("POST /container-exit"),
+            "expected POST /container-exit, got: {request_line:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_exit_event_handles_connect_failure_gracefully() {
+        // No server listening — connect should fail and not panic.
+        forward_exit_event(
+            "/nonexistent/broker.sock",
+            "mcp_session_aabbccddeeff",
+            "die",
+            None,
+        )
+        .await;
+        // Test passes if no panic.
+    }
+
+    #[tokio::test]
+    async fn post_to_stream_sends_body_and_receives_status() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{UnixListener, UnixStream};
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket_path = tmp.path().join("post_test.sock");
+
+        let listener = UnixListener::bind(&socket_path).expect("bind");
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.expect("read");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("write");
+            buf[..n].to_vec()
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let stream = UnixStream::connect(&socket_path).await.expect("connect");
+        let body = b"{\"name\":\"test\"}";
+        let result = post_to_stream(stream, body).await;
+        assert!(result.is_ok(), "post_to_stream must succeed: {result:?}");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
+            .await
+            .expect("timeout")
+            .expect("join");
+        let text = String::from_utf8_lossy(&received);
+        assert!(text.contains("POST /container-exit"), "request: {text}");
+        assert!(
+            text.contains(&format!("Content-Length: {}", body.len())),
+            "content-length: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_exit_payload_and_forward_combined_for_destroy_event() {
+        // Ensure the JSON body produced for a "destroy" event with no exit
+        // code has the right shape before being forwarded.
+        let bytes =
+            build_exit_payload("mcp_session_ffeeddccbbaa", "destroy", None).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
+        assert_eq!(parsed["event"], "destroy");
+        assert!(parsed["exit_code"].is_null());
+        assert_eq!(parsed["name"], "mcp_session_ffeeddccbbaa");
+    }
 }
