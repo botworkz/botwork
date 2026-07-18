@@ -450,6 +450,7 @@ dependencies = [
 name = "botwork-bootstrap"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "botwork-api-core",
  "botwork-entity",
  "botwork-migration",
