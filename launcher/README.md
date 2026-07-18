@@ -98,9 +98,10 @@ The socket group/mode and the `SO_PEERCRED` allowlist are deliberate belt-and-br
 
 ## Logging
 
-This launcher intentionally logs with plain `println!` to stdout instead of using `tracing` or `log`.
-It mirrors the Python implementation's `logging.basicConfig(stream=sys.stdout, format="%(message)s")` behavior, with the same line shape plus the `[botwork-launcher]` prefix.
-That keeps output compatible for operators piping either implementation to journald or other log aggregators.
+This launcher emits operational logs via `tracing` and installs a `tracing-subscriber`
+with `EnvFilter` support in the binary entrypoint.
+The visible line shape keeps the `[botwork-launcher]` prefix for compatibility with
+existing greps and smoke output, while honouring `RUST_LOG` like the other daemon crates.
 
 Key operator-visible log lines now include:
 - `socket-activated: using fd ...` or `self-bind: no LISTEN_FDS, binding ...`

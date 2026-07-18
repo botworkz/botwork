@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use tracing::{info, warn};
+
 use crate::config::PREFIX;
 
 #[derive(Debug)]
@@ -11,11 +13,11 @@ pub struct CommandOutput {
 }
 
 pub fn log_info(message: &str) {
-    println!("{PREFIX} {message}");
+    info!("{PREFIX} {message}");
 }
 
 pub fn log_warn(message: &str) {
-    println!("{PREFIX} [warn] {message}");
+    warn!("{PREFIX} [warn] {message}");
 }
 
 /// Returns `true` if `name` (the left-hand side of a `NAME=VALUE` argv element)

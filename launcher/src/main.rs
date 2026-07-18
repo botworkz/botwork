@@ -1,6 +1,8 @@
 use std::io::Write;
 
 use botwork_launcher::{run, version_string, PREFIX};
+use tracing::error;
+use tracing_subscriber::EnvFilter;
 
 fn handle_version_flag(args: &[String], mut writer: impl Write) -> Option<i32> {
     match args.get(1).map(String::as_str) {
@@ -20,8 +22,14 @@ async fn main() {
         std::process::exit(code);
     }
 
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+
     if let Err(err) = run().await {
-        eprintln!("{PREFIX} {err}");
+        error!("{PREFIX} {err}");
         std::process::exit(1);
     }
 }
