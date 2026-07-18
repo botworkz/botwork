@@ -130,6 +130,32 @@ fn force_remove_container(container_name: &str) {
 /// Idempotent — re-running has no effect once steady state is reached.
 /// Called once at startup from `run()`.
 pub async fn recover_live_workers(state: &AppState) {
+    recover_live_workers_with(
+        state,
+        list_running_session_containers,
+        inspect_container_for_recovery,
+    )
+    .await;
+}
+
+/// Testable variant of [`recover_live_workers`] that accepts injectable
+/// seams for the two docker CLI calls.  Production calls the public
+/// `recover_live_workers` which wires the real implementations;
+/// unit tests inject closures that return synthetic container sets /
+/// inspect results so the reconciliation logic can be exercised
+/// without a running docker daemon.
+///
+/// - `lister`: replaces `list_running_session_containers()`.  Returns
+///   `None` to signal docker-unavailable (skip recovery); `Some(set)`
+///   to provide the set of currently-running `mcp_session_*` names.
+/// - `inspector`: replaces `inspect_container_for_recovery()`.  Returns
+///   `None` to simulate a failed inspect (container already gone or
+///   docker error); `Some(InspectResult)` with the parsed labels + IP.
+pub(crate) async fn recover_live_workers_with<L, I>(state: &AppState, lister: L, inspector: I)
+where
+    L: Fn() -> Option<HashSet<String>>,
+    I: Fn(&str) -> Option<InspectResult>,
+{
     // Production always wires both. Tests use `None` for either; in
     // both cases we have nothing to do here. (Pre-PR2 tests + the
     // ext_proc_test suite intentionally hand AppState without DB.)
@@ -138,7 +164,7 @@ pub async fn recover_live_workers(state: &AppState) {
         return;
     };
 
-    let running = match list_running_session_containers() {
+    let running = match lister() {
         Some(set) => set,
         None => return,
     };
@@ -215,7 +241,7 @@ pub async fn recover_live_workers(state: &AppState) {
         // Tenant + workspace come from the labels stamped at spawn
         // time (#115). `docker inspect` gives us those plus the
         // container's IPv4 on the plugin network.
-        let Some(inspect) = inspect_container_for_recovery(container) else {
+        let Some(inspect) = inspector(container) else {
             warn!(
                 "[session-broker] recovery: docker inspect failed for \
                  {container}; skipping rehydration"
@@ -308,36 +334,32 @@ pub async fn recover_live_workers(state: &AppState) {
 
 /// Result of `docker inspect <container>` filtered down to the bits
 /// we use during recovery.
-struct InspectResult {
-    container_ip: String,
-    tenant: String,
-    workspace: String,
+pub(crate) struct InspectResult {
+    pub(crate) container_ip: String,
+    pub(crate) tenant: String,
+    pub(crate) workspace: String,
     /// The agent-session-id label from #115, if present. NOT stamped
     /// at spawn (labels can't be added after `docker run`), so this
     /// is always None in PR2's shape. Kept here so a future iteration
     /// that adds the label via `docker container update --label-add`
     /// (or via a sidecar metadata channel) can backfill the field.
-    agent_session_label: Option<String>,
+    pub(crate) agent_session_label: Option<String>,
     /// Inferred from the workspace mount path. NULL if the container
     /// was started without `--workspace`.
-    staging_token: Option<String>,
+    pub(crate) staging_token: Option<String>,
 }
 
-fn inspect_container_for_recovery(container_name: &str) -> Option<InspectResult> {
-    let output = std::process::Command::new("docker")
-        .args(["inspect", "--format", "{{json .}}", container_name])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+/// Parse a `docker inspect --format {{json .}}` JSON blob into the fields
+/// recovery needs.  Extracted from `inspect_container_for_recovery` so the
+/// JSON-parsing branches can be exercised in unit tests without spawning a
+/// real docker process.
+pub(crate) fn parse_inspect_json(raw: &serde_json::Value) -> Option<InspectResult> {
     // `inspect` returns an array of one object for a single arg, but
     // with `--format {{json .}}` we get just the object — keep
     // future-flexibility for either shape.
     let obj = match raw {
-        serde_json::Value::Array(mut arr) if !arr.is_empty() => arr.remove(0),
-        v => v,
+        serde_json::Value::Array(arr) if !arr.is_empty() => arr[0].clone(),
+        v => v.clone(),
     };
 
     // Labels live at .Config.Labels (a string→string map).
@@ -400,6 +422,18 @@ fn inspect_container_for_recovery(container_name: &str) -> Option<InspectResult>
     })
 }
 
+fn inspect_container_for_recovery(container_name: &str) -> Option<InspectResult> {
+    let output = std::process::Command::new("docker")
+        .args(["inspect", "--format", "{{json .}}", container_name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    parse_inspect_json(&raw)
+}
+
 /// Single-shot SELECT to resolve `plugin.id` → `plugin.name` during
 /// recovery. Not cached because recovery is a one-shot operation.
 async fn resolve_plugin_name(db: &DatabaseConnection, plugin_id: uuid::Uuid) -> Option<String> {
@@ -457,11 +491,16 @@ fn _imports_keepalive(_: Arc<SessionWorkerWriter>, _: LiveWorker) {}
 mod tests {
     use super::*;
     use crate::session_worker::SessionWorkerWriter;
-    use sea_orm::{DatabaseBackend, MockDatabase};
+    use botwork_entity::{plugin, session_worker};
+    use chrono::Utc;
+    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
+    use uuid::Uuid;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
 
     fn app_state_with_writer(
         writer: Option<Arc<SessionWorkerWriter>>,
@@ -484,6 +523,54 @@ mod tests {
         }
     }
 
+    fn worker_row(
+        id: Uuid,
+        plugin_id: Uuid,
+        container_name: &str,
+        container_ip: &str,
+        mcp_session_id: &str,
+    ) -> session_worker::Model {
+        session_worker::Model {
+            id,
+            agent_session_id: None,
+            plugin_id,
+            container_name: container_name.to_string(),
+            container_ip: container_ip.to_string(),
+            mcp_session_id: mcp_session_id.to_string(),
+            spawned_at: Utc::now(),
+            reaped_at: None,
+        }
+    }
+
+    fn plugin_row(id: Uuid, name: &str) -> plugin::Model {
+        plugin::Model {
+            id,
+            name: name.to_string(),
+            image: "ghcr.io/example/plugin:1.0".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_auth: "none".to_string(),
+            env: serde_json::json!([]),
+            resources: None,
+            egress: serde_json::json!({"mode": "none"}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            current_facet_id: None,
+        }
+    }
+
+    fn synthetic_inspect(ip: &str, tenant: &str, workspace: &str) -> InspectResult {
+        InspectResult {
+            container_ip: ip.to_string(),
+            tenant: tenant.to_string(),
+            workspace: workspace.to_string(),
+            agent_session_label: None,
+            staging_token: Some("tok1".to_string()),
+        }
+    }
+
+    // ── migrate_legacy_sessions_json ─────────────────────────────────────────
+
     #[test]
     fn migrate_legacy_sessions_json_removes_file() {
         let tmp = tempdir().expect("tempdir");
@@ -504,6 +591,25 @@ mod tests {
     }
 
     #[test]
+    fn migrate_legacy_sessions_json_logs_content_and_removes() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("sessions.json");
+        let content = r#"{"container":"mcp_session_abc"}"#;
+        std::fs::write(&path, content).expect("write");
+        crate::test_support::start_log_capture();
+        migrate_legacy_sessions_json(path.to_str().expect("utf8 path"));
+        let logs = crate::test_support::take_log_capture().join("\n");
+        assert!(!path.exists(), "file should be unlinked");
+        assert!(
+            logs.contains("legacy sessions.json"),
+            "should log detection"
+        );
+        assert!(logs.contains("removed"), "should log removal");
+    }
+
+    // ── list_running_session_containers ──────────────────────────────────────
+
+    #[test]
     fn list_running_session_containers_is_total_function() {
         if let Some(names) = list_running_session_containers() {
             assert!(
@@ -513,6 +619,8 @@ mod tests {
         }
     }
 
+    // ── inspect_container_for_recovery (real docker call — minimal) ──────────
+
     #[test]
     fn inspect_container_for_recovery_missing_container_returns_none() {
         assert!(
@@ -520,12 +628,252 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn recover_live_workers_noops_when_writer_or_db_missing() {
-        let state = app_state_with_writer(None, None);
-        recover_live_workers(&state).await;
-        assert!(state.transport_sessions.lock().await.is_empty());
+    // ── parse_inspect_json ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_inspect_json_minimal_object() {
+        let json = serde_json::json!({
+            "Config": {
+                "Labels": {
+                    "io.botworkz.tenant": "acme",
+                    "io.botworkz.workspace": "mcp"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "botwork-plugin": {
+                        "IPAddress": "10.0.0.5"
+                    }
+                }
+            },
+            "Mounts": []
+        });
+        let result = parse_inspect_json(&json).expect("should parse");
+        assert_eq!(result.tenant, "acme");
+        assert_eq!(result.workspace, "mcp");
+        assert_eq!(result.container_ip, "10.0.0.5");
+        assert_eq!(result.agent_session_label, None);
+        assert_eq!(result.staging_token, None);
     }
+
+    #[test]
+    fn parse_inspect_json_array_shape() {
+        let json = serde_json::json!([{
+            "Config": {
+                "Labels": {
+                    "io.botworkz.tenant": "t1",
+                    "io.botworkz.workspace": "w1"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "botwork-plugin": { "IPAddress": "10.1.2.3" }
+                }
+            },
+            "Mounts": []
+        }]);
+        let result = parse_inspect_json(&json).expect("array shape should parse");
+        assert_eq!(result.tenant, "t1");
+        assert_eq!(result.container_ip, "10.1.2.3");
+    }
+
+    #[test]
+    fn parse_inspect_json_fallback_network() {
+        // No botwork-plugin network — falls back to the first network found.
+        let json = serde_json::json!({
+            "Config": {
+                "Labels": {
+                    "io.botworkz.tenant": "t1",
+                    "io.botworkz.workspace": "w1"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "bridge": { "IPAddress": "172.17.0.2" }
+                }
+            },
+            "Mounts": []
+        });
+        let result = parse_inspect_json(&json).expect("fallback network");
+        assert_eq!(result.container_ip, "172.17.0.2");
+    }
+
+    #[test]
+    fn parse_inspect_json_missing_tenant_returns_none() {
+        let json = serde_json::json!({
+            "Config": {
+                "Labels": {
+                    "io.botworkz.workspace": "mcp"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": { "bridge": { "IPAddress": "1.2.3.4" } }
+            },
+            "Mounts": []
+        });
+        assert!(
+            parse_inspect_json(&json).is_none(),
+            "missing tenant should return None"
+        );
+    }
+
+    #[test]
+    fn parse_inspect_json_missing_workspace_returns_none() {
+        let json = serde_json::json!({
+            "Config": {
+                "Labels": {
+                    "io.botworkz.tenant": "acme"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": { "bridge": { "IPAddress": "1.2.3.4" } }
+            },
+            "Mounts": []
+        });
+        assert!(
+            parse_inspect_json(&json).is_none(),
+            "missing workspace should return None"
+        );
+    }
+
+    #[test]
+    fn parse_inspect_json_missing_ip_returns_none() {
+        let json = serde_json::json!({
+            "Config": {
+                "Labels": {
+                    "io.botworkz.tenant": "acme",
+                    "io.botworkz.workspace": "mcp"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": {}
+            },
+            "Mounts": []
+        });
+        assert!(
+            parse_inspect_json(&json).is_none(),
+            "missing IP should return None"
+        );
+    }
+
+    #[test]
+    fn parse_inspect_json_staging_token_from_workspace_mount() {
+        let json = serde_json::json!({
+            "Config": {
+                "Labels": {
+                    "io.botworkz.tenant": "acme",
+                    "io.botworkz.workspace": "mcp"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "botwork-plugin": { "IPAddress": "10.0.0.1" }
+                }
+            },
+            "Mounts": [
+                {
+                    "Source": "/var/lib/botwork/tenants/acme/staging/abc123",
+                    "Destination": "/workspace"
+                }
+            ]
+        });
+        let result = parse_inspect_json(&json).expect("should parse");
+        assert_eq!(result.staging_token, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn parse_inspect_json_staging_token_skips_non_workspace_mount() {
+        let json = serde_json::json!({
+            "Config": {
+                "Labels": {
+                    "io.botworkz.tenant": "acme",
+                    "io.botworkz.workspace": "mcp"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "botwork-plugin": { "IPAddress": "10.0.0.1" }
+                }
+            },
+            "Mounts": [
+                {
+                    "Source": "/some/other/path/tok99",
+                    "Destination": "/data"
+                }
+            ]
+        });
+        let result = parse_inspect_json(&json).expect("should parse");
+        assert_eq!(result.staging_token, None);
+    }
+
+    #[test]
+    fn parse_inspect_json_agent_session_label_present() {
+        let json = serde_json::json!({
+            "Config": {
+                "Labels": {
+                    "io.botworkz.tenant": "acme",
+                    "io.botworkz.workspace": "mcp",
+                    "io.botworkz.agent_session": "sess-abc"
+                }
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "botwork-plugin": { "IPAddress": "10.0.0.1" }
+                }
+            },
+            "Mounts": []
+        });
+        let result = parse_inspect_json(&json).expect("should parse");
+        assert_eq!(result.agent_session_label, Some("sess-abc".to_string()));
+    }
+
+    #[test]
+    fn parse_inspect_json_empty_array_returns_none() {
+        // Empty array: no object to work with — tenant/workspace will
+        // be missing, so None is returned.
+        let json = serde_json::json!([]);
+        assert!(parse_inspect_json(&json).is_none());
+    }
+
+    // ── resolve_plugin_name ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_plugin_name_returns_name_when_row_found() {
+        let pid = Uuid::new_v4();
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
+                .into_connection(),
+        );
+        let name = resolve_plugin_name(&db, pid).await;
+        assert_eq!(name, Some("mcp-bash".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resolve_plugin_name_returns_none_when_not_found() {
+        let pid = Uuid::new_v4();
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([Vec::<plugin::Model>::new()])
+                .into_connection(),
+        );
+        let name = resolve_plugin_name(&db, pid).await;
+        assert!(name.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_plugin_name_returns_none_on_db_error() {
+        let pid = Uuid::new_v4();
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([DbErr::Custom("boom".to_string())])
+                .into_connection(),
+        );
+        let name = resolve_plugin_name(&db, pid).await;
+        assert!(name.is_none());
+    }
+
+    // ── force_remove_container ────────────────────────────────────────────────
 
     #[test]
     fn force_remove_container_total_function() {
@@ -533,6 +881,15 @@ mod tests {
         force_remove_container("mcp_session_definitely_missing_for_test");
         let after = list_running_session_containers();
         assert_eq!(before.is_some(), after.is_some());
+    }
+
+    // ── recover_live_workers (real entry point) ───────────────────────────────
+
+    #[tokio::test]
+    async fn recover_live_workers_noops_when_writer_or_db_missing() {
+        let state = app_state_with_writer(None, None);
+        recover_live_workers(&state).await;
+        assert!(state.transport_sessions.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -544,6 +901,272 @@ mod tests {
         let state = app_state_with_writer(Some(writer), Some(db));
 
         recover_live_workers(&state).await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    // ── recover_live_workers_with (seam-driven tests) ────────────────────────
+
+    #[tokio::test]
+    async fn recover_with_seam_noops_when_lister_returns_none() {
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
+        )));
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let state = app_state_with_writer(Some(writer), Some(db));
+
+        recover_live_workers_with(&state, || None, |_| None).await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_skips_on_db_error() {
+        // list_live() returns a DB error → skip reconciliation.
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([DbErr::Custom("db-fail".to_string())])
+                .into_connection(),
+        )));
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let state = app_state_with_writer(Some(writer), Some(db));
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_abc".to_string()])),
+            |_| None,
+        )
+        .await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_reaps_orphan_containers() {
+        // Running container "mcp_session_orphan" has no DB row → should be force-removed.
+        // We can verify the call path runs without panicking (force_remove_container
+        // calls docker which isn't available — it will warn, not crash).
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([Vec::<session_worker::Model>::new()])
+                .into_connection(),
+        )));
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let state = app_state_with_writer(Some(writer), Some(db));
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_orphan".to_string()])),
+            |_| None,
+        )
+        .await;
+        // Nothing seeded; the orphan container gets force-removed (docker
+        // call is a no-op here because that container does not exist).
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_marks_db_rows_reaped_when_container_absent() {
+        // DB has one live row for "mcp_session_gone" but docker set is empty
+        // → record_reap should be called.  MockDatabase records the UPDATE.
+        let pid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let row = worker_row(cid, pid, "mcp_session_gone", "10.0.0.1", "sess-1");
+
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // list_live()
+                .append_query_results([vec![row.clone()]])
+                // find_by_container_name inside record_reap()
+                .append_query_results([vec![row]])
+                // record_reap UPDATE (exec result)
+                .append_exec_results([sea_orm::MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected: 1,
+                }])
+                .into_connection(),
+        )));
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let state = app_state_with_writer(Some(writer), Some(db));
+
+        // Empty running set → every DB row should be marked reaped.
+        recover_live_workers_with(&state, || Some(HashSet::new()), |_| None).await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_skips_intersection_when_plugin_not_resolved() {
+        // Container in running set + matching DB row, but plugin lookup fails
+        // (DB returns empty) → warn + skip, no session seeded.
+        let pid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let row = worker_row(cid, pid, "mcp_session_x", "10.0.0.2", "sess-x");
+
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![row]])
+                .into_connection(),
+        )));
+        // DB returns no plugin row for the resolve_plugin_name call.
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([Vec::<plugin::Model>::new()])
+                .into_connection(),
+        );
+        let state = app_state_with_writer(Some(writer), Some(db));
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_x".to_string()])),
+            |_| None,
+        )
+        .await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_skips_intersection_when_inspect_fails() {
+        // Container in running + DB row present + plugin resolved, but
+        // inspector returns None (docker inspect failed) → warn + skip.
+        let pid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let row = worker_row(cid, pid, "mcp_session_y", "10.0.0.3", "sess-y");
+
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![row]])
+                .into_connection(),
+        )));
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
+                .into_connection(),
+        );
+        let state = app_state_with_writer(Some(writer), Some(db));
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_y".to_string()])),
+            |_| None, // inspector returns None
+        )
+        .await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_skips_empty_mcp_session_id() {
+        // Container present + DB row + plugin resolved + inspect succeeds,
+        // but mcp_session_id is empty (spawn-to-init-response window) →
+        // skip, no session seeded.
+        let pid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        // Empty mcp_session_id
+        let row = worker_row(cid, pid, "mcp_session_z", "10.0.0.4", "");
+
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![row]])
+                .into_connection(),
+        )));
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
+                .into_connection(),
+        );
+        let state = app_state_with_writer(Some(writer), Some(db));
+        crate::test_support::start_log_capture();
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_z".to_string()])),
+            |_| {
+                Some(InspectResult {
+                    container_ip: "10.0.0.4".to_string(),
+                    tenant: "acme".to_string(),
+                    workspace: "mcp".to_string(),
+                    agent_session_label: None,
+                    staging_token: None,
+                })
+            },
+        )
+        .await;
+        let logs = crate::test_support::take_log_capture().join("\n");
+        assert!(state.transport_sessions.lock().await.is_empty());
+        assert!(
+            logs.contains("has no mcp_session_id yet"),
+            "missing skip log: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_logs_ip_drift() {
+        // IP in DB row differs from inspect result → log the drift.
+        let pid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        // Row has DB IP "10.0.0.99", inspect will return "10.0.0.50"
+        let row = worker_row(cid, pid, "mcp_session_drift", "10.0.0.99", "sess-drift");
+
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![row]])
+                .into_connection(),
+        )));
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
+                .into_connection(),
+        );
+        // config_broker_endpoint is unreachable (port 1), so config-broker
+        // call will fail → the intersection is skipped after the IP-drift log.
+        let state = app_state_with_writer(Some(writer), Some(db));
+        crate::test_support::start_log_capture();
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_drift".to_string()])),
+            |_| {
+                Some(InspectResult {
+                    container_ip: "10.0.0.50".to_string(), // different from row
+                    tenant: "acme".to_string(),
+                    workspace: "mcp".to_string(),
+                    agent_session_label: None,
+                    staging_token: None,
+                })
+            },
+        )
+        .await;
+        let logs = crate::test_support::take_log_capture().join("\n");
+        assert!(
+            logs.contains("container_ip drift"),
+            "expected IP-drift log, got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_skips_when_config_broker_fails() {
+        // Full intersection (container + row + plugin + inspect), but
+        // config-broker is unreachable (port 1 as set in app_state_with_writer)
+        // → config-broker resolve fails, warn + skip.
+        let pid = Uuid::new_v4();
+        let cid = Uuid::new_v4();
+        let row = worker_row(cid, pid, "mcp_session_cb_fail", "10.0.0.5", "sess-cb");
+
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![row]])
+                .into_connection(),
+        )));
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![plugin_row(pid, "mcp-bash")]])
+                .into_connection(),
+        );
+        let state = app_state_with_writer(Some(writer), Some(db));
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_cb_fail".to_string()])),
+            |_| Some(synthetic_inspect("10.0.0.5", "acme", "mcp")),
+        )
+        .await;
+        // config-broker at 127.0.0.1:1 refuses connection → skip; nothing seeded.
         assert!(state.transport_sessions.lock().await.is_empty());
     }
 }
