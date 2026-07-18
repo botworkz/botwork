@@ -6,7 +6,7 @@ members = [
     "ui/server",
     "ui/wasm",
     "bootstrap",
-    "botwork-cli",
+    "cli",
     "config-broker",
     "control-plane",
     "db/entity",
@@ -27,9 +27,9 @@ members = [
 # container image builds it via `trunk build --release`.
 default-members = [
     "api",
-    "botwork-cli",
     "ui/server",
     "bootstrap",
+    "cli",
     "config-broker",
     "control-plane",
     "db/entity",
