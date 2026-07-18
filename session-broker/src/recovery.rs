@@ -357,9 +357,9 @@ pub(crate) fn parse_inspect_json(raw: &serde_json::Value) -> Option<InspectResul
     // `inspect` returns an array of one object for a single arg, but
     // with `--format {{json .}}` we get just the object — keep
     // future-flexibility for either shape.
-    let obj = match raw {
-        serde_json::Value::Array(arr) if !arr.is_empty() => arr[0].clone(),
-        v => v.clone(),
+    let obj: &serde_json::Value = match raw {
+        serde_json::Value::Array(arr) if !arr.is_empty() => &arr[0],
+        v => v,
     };
 
     // Labels live at .Config.Labels (a string→string map).

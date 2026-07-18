@@ -2006,6 +2006,8 @@ mod tests {
         LOG_CAPTURE_LOCK
             .get_or_init(|| StdMutex::new(()))
             .lock()
+            // Recover from poisoning: if a prior test panicked while holding
+            // this lock, the data (a unit `()`) is still valid and safe to use.
             .unwrap_or_else(|e| e.into_inner())
     }
 
