@@ -29,3 +29,42 @@ jobs:
     # WASM-only dep tree (wasm-bindgen / web-sys / leptos csr) doesn't
     # sneak through the host-targeted checks above.
     - run: cargo build -p botwork-ui-wasm --target wasm32-unknown-unknown
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - uses: taiki-e/install-action@cargo-tarpaulin
+    - name: Run coverage (unit tier — no docker)
+      # Notes:
+      #   * Dev profile only — [profile.release] sets panic = "abort" which
+      #     is incompatible with tarpaulin's LLVM instrumentation. Tarpaulin
+      #     targets dev/test profile by default; do not add --release here.
+      #   * botwork-ui-wasm is excluded because that crate only links against
+      #     wasm32-unknown-unknown; a host-target build would hard-fail.
+      #   * DOCKER_HOST points at a non-existent socket so any runtime
+      #     docker-availability probe (e.g. api's testcontainers-backed
+      #     integration tests) fails fast and those tests log-skip cleanly
+      #     rather than causing the job to fail.
+      #   * No --fail-under threshold is set here — this run establishes the
+      #     baseline. A maintainer will ratchet a floor in a later dedicated PR.
+      env:
+        DOCKER_HOST: unix:///nonexistent
+      run: |
+        cargo tarpaulin \
+          --engine llvm \
+          --locked \
+          --workspace \
+          --all-targets \
+          --exclude botwork-ui-wasm \
+          --out Lcov \
+          --out Xml \
+          --output-dir coverage
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage
+        path: coverage/
+        if-no-files-found: error
