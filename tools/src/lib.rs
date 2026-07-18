@@ -1,6 +1,5 @@
 pub mod bootstrap;
 pub mod cli;
-pub mod frontdoor;
 pub mod mcp_probe;
 pub mod ps;
 
