@@ -259,7 +259,7 @@ pub struct AppState {
 
 pub fn log_info(message: &str) {
     let formatted = format!("{PREFIX} {message}");
-    println!("{formatted}");
+    tracing::info!("{formatted}");
     if let Some(entries) = test_support::log_capture()
         .lock()
         .expect("lock log capture")
