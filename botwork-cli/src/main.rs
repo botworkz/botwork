@@ -1,11 +1,11 @@
-//! `botwork-login` — CLI entry point.
+//! `botwork-cli` — CLI entry point.
 //!
 //! Thin `clap` shim around the typed library entry points in
-//! [`botwork_login::commands`]. The actual flow / error handling
+//! [`botwork_cli::commands`]. The actual flow / error handling
 //! lives in the library so a future web / admin UI can reuse it.
 //!
 //! Exit codes are mapped via
-//! [`botwork_login::error::exit_code_for`]:
+//! [`botwork_cli::error::exit_code_for`]:
 //!
 //! - 0 — success.
 //! - 1 — user-recoverable (wrong password, no lease, expired lease,
@@ -20,22 +20,22 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use botwork_login::commands::{run_env, run_login, run_logout, run_register, run_status};
-use botwork_login::commands::{EnvArgs, LoginArgs, LogoutArgs, RegisterArgs, StatusArgs};
-use botwork_login::error::{exit_code_for, LoginError};
+use botwork_cli::commands::{run_env, run_login, run_logout, run_register, run_status};
+use botwork_cli::commands::{EnvArgs, LoginArgs, LogoutArgs, RegisterArgs, StatusArgs};
+use botwork_cli::error::{exit_code_for, LoginError};
 
 const SSL_CERT_FILE_ENV: &str = "SSL_CERT_FILE";
 const VERSION: &str = include_str!("../../VERSION").trim_ascii();
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "botwork-login",
-    about = "OPAQUE login + lease keyring manager",
+    name = "bw",
+    about = "botwork end-user CLI",
     version = VERSION,
 )]
 struct Cli {
     /// Tenant name. Required for every subcommand; placed at the top
-    /// level so `botwork-login --tenant phlax` (login by default)
+    /// level so `bw --tenant phlax` (login by default)
     /// stays the user-facing default invocation.
     #[arg(long, global = true)]
     tenant: Option<String>,
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn version_flag_long_reports_display_version() {
-        let err = Cli::try_parse_from(["botwork-login", "--version"]).unwrap_err();
+        let err = Cli::try_parse_from(["bw", "--version"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         let msg = err.to_string();
         assert!(
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn version_flag_short_reports_display_version() {
-        let err = Cli::try_parse_from(["botwork-login", "-V"]).unwrap_err();
+        let err = Cli::try_parse_from(["bw", "-V"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
     }
 

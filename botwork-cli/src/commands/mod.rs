@@ -1,5 +1,5 @@
 //! Subcommands. Each `commands::*::run` is the library entry point
-//! the `bin/botwork-login` shim calls; the same entry points are
+//! the `bin/bw` shim calls; the same entry points are
 //! what a future web / admin UI would invoke without shelling out.
 
 use url::Url;

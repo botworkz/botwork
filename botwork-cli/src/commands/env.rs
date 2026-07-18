@@ -1,4 +1,4 @@
-//! `botwork-login env` — emit `export <VAR>='<bearer>'`.
+//! `bw env` — emit `export <VAR>='<bearer>'`.
 //!
 //! Designed for shell consumption:
 //!

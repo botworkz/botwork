@@ -5,7 +5,7 @@
 //! consumers (the CLI subcommands today, a future web/admin UI
 //! tomorrow) compose them at will. The `reqwest::Client` is created
 //! once per call — the round-1a hot path is one
-//! `botwork-login` invocation per ~7-day lease, so connection-pool
+//! `botwork-cli` invocation per ~7-day lease, so connection-pool
 //! sharing isn't worth the lifetime plumbing.
 //!
 //! ## Wire shape
@@ -127,7 +127,7 @@ pub async fn run_login(
 }
 
 /// Drive an OPAQUE registration. v0 is an operator-only flow; the
-/// CLI exposes it under `botwork-login register`. The broker's
+/// CLI exposes it under `bw register`. The broker's
 /// 404-on-unknown-tenant arm is mapped to [`LoginError::UnknownTenant`];
 /// 409-on-already-registered to [`LoginError::AlreadyRegistered`].
 pub async fn run_register(

@@ -35,7 +35,7 @@
 //! ## Round-trip
 //!
 //! ```ignore
-//! use botwork_login::keyring_store::{KeyringEntry, KeyringStore};
+//! use botwork_cli::keyring_store::{KeyringEntry, KeyringStore};
 //! let store = KeyringStore::new();
 //! let entry = KeyringEntry { /* … */ };
 //! store.write("phlax", &entry)?;

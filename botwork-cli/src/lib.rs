@@ -1,4 +1,4 @@
-//! `botwork-login` — client-side OPAQUE login + lease bearer keyring
+//! `botwork-cli` — client-side OPAQUE login + lease bearer keyring
 //! management for `botwork-auth-broker`.
 //!
 //! This is the round-1a deliverable for [issue #139][issue-139], which
@@ -11,7 +11,7 @@
 //!
 //! Every subcommand has a `commands::*::run` entry point that takes a
 //! typed args struct and returns [`Result<(), LoginError>`]. The CLI
-//! (`bin/botwork-login`) is a thin `clap`-driven shim; the library
+//! (`bin/bw`) is a thin `clap`-driven shim; the library
 //! API is designed so a future web UI / admin UI can call the same
 //! functions without shelling out.
 //!
@@ -30,7 +30,7 @@
 //!
 //! - Auto-refresh / sliding lease renewal on the client side. The
 //!   broker slides on `/auth/check`; the CLI just re-`login`s when
-//!   the user asks. A future `botwork-login refresh` subcommand can
+//!   the user asks. A future `bw refresh` subcommand can
 //!   trade an existing bearer for a fresh one once the broker grows
 //!   the matching endpoint.
 //! - TUI / multi-tenant switcher.

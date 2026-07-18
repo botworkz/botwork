@@ -1,4 +1,4 @@
-//! `botwork-login` error model + exit code mapping.
+//! `botwork-cli` error model + exit code mapping.
 //!
 //! The set is intentionally small and stable so consumers can branch
 //! on the variant. Exit codes are documented in the crate README and
@@ -49,13 +49,15 @@ pub enum LoginError {
     AlreadyRegistered(String),
 
     /// `status` / `env` was run for a tenant with no keyring entry.
-    #[error("no active lease for tenant '{0}'; run `botwork-login --tenant {0}` first")]
+    #[error("no active lease for tenant '{0}'; run `bw --tenant {0}` first")]
     NoLease(String),
 
     /// `status` / `env` was run for a tenant whose lease has expired.
     /// The `expires_at` timestamp from the keyring entry is included
     /// so the caller can build a remediation message.
-    #[error("lease for tenant '{tenant}' expired at {expires_at}; run `botwork-login --tenant {tenant}` again")]
+    #[error(
+        "lease for tenant '{tenant}' expired at {expires_at}; run `bw --tenant {tenant}` again"
+    )]
     LeaseExpired {
         /// Tenant name (carried through verbatim).
         tenant: String,

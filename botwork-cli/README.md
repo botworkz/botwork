@@ -1,4 +1,4 @@
-# botwork-login
+# bw
 
 Client-side OPAQUE login + lease bearer keyring management for
 [`botwork-auth-broker`](../auth-broker).
@@ -17,7 +17,7 @@ for inspecting / consuming / removing that state.
 `botwork-auth-broker`'s round-1a OPAQUE endpoints
 (`/auth/{register,login}/{start,finish}` — landed in
 [#136][issue-136]) are HTTP-only. Without a client, the lease flow
-is *endpoints with no caller*. `botwork-login` is the user-facing
+is *endpoints with no caller*. `bw` is the user-facing
 deliverable that turns those endpoints into a thing an operator (or
 a downstream tool / web UI / admin UI) can drive.
 
@@ -33,28 +33,28 @@ non-tty caller doesn't have to fake a stdin.
 
 ```sh
 # One-time per tenant (operator-only):
-$ botwork-login register --tenant phlax
+$ bw register --tenant phlax
 Password: ********
 Confirm password: ********
-✓ Registered tenant 'phlax' (suite v1). Run `botwork-login --tenant phlax` to mint a lease.
+✓ Registered tenant 'phlax' (suite v1). Run `bw --tenant phlax` to mint a lease.
 
 # Per login session (~7 days default lease):
-$ botwork-login --tenant phlax
+$ bw --tenant phlax
 Password: ********
 ✓ Logged in to phlax. Lease expires 2026-07-01T22:00:00+00:00 (in 6days 23h 59m).
 
 # Offline keyring introspection:
-$ botwork-login status --tenant phlax
+$ bw status --tenant phlax
 phlax: logged in. Lease expires 2026-07-01T22:00:00+00:00 (in 6days 23h 59m).
        Lease id: 8f3e4a00-…
        Server: http://192.168.122.50:9100
 
 # Shell-eval helper:
-$ eval "$(botwork-login env --tenant phlax)"
+$ eval "$(bw env --tenant phlax)"
 $ goose session   # picks up ${BOTWORK_BEARER} via the extension config
 
 # Drop the local entry (does NOT call any server-side revoke):
-$ botwork-login logout --tenant phlax
+$ bw logout --tenant phlax
 ✓ Removed keyring entry for phlax.
 ```
 
@@ -67,12 +67,12 @@ $ botwork-login logout --tenant phlax
 | `status` | Read lease state + remaining time from the keyring. | no |
 | `env` | Print `export <VAR>='<bearer>'` for shell consumption. | no |
 | `logout` | Drop the keyring entry. v0 is keyring-only. | no |
-| `--version` / `-V` | Print `botwork-login <version>` and exit 0. | no |
+| `--version` / `-V` | Print `bw <version>` and exit 0. | no |
 
 ### `login` (default)
 
 ```
-botwork-login [--tenant <TENANT>] [--lease <DURATION>] [--server <URL>]
+bw [--tenant <TENANT>] [--lease <DURATION>] [--server <URL>]
               [--credential-identifier <ID>] [--cacert <PATH>] [--password-stdin]
 ```
 
@@ -107,7 +107,7 @@ rather than a generic server error.
 ### `status`
 
 ```
-botwork-login status --tenant <TENANT>
+bw status --tenant <TENANT>
 ```
 
 Reads the keyring entry, parses `expires_at`, prints remaining
@@ -117,11 +117,11 @@ time via `humantime::format_duration`. Exits 0 with a valid lease,
 ### `env`
 
 ```
-botwork-login env --tenant <TENANT> [--token-env <VAR>]
+bw env --tenant <TENANT> [--token-env <VAR>]
 ```
 
 Prints `export BOTWORK_BEARER='<bearer>'` to stdout for shell
-consumption via `eval "$(botwork-login env --tenant phlax)"` or
+consumption via `eval "$(bw env --tenant phlax)"` or
 direnv `.envrc`. Exits 1 if no valid lease; prints *nothing* to
 stdout in that case (so `eval` doesn't try to `export ''=`) and
 the error goes to stderr.
@@ -220,7 +220,7 @@ The CLI shim is intentionally thin. A future web / admin UI calls
 the library directly:
 
 ```rust
-use botwork_login::commands::login::{run as run_login, LoginArgs};
+use botwork_cli::commands::login::{run as run_login, LoginArgs};
 
 let outcome = run_login(LoginArgs {
     tenant: "phlax".into(),
@@ -232,7 +232,7 @@ let outcome = run_login(LoginArgs {
 ```
 
 The wire-level entry points live one layer down in
-`botwork_login::client::{run_login, run_register}` — useful when a
+`botwork_cli::client::{run_login, run_register}` — useful when a
 caller wants the OPAQUE round-trip without the keyring side-effect.
 
 ## Out of scope (v0)

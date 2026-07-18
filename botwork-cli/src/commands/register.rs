@@ -1,4 +1,4 @@
-//! `botwork-login register` — operator-flow OPAQUE registration.
+//! `bw register` — operator-flow OPAQUE registration.
 //!
 //! Used once per tenant by an admin to seed the
 //! `opaque_password_file` row. Subsequent `login` then drives the
@@ -61,7 +61,7 @@ pub async fn run(args: RegisterArgs) -> Result<String, LoginError> {
 
     Ok(format!(
         "✓ Registered tenant '{tenant}' (suite v{suite}). \
-         Run `botwork-login --tenant {tenant}` to mint a lease.",
+         Run `bw --tenant {tenant}` to mint a lease.",
         tenant = outcome.tenant,
         suite = outcome.suite_version
     ))

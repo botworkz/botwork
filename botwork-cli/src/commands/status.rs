@@ -1,4 +1,4 @@
-//! `botwork-login status` — offline keyring-only lease introspection.
+//! `bw status` — offline keyring-only lease introspection.
 //!
 //! Reads the keyring entry for `tenant`, prints expiry + remaining
 //! time + lease id. Exits 1 (`NoLease` / `LeaseExpired`) when no

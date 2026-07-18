@@ -43,7 +43,7 @@ use crate::error::LoginError;
 /// Default broker URL for development against a same-host broker.
 /// Production deploys override via `BOTWORK_LOGIN_SERVER`.
 pub const DEFAULT_SERVER: &str = "http://127.0.0.1:9100";
-/// Default token env var name for `botwork-login env`'s `export …`
+/// Default token env var name for `bw env`'s `export …`
 /// line. `BOTWORK_BEARER` is the canonical name goose's extension
 /// config substitutes via `${BOTWORK_BEARER}`.
 pub const DEFAULT_TOKEN_ENV: &str = "BOTWORK_BEARER";
@@ -140,7 +140,7 @@ impl Config {
         validate_server_url(&raw)
     }
 
-    /// Resolve the env var name `botwork-login env` emits.
+    /// Resolve the env var name `bw env` emits.
     pub fn resolve_token_env(&self) -> String {
         self.token_env
             .clone()

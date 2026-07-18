@@ -1,4 +1,4 @@
-//! `botwork-login login` — drive an OPAQUE login, persist the bearer
+//! `bw login` — drive an OPAQUE login, persist the bearer
 //! to the OS keyring.
 //!
 //! Wire contract from the broker's `/auth/login/start` +

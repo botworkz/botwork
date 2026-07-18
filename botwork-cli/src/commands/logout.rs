@@ -1,4 +1,4 @@
-//! `botwork-login logout` — keyring-only entry removal.
+//! `bw logout` — keyring-only entry removal.
 //!
 //! v0 doesn't call any admin revoke endpoint (none exists yet). When
 //! the broker grows `/admin/api/v1/leases/{id}` / equivalent,
