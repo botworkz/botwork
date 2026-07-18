@@ -43,10 +43,10 @@ impl Validators {
         Self::new_with_bases(image_allowlist_regex, STAGING_BASE, AGENTS_BASE)
     }
 
-    /// Construct validators with custom base paths.  Intended for unit tests
-    /// that need staging/agent paths under a tempdir rather than the
-    /// production `/var/lib/botwork/tenants` tree.
-    #[cfg(test)]
+    /// Construct validators with custom base paths.  Used by `new` for
+    /// production and exposed as `pub(crate)` for unit tests that need
+    /// staging/agent paths under a tempdir rather than the production
+    /// `/var/lib/botwork/tenants` tree.
     pub(crate) fn new_with_bases(
         image_allowlist_regex: &str,
         staging_base: &str,
@@ -59,35 +59,6 @@ impl Validators {
         let network_re = Regex::new(r"^[a-z0-9_-]+$").map_err(|err| err.to_string())?;
         let staging_path_re = Regex::new(&format!(
             r"^{escaped_staging}/{TENANT_RE}/staging/[a-f0-9]{{12}}$"
-        ))
-        .map_err(|err| err.to_string())?;
-        let agent_dir_re = Regex::new(&format!(
-            r"^{escaped_agents}/{TENANT_RE}/workspaces/{TENANT_RE}/agents/[A-Za-z0-9_-]{{1,64}}$"
-        ))
-        .map_err(|err| err.to_string())?;
-
-        Ok(Self {
-            name_re,
-            image_re,
-            network_re,
-            staging_path_re,
-            agent_dir_re,
-            staging_base: staging_base.to_string(),
-            agents_base: agents_base.to_string(),
-        })
-    }
-
-    #[cfg(not(test))]
-    fn new_with_bases(
-        image_allowlist_regex: &str,
-        staging_base: &str,
-        agents_base: &str,
-    ) -> Result<Self, String> {
-        let name_re = Regex::new(r"^mcp_session_[a-f0-9]{12}$").map_err(|err| err.to_string())?;
-        let image_re = Regex::new(image_allowlist_regex).map_err(|err| err.to_string())?;
-        let network_re = Regex::new(r"^[a-z0-9_-]+$").map_err(|err| err.to_string())?;
-        let staging_path_re = Regex::new(&format!(
-            r"^/var/lib/botwork/tenants/{TENANT_RE}/staging/[a-f0-9]{{12}}$"
         ))
         .map_err(|err| err.to_string())?;
         let agent_dir_re = Regex::new(&format!(
@@ -105,7 +76,7 @@ impl Validators {
             // at disjoint container-local `/workspace` directories and the
             // cross-plugin assertion in the smoke harness fails on missing
             // shared file content rather than on the actual root cause.
-            r"^/var/lib/botwork/tenants/{TENANT_RE}/workspaces/{TENANT_RE}/agents/[A-Za-z0-9_-]{{1,64}}$"
+            r"^{escaped_agents}/{TENANT_RE}/workspaces/{TENANT_RE}/agents/[A-Za-z0-9_-]{{1,64}}$"
         ))
         .map_err(|err| err.to_string())?;
 

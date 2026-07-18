@@ -538,46 +538,29 @@ mod tests {
     }
 
     #[test]
-    fn bind_agent_returns_ok_when_already_bound_same_inode() {
-        // When staging and agent both point to the same inode (already bound),
-        // bind_agent_impl must return Ok without calling mount.
+    fn bind_agent_succeeds_when_agents_parent_is_empty() {
+        // When no sibling agent dirs exist, the conflict-detection loop
+        // should complete without errors and the bind call should proceed.
         let tmp = TempDir::new().expect("tempdir");
         let base = tmp.path().to_string_lossy().to_string();
         let validators = validators_for_base(&base);
         let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
 
-        // Create the staging dir; agent_dir is the SAME path → same inode.
         std::fs::create_dir_all(&staging).expect("mkdir staging");
 
-        // For the "already bound" case we need the agent path to be the same
-        // inode as staging. The simplest way is to use a hard link (same inode)
-        // but that requires same filesystem and doesn't apply to directories on
-        // Linux. Instead, we test the path: agent path == staging path, which
-        // is impossible via the normal interface (different roles), so we
-        // exercise the next best thing: having the agent dir exist and match
-        // the same dev+ino through a symlink.
-        //
-        // Actually, the validator won't accept staging == agent because they
-        // have different path shapes. So we skip the "same inode via bind"
-        // scenario (requires root to actually bind-mount) and instead directly
-        // test the CONFLICT branch when a sibling already has the staging inode.
-        let _ = staging;
-        let _ = validators;
+        let result = bind_agent_impl(&staging, &agent, &validators, 1000, 1000, run_ok, chown_ok);
+        assert!(
+            result.is_ok(),
+            "expected Ok with empty sibling set: {result:?}"
+        );
     }
 
     #[test]
-    fn bind_agent_detects_conflict_with_existing_sibling_binding() {
-        // Create two agent dirs under the same parent and pre-populate
-        // their inode identity: make agent-1 a hard link to the staging dir
-        // (impossible for dirs, so simulate by creating staging, then make
-        // staging and agent-1 share the same inode via… actually we can't
-        // do hard links for dirs on Linux).
-        //
-        // The conflict path requires the staging dir's inode to match a sibling
-        // dir's inode. This is only possible after an actual bind-mount (which
-        // requires root). The branch is therefore exercised at the integration
-        // tier; here we just verify the path structure and the agent/staging
-        // validation succeeds so the surrounding code is reachable.
+    fn bind_agent_succeeds_with_unrelated_sibling_agent() {
+        // When a sibling agent dir exists but its inode differs from
+        // the staging dir's inode (the normal non-bind-mount case),
+        // the conflict-detection loop must not produce a false positive.
         let tmp = TempDir::new().expect("tempdir");
         let base = tmp.path().to_string_lossy().to_string();
         let validators = validators_for_base(&base);
@@ -588,10 +571,8 @@ mod tests {
         std::fs::create_dir_all(&staging).expect("mkdir staging");
         std::fs::create_dir_all(&agent1).expect("mkdir agent1");
 
-        // Without actual bind-mounts, the inode conflict branch cannot be hit
-        // in a unit test (Linux won't hard-link directories). Call bind_agent_impl
-        // for agent-2 normally to ensure the sibling loop runs and completes
-        // without false positives.
+        // Without actual bind-mounts, agent1's inode won't match staging's.
+        // The loop should complete without raising a conflict error.
         let result = bind_agent_impl(&staging, &agent2, &validators, 1000, 1000, run_ok, chown_ok);
         assert!(
             result.is_ok(),
