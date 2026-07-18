@@ -21,8 +21,6 @@ Currently implemented subcommands:
 - `mcp-probe` - probe an MCP image, validate it against an
   `mcp-package.yaml`, and emit / verify / describe the
   `org.botwork.mcp.*` label set (RFE #147).
-- `frontdoor` - flip the envoy frontdoor spigot open/closed (vm
-  0.6.0+).
 
 ## `botwork-tools mcp-probe`
 

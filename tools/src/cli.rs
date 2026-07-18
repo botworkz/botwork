@@ -2,7 +2,7 @@ use std::io::Write;
 
 use thiserror::Error;
 
-use crate::{bootstrap, frontdoor, mcp_probe, ps};
+use crate::{bootstrap, mcp_probe, ps};
 
 pub fn dispatch(args: Vec<String>) -> Result<i32, CliError> {
     dispatch_with_writer(args, std::io::stdout())
@@ -68,18 +68,6 @@ fn dispatch_with_writer<W: Write>(args: Vec<String>, mut writer: W) -> Result<i3
                 }
             }
         }
-        Some("frontdoor") => match frontdoor::run(&args[2..]) {
-            Ok(code) => Ok(code),
-            Err(err) => {
-                let code = err.exit_code();
-                if code != 0 {
-                    eprintln!("{err}");
-                } else {
-                    println!("{err}");
-                }
-                Ok(code)
-            }
-        },
         Some(other) => Err(CliError::UnknownSubcommand(other.to_string())),
     }
 }
@@ -92,19 +80,16 @@ fn print_usage() {
     println!("  ps         List running botwork sessions");
     println!("  bootstrap  Apply a bootstrap.yaml through api");
     println!("  mcp-probe  Probe an MCP image and generate / verify / describe its labels");
-    println!("  frontdoor  Flip the envoy frontdoor spigot open/closed (vm 0.6.0+)");
     println!();
     println!("Run `botwork-tools <SUBCOMMAND> --help` for subcommand options.");
 }
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botwork-tools build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels\n  frontdoor  Flip the envoy frontdoor spigot open/closed (vm 0.6.0+)")]
+    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botwork-tools build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
     UnknownSubcommand(String),
     #[error(transparent)]
     Ps(#[from] ps::PsError),
-    #[error(transparent)]
-    Frontdoor(#[from] frontdoor::FrontdoorError),
 }
 
 impl CliError {
@@ -112,7 +97,6 @@ impl CliError {
         match self {
             Self::UnknownSubcommand(_) => 2,
             Self::Ps(err) => err.exit_code(),
-            Self::Frontdoor(err) => err.exit_code(),
         }
     }
 }
