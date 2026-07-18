@@ -300,3 +300,134 @@ pub fn outcome_summary(result: &Result<usize, GateError>) -> String {
 // Earlier draft carried a typed body struct; dropped because the
 // DELETE handler ignores the body and we don't want to ship a wire
 // shape we can't enforce on the server side.)
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    struct EnvGuard {
+        endpoint: Option<String>,
+        disabled: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var(ENDPOINT_ENV).ok(),
+                disabled: std::env::var(DISABLE_ENV).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(v) = &self.endpoint {
+                std::env::set_var(ENDPOINT_ENV, v);
+            } else {
+                std::env::remove_var(ENDPOINT_ENV);
+            }
+            if let Some(v) = &self.disabled {
+                std::env::set_var(DISABLE_ENV, v);
+            } else {
+                std::env::remove_var(DISABLE_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_honors_default_and_disable_flag() {
+        let _guard = EnvGuard::capture();
+        std::env::remove_var(ENDPOINT_ENV);
+        std::env::remove_var(DISABLE_ENV);
+
+        let default_client = ControlPlaneClient::from_env();
+        assert!(!default_client.is_disabled());
+        assert_eq!(default_client.endpoint, ENDPOINT_DEFAULT);
+
+        std::env::set_var(DISABLE_ENV, "true");
+        let disabled_client = ControlPlaneClient::from_env();
+        assert!(disabled_client.is_disabled());
+        assert_eq!(disabled_client.endpoint, ENDPOINT_DEFAULT);
+    }
+
+    #[tokio::test]
+    async fn disabled_client_short_circuits() {
+        let client = ControlPlaneClient::disabled();
+        let err = client
+            .list_sessions_for("phlax", "mcp", "mcp-fetch")
+            .await
+            .expect_err("disabled");
+        assert!(matches!(err, GateError::Disabled));
+    }
+
+    #[tokio::test]
+    async fn list_and_delete_map_success_and_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sessions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sessions": [
+                    { "session_id": "a", "tenant": "phlax", "workspace": "mcp", "plugin": "mcp-fetch" },
+                    { "session_id": "b", "tenant": "other", "workspace": "mcp", "plugin": "mcp-fetch" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/sessions/a"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = ControlPlaneClient::with_endpoint(server.uri());
+        let sessions = client
+            .list_sessions_for("phlax", "mcp", "mcp-fetch")
+            .await
+            .expect("sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "a");
+        client.delete_session("a").await.expect("delete ok");
+    }
+
+    #[tokio::test]
+    async fn delete_404_is_treated_as_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/sessions/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = ControlPlaneClient::with_endpoint(server.uri());
+        client
+            .delete_session("missing")
+            .await
+            .expect("404 should be benign");
+    }
+
+    #[tokio::test]
+    async fn unreachable_endpoint_maps_to_unavailable() {
+        let client = ControlPlaneClient::with_endpoint("http://127.0.0.1:1");
+        let err = client
+            .list_sessions_for("phlax", "mcp", "mcp-fetch")
+            .await
+            .expect_err("unavailable");
+        assert!(matches!(err, GateError::Unavailable(_)));
+    }
+
+    #[test]
+    fn outcome_summary_formats_all_variants() {
+        assert_eq!(outcome_summary(&Ok(2)), "live_sessions_terminated=2");
+        assert_eq!(
+            outcome_summary(&Err(GateError::Disabled)),
+            "live_gate=disabled"
+        );
+        assert!(
+            outcome_summary(&Err(GateError::Unavailable("boom".to_string())))
+                .contains("live_gate=unavailable")
+        );
+    }
+}

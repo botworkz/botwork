@@ -312,3 +312,148 @@ pub struct PutSecretResponse {
     /// overwrote an existing one.
     pub created: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    struct EnvGuard {
+        endpoint: Option<String>,
+        disabled: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var(ENDPOINT_ENV).ok(),
+                disabled: std::env::var(DISABLE_ENV).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(v) = &self.endpoint {
+                std::env::set_var(ENDPOINT_ENV, v);
+            } else {
+                std::env::remove_var(ENDPOINT_ENV);
+            }
+            if let Some(v) = &self.disabled {
+                std::env::set_var(DISABLE_ENV, v);
+            } else {
+                std::env::remove_var(DISABLE_ENV);
+            }
+        }
+    }
+
+    fn sample_put() -> PutSecretRequest {
+        PutSecretRequest {
+            tenant: "phlax".to_string(),
+            service: "github.com".to_string(),
+            name: "pat".to_string(),
+            kind: "opaque".to_string(),
+            value_b64: "dGVzdA==".to_string(),
+            allowed_consumers: vec![],
+            tags: vec![],
+            overwrite: false,
+        }
+    }
+
+    #[test]
+    fn from_env_honors_default_and_disable_flag() {
+        let _guard = EnvGuard::capture();
+        std::env::remove_var(ENDPOINT_ENV);
+        std::env::remove_var(DISABLE_ENV);
+
+        let default_client = SecretStoreClient::from_env();
+        assert_eq!(default_client.endpoint, ENDPOINT_DEFAULT);
+        assert!(!default_client.is_disabled());
+
+        std::env::set_var(DISABLE_ENV, "1");
+        let disabled_client = SecretStoreClient::from_env();
+        assert!(disabled_client.is_disabled());
+    }
+
+    #[tokio::test]
+    async fn disabled_client_short_circuits_operations() {
+        let client = SecretStoreClient::disabled();
+        assert!(matches!(
+            client.put_secret(sample_put()).await,
+            Err(SecretStoreError::Disabled)
+        ));
+        assert!(matches!(
+            client.delete_secret("phlax", "github.com", "pat").await,
+            Err(SecretStoreError::Disabled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn put_secret_maps_success_and_conflict() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "stored": "github.com/pat",
+                "created": true
+            })))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let ok = client.put_secret(sample_put()).await.expect("put response");
+        assert_eq!(ok.stored, "github.com/pat");
+        assert!(ok.created);
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("exists"))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let err = client.put_secret(sample_put()).await.expect_err("conflict");
+        assert!(matches!(err, SecretStoreError::AlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_secret_maps_not_found_and_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/secrets/github.com/pat"))
+            .and(query_param("tenant", "phlax"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("missing"))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let err = client
+            .delete_secret("phlax", "github.com", "pat")
+            .await
+            .expect_err("not found");
+        assert!(matches!(err, SecretStoreError::NotFound(_)));
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/secrets/github.com/pat"))
+            .and(query_param("tenant", "phlax"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        client
+            .delete_secret("phlax", "github.com", "pat")
+            .await
+            .expect("delete ok");
+    }
+
+    #[tokio::test]
+    async fn unreachable_endpoint_maps_to_unavailable() {
+        let client = SecretStoreClient::with_endpoint("http://127.0.0.1:1");
+        let err = client
+            .put_secret(sample_put())
+            .await
+            .expect_err("unavailable");
+        assert!(matches!(err, SecretStoreError::Unavailable(_)));
+    }
+}

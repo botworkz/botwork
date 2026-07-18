@@ -1370,3 +1370,372 @@ fn json_type(v: &JsonValue) -> &'static str {
 fn _imports_kept(_: &DatabaseConnection) -> JoinType {
     JoinType::InnerJoin
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::{to_bytes, Body};
+    use chrono::SecondsFormat;
+    use http::{Request, StatusCode};
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient};
+
+    fn admin_request(
+        method: &str,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(crate::handler::ADMIN_HEADER, "ops")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request")
+    }
+
+    fn request(method: &str, path: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request")
+    }
+
+    fn delete_request(path: &str) -> Request<Body> {
+        Request::builder()
+            .method("DELETE")
+            .uri(path)
+            .header(crate::handler::ADMIN_HEADER, "ops")
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    fn tenant_delete_request(path: &str, tenant: &str) -> Request<Body> {
+        Request::builder()
+            .method("DELETE")
+            .uri(path)
+            .header(crate::handler::TENANT_HEADER, tenant)
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    fn tenant_row(id: Uuid, name: &str, updated_at: chrono::DateTime<Utc>) -> tenant::Model {
+        tenant::Model {
+            id,
+            name: name.to_string(),
+            created_at: updated_at,
+            updated_at,
+        }
+    }
+
+    fn workspace_row(id: Uuid, tenant_id: Uuid, name: &str) -> workspace::Model {
+        workspace::Model {
+            id,
+            tenant_id,
+            name: name.to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn plugin_row(id: Uuid, name: &str) -> plugin::Model {
+        plugin::Model {
+            id,
+            name: name.to_string(),
+            image: "ghcr.io/example/mcp-fetch:1.0".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_auth: "none".to_string(),
+            env: serde_json::json!([]),
+            resources: None,
+            egress: serde_json::json!({ "mode": "none" }),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            current_facet_id: None,
+        }
+    }
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        serde_json::from_slice(&body).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn create_tenant_requires_admin_header() {
+        let state =
+            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(request(
+                "POST",
+                "/api/tenants",
+                serde_json::json!({ "name": "phlax" }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(response).await["error"]["code"], "admin_required");
+    }
+
+    #[tokio::test]
+    async fn create_workspace_requires_matching_tenant_header() {
+        let state =
+            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(request(
+                "POST",
+                "/api/tenant/phlax/workspaces",
+                serde_json::json!({ "name": "mcp" }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(response).await["error"]["code"], "cross_tenant_forbidden");
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_unknown_field_and_invalid_shape() {
+        let state =
+            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let app = crate::handler::build_router(state);
+
+        let unknown_response = app
+            .clone()
+            .oneshot(admin_request(
+                "POST",
+                "/api/tenants",
+                serde_json::json!({ "name": "phlax", "extra": true }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(unknown_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(unknown_response).await["error"]["code"],
+            "bad_request"
+        );
+
+        let malformed_response = app
+            .oneshot(admin_request(
+                "POST",
+                "/api/tenants",
+                serde_json::json!({ "name": 7 }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(malformed_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(malformed_response).await["error"]["code"],
+            "bad_request"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_tenant_rejects_invalid_and_reserved_names() {
+        let state =
+            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let app = crate::handler::build_router(state);
+
+        let invalid_response = app
+            .clone()
+            .oneshot(admin_request(
+                "POST",
+                "/api/tenants",
+                serde_json::json!({ "name": "bad.name" }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(invalid_response).await["error"]["code"],
+            "invalid_name"
+        );
+
+        let reserved_response = app
+            .oneshot(admin_request(
+                "POST",
+                "/api/tenants",
+                serde_json::json!({ "name": "admin" }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(reserved_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(reserved_response).await["error"]["code"],
+            "reserved_name"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_plugin_maps_validator_failure_to_422() {
+        let state =
+            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_request(
+                "POST",
+                "/api/plugins",
+                serde_json::json!({
+                    "name": "mcp-fetch",
+                    "image": "ghcr.io/example/mcp-fetch:1.0",
+                    "port": 70000
+                }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json_body(response).await["error"]["code"], "validation_failed");
+    }
+
+    #[tokio::test]
+    async fn create_tenant_maps_mock_db_error_to_internal() {
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([sea_orm::DbErr::Custom("boom".to_string())]),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_request(
+                "POST",
+                "/api/tenants",
+                serde_json::json!({ "name": "phlax" }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json_body(response).await["error"]["code"], "internal");
+    }
+
+    #[tokio::test]
+    async fn update_tenant_stale_lock_returns_conflict() {
+        let id = Uuid::new_v4();
+        let live_updated_at = chrono::Utc::now();
+        let submitted = live_updated_at + chrono::Duration::seconds(1);
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(id, "phlax", live_updated_at)]]),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_request(
+                "PUT",
+                &format!("/api/tenants/{id}"),
+                serde_json::json!({
+                    "name": "phlax",
+                    "if_unmodified_since": submitted.to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(response).await["error"]["code"], "stale_write");
+    }
+
+    #[tokio::test]
+    async fn delete_tenant_with_matching_lock_and_dependents_returns_has_dependents() {
+        let id = Uuid::new_v4();
+        let updated_at = chrono::Utc::now();
+        let workspace_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(id, "phlax", updated_at)]])
+                .append_query_results([vec![workspace_row(workspace_id, id, "mcp")]]),
+        );
+        let app = crate::handler::build_router(state);
+        let lock = updated_at.to_rfc3339_opts(SecondsFormat::Micros, true);
+
+        let response = app
+            .oneshot(delete_request(&format!(
+                "/api/tenants/{id}?if_unmodified_since={lock}"
+            )))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(response).await["error"]["code"], "has_dependents");
+    }
+
+    #[tokio::test]
+    async fn delete_tenant_with_no_dependents_proceeds() {
+        let id = Uuid::new_v4();
+        let updated_at = chrono::Utc::now();
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(id, "phlax", updated_at)]])
+                .append_query_results([Vec::<workspace::Model>::new()])
+                .append_exec_results([MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected: 1,
+                }]),
+        );
+        let app = crate::handler::build_router(state);
+        let lock = updated_at.to_rfc3339_opts(SecondsFormat::Micros, true);
+
+        let response = app
+            .oneshot(delete_request(&format!(
+                "/api/tenants/{id}?if_unmodified_since={lock}"
+            )))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_returns_503_when_control_plane_is_unavailable() {
+        let path_tenant = "phlax";
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![tenant_row(tenant_id, path_tenant, chrono::Utc::now())]])
+            .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
+            .append_query_results([vec![workspace_plugin::Model {
+                workspace_id,
+                plugin_id,
+                config: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }]])
+            .append_query_results([vec![tenant_row(tenant_id, path_tenant, chrono::Utc::now())]])
+            .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]]);
+        let state = AppState {
+            db: Arc::new(db.into_connection()),
+            control_plane: ControlPlaneClient::with_endpoint("http://127.0.0.1:1"),
+            secret_store: SecretStoreClient::disabled(),
+            session_broker: SessionBrokerClient::disabled(),
+        };
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_delete_request(
+                &format!("/api/tenant/{path_tenant}/workspaces/{workspace_id}"),
+                path_tenant,
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_body(response).await["error"]["code"], "unavailable");
+    }
+}

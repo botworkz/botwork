@@ -168,3 +168,98 @@ pub async fn signal_evict(client: &SessionBrokerClient, tenant: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    struct EnvGuard {
+        endpoint: Option<String>,
+        disabled: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var(ENDPOINT_ENV).ok(),
+                disabled: std::env::var(DISABLE_ENV).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(v) = &self.endpoint {
+                std::env::set_var(ENDPOINT_ENV, v);
+            } else {
+                std::env::remove_var(ENDPOINT_ENV);
+            }
+            if let Some(v) = &self.disabled {
+                std::env::set_var(DISABLE_ENV, v);
+            } else {
+                std::env::remove_var(DISABLE_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_honors_default_and_disable_flag() {
+        let _guard = EnvGuard::capture();
+        std::env::remove_var(ENDPOINT_ENV);
+        std::env::remove_var(DISABLE_ENV);
+
+        let default_client = SessionBrokerClient::from_env();
+        assert_eq!(default_client.endpoint, ENDPOINT_DEFAULT);
+        assert!(!default_client.is_disabled());
+
+        std::env::set_var(DISABLE_ENV, "yes");
+        let disabled_client = SessionBrokerClient::from_env();
+        assert!(disabled_client.is_disabled());
+    }
+
+    #[tokio::test]
+    async fn disabled_client_treats_evict_as_noop() {
+        let client = SessionBrokerClient::disabled();
+        client
+            .evict_tenant_sessions("phlax")
+            .await
+            .expect("disabled should be noop");
+    }
+
+    #[tokio::test]
+    async fn evict_maps_http_success_and_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/evict-tenant/phlax"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = SessionBrokerClient::with_endpoint(server.uri());
+        client
+            .evict_tenant_sessions("phlax")
+            .await
+            .expect("evict ok");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/evict-tenant/phlax"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("down"))
+            .mount(&server)
+            .await;
+        let client = SessionBrokerClient::with_endpoint(server.uri());
+        let err = client
+            .evict_tenant_sessions("phlax")
+            .await
+            .expect_err("non-success status");
+        assert!(err.0.contains("503"));
+    }
+
+    #[tokio::test]
+    async fn signal_evict_handles_failure_non_fatally() {
+        let client = SessionBrokerClient::with_endpoint("http://127.0.0.1:1");
+        signal_evict(&client, "phlax").await;
+    }
+}
