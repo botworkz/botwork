@@ -149,5 +149,5 @@ no test reads `BOTWORK_DATABASE_URL`. The integration test
 Post-#127 there is no bootstrap container any more; the equivalent
 end-to-end production-path proof now lives in api's smoke test
 (invoked by the `api` job in `.github/workflows/ci.yml`), which
-exercises the same `apply()` library function via the `botwork-tools
+exercises the same `apply()` library function via the `botctl
 bootstrap` CLI.

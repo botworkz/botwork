@@ -1,7 +1,7 @@
 //! Yaml-shape parser + list-level validation for the bootstrap config.
 //!
 //! Lifted from `botwork-bootstrap/src/config.rs` so the same shape can
-//! be parsed by `botwork-tools` (which talks to api over HTTP)
+//! be parsed by `botctl` (which talks to api over HTTP)
 //! without depending on the bootstrap crate (which drags sea-orm and
 //! tokio multi-thread into anything that links it).
 //!
@@ -106,7 +106,7 @@ pub struct WorkspacePluginRaw {
 /// What "ready to apply" means depends on the consumer:
 /// * `botwork-bootstrap` runs a sea-orm transaction that upserts each
 ///   row.
-/// * `botwork-tools bootstrap` walks the tree and translates each
+/// * `botctl bootstrap` walks the tree and translates each
 ///   entry into POST/PUT calls against api.
 ///
 /// The validated shape is the same; only the write path differs.

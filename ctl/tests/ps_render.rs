@@ -1,4 +1,4 @@
-use botwork_tools::ps::render::{render_table, TableRow};
+use botwork_ctl::ps::render::{render_table, TableRow};
 
 #[test]
 fn renders_header_only_when_no_rows() {

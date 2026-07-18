@@ -1,11 +1,11 @@
-# botwork-tools (Rust)
+# botctl (Rust)
 
 Generic CLI for Botwork operational tools.
 
 ## Usage
 
 ```bash
-botwork-tools <SUBCOMMAND>
+botctl <SUBCOMMAND>
 ```
 
 Currently implemented subcommands:
@@ -22,7 +22,7 @@ Currently implemented subcommands:
   `mcp-package.yaml`, and emit / verify / describe the
   `org.botwork.mcp.*` label set (RFE #147).
 
-## `botwork-tools mcp-probe`
+## `botctl mcp-probe`
 
 Producer-side tool for the
 [image-labels-as-plugin-descriptor flow](https://github.com/botworkz/botwork/issues/147).
@@ -48,7 +48,7 @@ Given a containerised MCP server image and a sibling
 CLI shape:
 
 ```text
-botwork-tools mcp-probe <generate|verify|describe> [OPTIONS]
+botctl mcp-probe <generate|verify|describe> [OPTIONS]
 ```
 
 Common options:
@@ -127,7 +127,7 @@ Pin to a tagged release of this repo:
     out: botwork/mcp-foo:local    # generate-only
 ```
 
-The action installs `botwork-tools` (released alongside this repo)
+The action installs `botctl` (released alongside this repo)
 and `crane`, then invokes the probe. The action's exit status is
 the probe's exit code so CI gating maps directly to the table
 above.
@@ -139,4 +139,4 @@ cargo build --release
 ```
 
 Binary output:
-- `target/release/botwork-tools`
+- `target/release/botctl`

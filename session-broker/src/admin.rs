@@ -45,7 +45,7 @@ pub async fn serve_admin(state: AppState, addr: &str) -> Result<(), String> {
 /// start recovery and instead reads `session_worker` JOIN
 /// `agent_session` directly from postgres. Anything that needs to
 /// observe in-memory state from outside the broker still uses this
-/// `GET /sessions` view (`botwork-tools ps` reads it).
+/// `GET /sessions` view (`botctl ps` reads it).
 async fn get_sessions(State(state): State<AppState>) -> Json<SessionsView> {
     let snapshot = state.transport_sessions.lock().await;
     let mut sessions: BTreeMap<String, SessionView> = BTreeMap::new();
@@ -68,7 +68,7 @@ async fn get_sessions(State(state): State<AppState>) -> Json<SessionsView> {
 #[derive(Debug, Serialize)]
 struct SessionsView {
     /// Container-name-keyed view of every live transport session.
-    /// Same shape `botwork-tools ps` consumes (it walks the values
+    /// Same shape `botctl ps` consumes (it walks the values
     /// for the operator-visible table).
     sessions: BTreeMap<String, SessionView>,
 }

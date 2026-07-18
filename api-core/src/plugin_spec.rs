@@ -79,7 +79,7 @@ pub const PLUGIN_NAME_RE: &str = r"^[a-z][a-z0-9-]{0,30}$";
 ///   DB-storage key — they live in the per-image label set instead.
 ///
 /// Lives here (next to `PLUGIN_NAME_RE`) for the same reason the
-/// env-name caps and reserved prefixes do: `botwork-tools mcp-probe`
+/// env-name caps and reserved prefixes do: `botctl mcp-probe`
 /// and a future consumer-side catalog upserter both want to enforce
 /// the rule, and "the answer to what makes a tool name valid" should
 /// have one definition, not two.

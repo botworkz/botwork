@@ -28,7 +28,7 @@ COPY db/ ./db/
 COPY launcher/ ./launcher/
 COPY opaque-handshake/ ./opaque-handshake/
 COPY session-broker/ ./session-broker/
-COPY tools/ ./tools/
+COPY ctl/ ./ctl/
 COPY version/ ./version/
 COPY VERSION ./VERSION
 COPY Cargo.toml Cargo.lock ./

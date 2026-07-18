@@ -15,7 +15,7 @@ fn dispatch_with_writer<W: Write>(args: Vec<String>, mut writer: W) -> Result<i3
             Ok(0)
         }
         Some("version") | Some("--version") | Some("-V") => {
-            writeln!(writer, "botwork-tools {}", crate::version_string())
+            writeln!(writer, "botctl {}", crate::version_string())
                 .expect("failed to write version output");
             Ok(0)
         }
@@ -73,20 +73,20 @@ fn dispatch_with_writer<W: Write>(args: Vec<String>, mut writer: W) -> Result<i3
 }
 
 fn print_usage() {
-    println!("Usage: botwork-tools <SUBCOMMAND>");
+    println!("Usage: botctl <SUBCOMMAND>");
     println!();
     println!("Available subcommands:");
-    println!("  version    Print the botwork-tools build version");
+    println!("  version    Print the botctl build version");
     println!("  ps         List running botwork sessions");
     println!("  bootstrap  Apply a bootstrap.yaml through api");
     println!("  mcp-probe  Probe an MCP image and generate / verify / describe its labels");
     println!();
-    println!("Run `botwork-tools <SUBCOMMAND> --help` for subcommand options.");
+    println!("Run `botctl <SUBCOMMAND> --help` for subcommand options.");
 }
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("unknown subcommand '{0}'\n\nUsage: botwork-tools <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botwork-tools build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
+    #[error("unknown subcommand '{0}'\n\nUsage: botctl <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botctl build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
     UnknownSubcommand(String),
     #[error(transparent)]
     Ps(#[from] ps::PsError),
@@ -114,35 +114,33 @@ mod tests {
     fn version_queries_print_the_shared_version() {
         for flag in ["version", "--version", "-V"] {
             let mut output = Vec::new();
-            let a = args(&["botwork-tools", flag]);
+            let a = args(&["botctl", flag]);
             let code = dispatch_with_writer(a, &mut output).expect("dispatch ok");
             assert_eq!(code, 0);
             assert_eq!(
                 String::from_utf8(output).expect("utf8"),
-                format!("botwork-tools {}\n", crate::version_string())
+                format!("botctl {}\n", crate::version_string())
             );
         }
     }
 
     #[test]
     fn no_args_exits_zero() {
-        let code = dispatch_with_writer(args(&["botwork-tools"]), Vec::new()).expect("ok");
+        let code = dispatch_with_writer(args(&["botctl"]), Vec::new()).expect("ok");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn help_flags_exit_zero() {
         for flag in ["-h", "--help"] {
-            let code =
-                dispatch_with_writer(args(&["botwork-tools", flag]), Vec::new()).expect("ok");
+            let code = dispatch_with_writer(args(&["botctl", flag]), Vec::new()).expect("ok");
             assert_eq!(code, 0, "flag {flag} should exit 0");
         }
     }
 
     #[test]
     fn unknown_subcommand_returns_cli_error_with_exit_2() {
-        let err =
-            dispatch_with_writer(args(&["botwork-tools", "frobnicate"]), Vec::new()).unwrap_err();
+        let err = dispatch_with_writer(args(&["botctl", "frobnicate"]), Vec::new()).unwrap_err();
         assert!(
             matches!(err, CliError::UnknownSubcommand(ref s) if s == "frobnicate"),
             "expected UnknownSubcommand(frobnicate), got {err:?}"
@@ -155,15 +153,14 @@ mod tests {
         let err = CliError::UnknownSubcommand("badcmd".to_string());
         let msg = format!("{err}");
         assert!(msg.contains("badcmd"), "{msg}");
-        assert!(msg.contains("botwork-tools"), "{msg}");
+        assert!(msg.contains("botctl"), "{msg}");
     }
 
     #[test]
     fn ps_extra_args_propagate_as_ps_error() {
         // ps with an unrecognised flag hits PsError::InvalidUsage
         // before any docker call — no container runtime needed.
-        let err = dispatch_with_writer(args(&["botwork-tools", "ps", "--extra"]), Vec::new())
-            .unwrap_err();
+        let err = dispatch_with_writer(args(&["botctl", "ps", "--extra"]), Vec::new()).unwrap_err();
         assert!(matches!(err, CliError::Ps(PsError::InvalidUsage)));
         assert_eq!(err.exit_code(), 2);
     }
@@ -172,50 +169,44 @@ mod tests {
     fn mcp_probe_no_args_exits_zero_via_usage_branch() {
         // mcp-probe with no argv produces McpProbeError::Usage (exit 0 = help).
         // dispatch converts that to Ok(0).
-        let code =
-            dispatch_with_writer(args(&["botwork-tools", "mcp-probe"]), Vec::new()).expect("ok");
+        let code = dispatch_with_writer(args(&["botctl", "mcp-probe"]), Vec::new()).expect("ok");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn mcp_probe_help_flag_exits_zero() {
         let code =
-            dispatch_with_writer(args(&["botwork-tools", "mcp-probe", "--help"]), Vec::new())
-                .expect("ok");
+            dispatch_with_writer(args(&["botctl", "mcp-probe", "--help"]), Vec::new()).expect("ok");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn mcp_probe_invalid_subcommand_exits_nonzero() {
         // An unrecognised mcp-probe sub-mode maps to InvalidUsage (exit 2).
-        let code = dispatch_with_writer(args(&["botwork-tools", "mcp-probe", "bogus"]), Vec::new())
-            .expect("ok");
+        let code =
+            dispatch_with_writer(args(&["botctl", "mcp-probe", "bogus"]), Vec::new()).expect("ok");
         assert_eq!(code, 2);
     }
 
     #[test]
     fn bootstrap_help_flag_exits_zero() {
         let code =
-            dispatch_with_writer(args(&["botwork-tools", "bootstrap", "--help"]), Vec::new())
-                .expect("ok");
+            dispatch_with_writer(args(&["botctl", "bootstrap", "--help"]), Vec::new()).expect("ok");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn bootstrap_dash_h_exits_zero() {
-        let code = dispatch_with_writer(args(&["botwork-tools", "bootstrap", "-h"]), Vec::new())
-            .expect("ok");
+        let code =
+            dispatch_with_writer(args(&["botctl", "bootstrap", "-h"]), Vec::new()).expect("ok");
         assert_eq!(code, 0);
     }
 
     #[test]
     fn bootstrap_unknown_flag_exits_2() {
         // --frobnicate is an unrecognised bootstrap flag → InvalidUsage (exit 2).
-        let code = dispatch_with_writer(
-            args(&["botwork-tools", "bootstrap", "--frobnicate"]),
-            Vec::new(),
-        )
-        .expect("ok");
+        let code = dispatch_with_writer(args(&["botctl", "bootstrap", "--frobnicate"]), Vec::new())
+            .expect("ok");
         assert_eq!(code, 2);
     }
 

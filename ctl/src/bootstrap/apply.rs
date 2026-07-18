@@ -1,4 +1,4 @@
-//! Diff-and-apply algorithm for `botwork-tools bootstrap`.
+//! Diff-and-apply algorithm for `botctl bootstrap`.
 //!
 //! ## What "apply" means
 //!
@@ -29,7 +29,7 @@
 //! before-PUT means the lock is fresh.
 //!
 //! There is intentionally NO DELETE path. Removing rows belongs
-//! to the operator UI / explicit `botwork-tools admin delete`
+//! to the operator UI / explicit `botctl admin delete`
 //! subcommand, not boot-time tooling. That property is the whole
 //! point of "bootstrap is throwaway": it adds + updates, never
 //! takes away.
