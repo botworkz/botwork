@@ -344,6 +344,10 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use axum::body::to_bytes;
+    use axum::body::Body;
+    use http::{Request, StatusCode};
+    use sea_orm::{DatabaseBackend, DbErr, MockDatabase, MockExecResult};
+    use tower::ServiceExt;
 
     use super::*;
 
@@ -433,6 +437,123 @@ mod tests {
                 .is_some_and(|message| !message.is_empty()));
             assert!(json["error"]["remediation"].is_null());
         }
+    }
+
+    fn tenant_row(id: Uuid, name: &str) -> botwork_entity::tenant::Model {
+        botwork_entity::tenant::Model {
+            id,
+            name: name.to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn operator_uses_header_or_anonymous_default() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(operator(&headers), "anonymous");
+
+        headers.insert(ADMIN_HEADER, "ops".parse().expect("header value"));
+        assert_eq!(operator(&headers), "ops");
+    }
+
+    #[tokio::test]
+    async fn resolve_tenant_id_hits_and_misses() {
+        let id = Uuid::new_v4();
+        let hit_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![tenant_row(id, "phlax")]])
+            .into_connection();
+        let miss_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<botwork_entity::tenant::Model>::new()])
+            .into_connection();
+
+        let resolved = resolve_tenant_id(&hit_db, "phlax")
+            .await
+            .expect("resolved id");
+        assert_eq!(resolved, id);
+
+        let err = resolve_tenant_id(&miss_db, "missing")
+            .await
+            .expect_err("missing tenant");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn parse_body_maps_success_and_failure() {
+        #[derive(serde::Deserialize, Debug, PartialEq, Eq)]
+        struct Demo {
+            name: String,
+        }
+
+        let ok: Demo =
+            parse_body(serde_json::json!({ "name": "phlax" })).expect("successful parse");
+        assert_eq!(
+            ok,
+            Demo {
+                name: "phlax".to_string()
+            }
+        );
+
+        let err =
+            parse_body::<Demo>(serde_json::json!({ "wrong": "field" })).expect_err("invalid parse");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn health_reports_db_reachable_and_unreachable() {
+        let reachable_state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }]),
+        );
+        let reachable_app = build_router(reachable_state);
+        let reachable_response = reachable_app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(reachable_response.status(), StatusCode::OK);
+        let reachable_json: serde_json::Value = serde_json::from_slice(
+            &to_bytes(reachable_response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(reachable_json["status"], "ok");
+        assert_eq!(reachable_json["db"], "reachable");
+
+        let unreachable_state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_exec_errors([DbErr::Custom("db down".to_string())]),
+        );
+        let unreachable_app = build_router(unreachable_state);
+        let unreachable_response = unreachable_app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unreachable_response.status(), StatusCode::OK);
+        let unreachable_json: serde_json::Value = serde_json::from_slice(
+            &to_bytes(unreachable_response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(unreachable_json["status"], "ok");
+        assert_eq!(unreachable_json["db"], "unreachable");
     }
 }
 
