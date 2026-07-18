@@ -682,4 +682,13 @@ mod tests {
         let outcome = waiter.await.expect("join").expect_err("must fail fast");
         assert_eq!(outcome, AckWaitError::NoSubscriber);
     }
+
+    #[tokio::test]
+    async fn ack_subscribers_observe_monotonic_updates() {
+        let store = SessionStore::new();
+        let mut rx = store.subscribe_acked_version();
+        store.record_acked_version(2);
+        rx.changed().await.expect("watch sender stayed open");
+        assert_eq!(*rx.borrow_and_update(), 2);
+    }
 }

@@ -311,4 +311,25 @@ mod tests {
         .to_string()
         .contains("keyring entry serialization error"));
     }
+
+    #[test]
+    fn exit_code_for_keyring_and_misc_errors_matches_contract() {
+        assert_eq!(
+            exit_code_for(&LoginError::Keyring(
+                keyring_storage_error::KeyringStorageError::NoBackend("missing".into())
+            )),
+            3
+        );
+        assert_eq!(exit_code_for(&LoginError::CaCert("bad cert".into())), 1);
+        assert_eq!(exit_code_for(&LoginError::Other("oops".into())), 1);
+    }
+
+    #[test]
+    fn display_messages_cover_remaining_user_facing_variants() {
+        let already = LoginError::AlreadyRegistered("phlax".into());
+        assert!(already.to_string().contains("already registered"));
+
+        let no_lease = LoginError::NoLease("phlax".into());
+        assert!(no_lease.to_string().contains("no active lease"));
+    }
 }
