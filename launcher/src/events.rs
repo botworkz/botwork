@@ -313,4 +313,71 @@ mod tests {
         let (_, _, exit_code) = result.unwrap();
         assert_eq!(exit_code, None);
     }
+
+    // ── build_exit_payload ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_exit_payload_with_exit_code_produces_valid_json() {
+        let bytes = build_exit_payload("mcp_session_aabbccddeeff", "die", Some(137))
+            .expect("payload must serialize");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("payload must be valid JSON");
+        assert_eq!(parsed["name"], "mcp_session_aabbccddeeff");
+        assert_eq!(parsed["event"], "die");
+        assert_eq!(parsed["exit_code"], 137);
+    }
+
+    #[test]
+    fn build_exit_payload_without_exit_code_sets_null() {
+        let bytes = build_exit_payload("mcp_session_aabbccddeeff", "oom", None)
+            .expect("payload must serialize");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("payload must be valid JSON");
+        assert_eq!(parsed["name"], "mcp_session_aabbccddeeff");
+        assert_eq!(parsed["event"], "oom");
+        assert!(parsed["exit_code"].is_null(), "exit_code should be null");
+    }
+
+    #[test]
+    fn build_exit_payload_negative_exit_code_is_preserved() {
+        let bytes = build_exit_payload("mcp_session_001122334455", "die", Some(-1))
+            .expect("payload must serialize");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(parsed["exit_code"], -1);
+    }
+
+    #[test]
+    fn build_exit_payload_destroy_event() {
+        let bytes = build_exit_payload("mcp_session_ffeeddccbbaa", "destroy", Some(0))
+            .expect("payload must serialize");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(parsed["event"], "destroy");
+        assert_eq!(parsed["exit_code"], 0);
+    }
+
+    // ── container_name_pattern ──────────────────────────────────────────────
+
+    #[test]
+    fn container_name_pattern_accepts_valid_hex_names() {
+        let re = container_name_pattern();
+        assert!(re.is_match("mcp_session_aabbccddeeff"));
+        assert!(re.is_match("mcp_session_000000000000"));
+        assert!(re.is_match("mcp_session_abcdef123456"));
+    }
+
+    #[test]
+    fn container_name_pattern_rejects_invalid_names() {
+        let re = container_name_pattern();
+        // Uppercase hex letters — the character class is `[a-f0-9]` (lowercase only)
+        assert!(!re.is_match("mcp_session_AABBCCDDEEFF"));
+        // Non-hex characters in the suffix
+        assert!(!re.is_match("mcp_session_xyz_xxxxxxxxx"));
+        // Wrong prefix entirely
+        assert!(!re.is_match("session_aabbccddeeff"));
+        assert!(!re.is_match("container_aabbccddeeff"));
+        // Empty string
+        assert!(!re.is_match(""));
+        // Just the prefix with no hex part
+        assert!(!re.is_match("mcp_session_"));
+    }
 }

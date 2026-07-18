@@ -416,4 +416,67 @@ mod tests {
         assert!(!peer_is_allowed(1000, 2000, Some(1234), Some(5678)));
         assert!(!peer_is_allowed(1000, 2000, None, None));
     }
+
+    // ── peer_pid_label ──────────────────────────────────────────────────────
+
+    #[test]
+    fn peer_pid_label_some_prints_number() {
+        use super::peer_pid_label;
+        assert_eq!(peer_pid_label(Some(42)), "42");
+        assert_eq!(peer_pid_label(Some(0)), "0");
+        assert_eq!(peer_pid_label(Some(u32::MAX)), u32::MAX.to_string());
+    }
+
+    #[test]
+    fn peer_pid_label_none_prints_unknown() {
+        use super::peer_pid_label;
+        assert_eq!(peer_pid_label(None), "unknown");
+    }
+
+    // ── panic_payload ───────────────────────────────────────────────────────
+
+    #[test]
+    fn panic_payload_from_string() {
+        use super::panic_payload;
+        let payload: Box<dyn std::any::Any + Send + 'static> = Box::new("oh no".to_string());
+        assert_eq!(panic_payload(payload), "oh no");
+    }
+
+    #[test]
+    fn panic_payload_from_static_str() {
+        use super::panic_payload;
+        let payload: Box<dyn std::any::Any + Send + 'static> = Box::new("static message");
+        assert_eq!(panic_payload(payload), "static message");
+    }
+
+    #[test]
+    fn panic_payload_unknown_type_returns_fallback() {
+        use super::panic_payload;
+        let payload: Box<dyn std::any::Any + Send + 'static> = Box::new(42u64);
+        assert_eq!(panic_payload(payload), "unknown panic payload");
+    }
+
+    // ── PeerCredentials::describe ───────────────────────────────────────────
+
+    #[test]
+    fn peer_credentials_describe_with_pid() {
+        use super::PeerCredentials;
+        let creds = PeerCredentials {
+            uid: 1000,
+            gid: 2000,
+            pid: Some(12345),
+        };
+        assert_eq!(creds.describe(), "uid=1000 gid=2000 pid=12345");
+    }
+
+    #[test]
+    fn peer_credentials_describe_without_pid() {
+        use super::PeerCredentials;
+        let creds = PeerCredentials {
+            uid: 0,
+            gid: 0,
+            pid: None,
+        };
+        assert_eq!(creds.describe(), "uid=0 gid=0 pid=unknown");
+    }
 }

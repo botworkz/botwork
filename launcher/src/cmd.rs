@@ -426,4 +426,70 @@ mod tests {
         assert!(!out.contains(&token), "raw token must not appear: {out}");
         assert!(out.contains("<redacted:"), "placeholder must appear: {out}");
     }
+
+    // ── run_command ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_command_returns_zero_for_true() {
+        use super::run_command;
+        let out = run_command(&["true".to_string()]).expect("run_command should not error");
+        assert_eq!(out.returncode, 0);
+    }
+
+    #[test]
+    fn run_command_returns_nonzero_for_false() {
+        use super::run_command;
+        let out = run_command(&["false".to_string()]).expect("run_command should not error");
+        assert_ne!(out.returncode, 0);
+    }
+
+    #[test]
+    fn run_command_captures_stdout() {
+        use super::run_command;
+        let out = run_command(&["echo".to_string(), "hello world".to_string()])
+            .expect("run_command should not error");
+        assert_eq!(out.returncode, 0);
+        assert!(out.stdout.contains("hello world"));
+    }
+
+    #[test]
+    fn run_command_captures_stderr() {
+        use super::run_command;
+        // `sh -c 'echo msg >&2'` writes to stderr and exits 0
+        let out = run_command(&[
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo errline >&2".to_string(),
+        ])
+        .expect("run_command should not error");
+        assert_eq!(out.returncode, 0);
+        assert!(out.stderr.contains("errline"), "stderr: {}", out.stderr);
+    }
+
+    #[test]
+    fn run_command_empty_args_returns_error() {
+        use super::run_command;
+        let err = run_command(&[]).expect_err("empty args should fail");
+        assert!(err.contains("requires at least one argument"), "{err}");
+    }
+
+    // ── run_command_with_stdin ──────────────────────────────────────────────
+
+    #[test]
+    fn run_command_with_stdin_pipes_data_to_child() {
+        use super::run_command_with_stdin;
+        // `cat` reads stdin and writes it to stdout verbatim.
+        let input = b"BOTWORK_SECRET_X=hunter2\n";
+        let out = run_command_with_stdin(&["cat".to_string()], input)
+            .expect("run_command_with_stdin should not error");
+        assert_eq!(out.returncode, 0);
+        assert_eq!(out.stdout.as_bytes(), input);
+    }
+
+    #[test]
+    fn run_command_with_stdin_empty_args_returns_error() {
+        use super::run_command_with_stdin;
+        let err = run_command_with_stdin(&[], b"data").expect_err("empty args should fail");
+        assert!(err.contains("requires at least one argument"), "{err}");
+    }
 }

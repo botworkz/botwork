@@ -178,7 +178,7 @@ fn chown_path(path: &str, uid: u32, gid: u32) -> Result<(), LauncherError> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_not_mounted_or_einval;
+    use super::{fallback_message, is_not_mounted_or_einval};
 
     #[test]
     fn umount_stderr_classification_matches_python_behavior() {
@@ -186,5 +186,37 @@ mod tests {
         assert!(is_not_mounted_or_einval("umount: /path: Invalid argument"));
         assert!(is_not_mounted_or_einval("EInVaL"));
         assert!(!is_not_mounted_or_einval("permission denied"));
+    }
+
+    // ── fallback_message ────────────────────────────────────────────────────
+
+    #[test]
+    fn fallback_message_returns_fallback_when_stderr_is_empty() {
+        assert_eq!(
+            fallback_message("", "the fallback".to_string()),
+            "the fallback"
+        );
+    }
+
+    #[test]
+    fn fallback_message_returns_trimmed_stderr_when_non_empty() {
+        assert_eq!(
+            fallback_message("  actual error  ", "ignored".to_string()),
+            "actual error"
+        );
+    }
+
+    #[test]
+    fn fallback_message_returns_fallback_for_whitespace_only_stderr() {
+        assert_eq!(
+            fallback_message("   \t\n  ", "fallback".to_string()),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn fallback_message_returns_stderr_content_verbatim_when_already_trimmed() {
+        let msg = "mount: /staging: device or resource busy";
+        assert_eq!(fallback_message(msg, "ignored fallback".to_string()), msg);
     }
 }
