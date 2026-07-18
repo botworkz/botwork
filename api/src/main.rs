@@ -112,7 +112,7 @@ async fn main() -> ExitCode {
 
     let bind = bind_from_env();
     let app = build_router(AppState {
-        store: Arc::new(SeaOrmApiStore::new(db.clone())),
+        store: Arc::new(SeaOrmApiStore::new_shared(db.clone())),
         db,
         control_plane,
         secret_store,

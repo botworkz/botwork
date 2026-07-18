@@ -344,10 +344,10 @@ pub async fn run() -> Result<(), String> {
     };
     let db_arc = Arc::new(db);
     let agent_session_writer = Some(Arc::new(
-        crate::store::sea_orm_impl::SeaOrmAgentSessionStore::new(Arc::clone(&db_arc)),
+        crate::store::sea_orm_impl::SeaOrmAgentSessionStore::new_shared(Arc::clone(&db_arc)),
     ) as Arc<dyn crate::store::AgentSessionStore>);
     let session_worker_writer = Some(Arc::new(
-        crate::store::sea_orm_impl::SeaOrmSessionWorkerStore::new(Arc::clone(&db_arc)),
+        crate::store::sea_orm_impl::SeaOrmSessionWorkerStore::new_shared(Arc::clone(&db_arc)),
     ) as Arc<dyn crate::store::SessionWorkerStore>);
 
     let admin_addr = std::env::var("BOTWORK_SESSION_BROKER_ADMIN_ADDR")

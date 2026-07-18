@@ -9,7 +9,7 @@ use crate::{AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient
 pub(crate) fn app_state_with_db(db: DatabaseConnection) -> AppState {
     let db = Arc::new(db);
     AppState {
-        store: Arc::new(SeaOrmApiStore::new(db.clone())),
+        store: Arc::new(SeaOrmApiStore::new_shared(db.clone())),
         db,
         control_plane: ControlPlaneClient::disabled(),
         secret_store: SecretStoreClient::disabled(),

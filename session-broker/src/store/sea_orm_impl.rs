@@ -16,7 +16,14 @@ pub struct SeaOrmAgentSessionStore {
 impl SeaOrmAgentSessionStore {
     /// Create a SeaORM-backed [`AgentSessionStore`] delegating to
     /// [`AgentSessionWriter`].
-    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self {
+            writer: AgentSessionWriter::new(Arc::new(db)),
+        }
+    }
+
+    /// Create a SeaORM-backed [`AgentSessionStore`] from a shared connection.
+    pub fn new_shared(db: Arc<DatabaseConnection>) -> Self {
         Self {
             writer: AgentSessionWriter::new(db),
         }
@@ -89,7 +96,14 @@ pub struct SeaOrmSessionWorkerStore {
 impl SeaOrmSessionWorkerStore {
     /// Create a SeaORM-backed [`SessionWorkerStore`] delegating to
     /// [`SessionWorkerWriter`].
-    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self {
+            writer: SessionWorkerWriter::new(Arc::new(db)),
+        }
+    }
+
+    /// Create a SeaORM-backed [`SessionWorkerStore`] from a shared connection.
+    pub fn new_shared(db: Arc<DatabaseConnection>) -> Self {
         Self {
             writer: SessionWorkerWriter::new(db),
         }

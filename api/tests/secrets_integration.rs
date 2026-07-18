@@ -142,7 +142,7 @@ async fn spawn_server(
 
     let db = Arc::new(db);
     let state = AppState {
-        store: Arc::new(SeaOrmApiStore::new(db.clone())),
+        store: Arc::new(SeaOrmApiStore::new_shared(db.clone())),
         db,
         control_plane: ControlPlaneClient::disabled(),
         secret_store,
