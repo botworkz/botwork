@@ -490,4 +490,30 @@ mod tests {
         let err = compose(&pkg, &probe).unwrap_err();
         assert!(matches!(err, ComposeError::CatalogShape(_)));
     }
+
+    #[test]
+    fn compose_omits_optional_server_version_and_orders_prompts() {
+        let pkg = minimal_package();
+        let mut probe = minimal_probe();
+        probe.server_info.version = None;
+        probe.prompts = vec![
+            json!({"name": "zeta", "description": "last"}),
+            json!({"name": "alpha"}),
+        ];
+        let labels = compose(&pkg, &probe).expect("compose");
+        assert!(!labels.contains_key("org.botwork.mcp.server-info.version"));
+        assert_eq!(
+            labels.get("org.botwork.mcp.prompts.count"),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            labels.get("org.botwork.mcp.prompts.0.name"),
+            Some(&"alpha".to_string())
+        );
+        assert!(!labels.contains_key("org.botwork.mcp.prompts.0.description"));
+        assert_eq!(
+            labels.get("org.botwork.mcp.prompts.1.description"),
+            Some(&"last".to_string())
+        );
+    }
 }

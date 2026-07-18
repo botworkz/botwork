@@ -1063,4 +1063,32 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn egress_allow_entry_rejects_missing_host_and_ports_and_unknown_keys() {
+        for yaml in [
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - ports: [443]\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com\n",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com\n    ports: [443]\n    scheme: https\n",
+        ] {
+            assert!(validate_one(&raw("p", yaml)).is_err(), "{yaml}");
+        }
+    }
+
+    #[test]
+    fn env_and_binding_helpers_cover_null_and_type_names() {
+        let null_env = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv: null\n",
+        );
+        assert_eq!(validate_one(&null_env).unwrap().env, serde_json::json!([]));
+
+        assert_eq!(yaml_type_name(&serde_yaml::Value::Null), "null");
+        assert_eq!(
+            yaml_type_name(&serde_yaml::from_str::<serde_yaml::Value>("[]").unwrap()),
+            "sequence"
+        );
+        assert_eq!(json_type_name(&serde_json::json!(true)), "bool");
+        assert_eq!(json_type_name(&serde_json::json!({})), "object");
+    }
 }

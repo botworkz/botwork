@@ -115,10 +115,13 @@ async fn evict_tenant(
 mod tests {
     use super::*;
     use crate::{AppState, TransportState, UpstreamAuth};
+    use axum::body::{to_bytes, Body};
+    use http::Request;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
+    use tower::ServiceExt;
 
     fn bare_state() -> AppState {
         AppState {
@@ -184,5 +187,52 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn build_router_serves_sessions_and_evict_routes() {
+        let state = bare_state();
+        state.transport_sessions.lock().await.insert(
+            "sess-1".to_string(),
+            sample_transport("mcp-session-a", "tenant-a"),
+        );
+        let app = build_router(state);
+
+        let sessions_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("sessions response");
+        assert_eq!(sessions_response.status(), StatusCode::OK);
+        let bytes = to_bytes(sessions_response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(json["sessions"]["mcp-session-a"]["tenant"], "tenant-a");
+
+        let evict_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/evict-tenant/tenant-a")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("evict response");
+        assert_eq!(evict_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn serve_admin_rejects_invalid_bind_address() {
+        let err = serve_admin(bare_state(), "definitely not a socket address")
+            .await
+            .expect_err("invalid address should fail");
+        assert!(err.contains("failed to bind admin HTTP server"), "{err}");
     }
 }
