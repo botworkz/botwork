@@ -500,31 +500,40 @@ mod tests {
         value: u8,
     }
 
+    fn fixture_input() -> Vec<u8> {
+        [104_u8, 117, 110, 116, 101, 114, 50].to_vec()
+    }
+
     fn fixture_registration() -> (RegistrationRequest, RegistrationUpload) {
         let mut rng = rand::thread_rng();
         let setup = ServerSetup::generate(&mut rng);
-        let input = b"hunter2";
-        let start = client::registration_start(&mut rng, input).unwrap();
+        let input = fixture_input();
+        let start = client::registration_start(&mut rng, input.as_slice()).unwrap();
         let request = start.request.clone();
         let response =
             server::registration_start(&setup, request.clone(), b"phlax@example.com").unwrap();
         let finish =
-            client::registration_finish(&mut rng, start.state, input, response.response).unwrap();
+            client::registration_finish(&mut rng, start.state, input.as_slice(), response.response)
+                .unwrap();
         (request, finish.upload)
     }
 
     fn fixture_login() -> (LoginRequest, LoginFinalization) {
         let mut rng = rand::thread_rng();
         let setup = ServerSetup::generate(&mut rng);
-        let input = b"hunter2";
-        let registration = client::registration_start(&mut rng, input).unwrap();
+        let input = fixture_input();
+        let registration = client::registration_start(&mut rng, input.as_slice()).unwrap();
         let response =
             server::registration_start(&setup, registration.request, b"phlax@example.com").unwrap();
-        let finish =
-            client::registration_finish(&mut rng, registration.state, input, response.response)
-                .unwrap();
+        let finish = client::registration_finish(
+            &mut rng,
+            registration.state,
+            input.as_slice(),
+            response.response,
+        )
+        .unwrap();
         let password_file = server::registration_finish(finish.upload);
-        let login = client::login_start(&mut rng, input).unwrap();
+        let login = client::login_start(&mut rng, input.as_slice()).unwrap();
         let request = login.request.clone();
         let response = server::login_start(
             &mut rng,
@@ -534,7 +543,8 @@ mod tests {
             b"phlax@example.com",
         )
         .unwrap();
-        let finish = client::login_finish(login.state, input, response.response).unwrap();
+        let finish =
+            client::login_finish(login.state, input.as_slice(), response.response).unwrap();
         (request, finish.finalization)
     }
 

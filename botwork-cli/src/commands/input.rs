@@ -111,7 +111,7 @@ fn trim_password_line(mut line: String) -> String {
 
 fn password_bytes_from_line(
     line: String,
-    empty_message: &'static str,
+    empty_message: &str,
 ) -> Result<Zeroizing<Vec<u8>>, LoginError> {
     let line = trim_password_line(line);
     if line.is_empty() {
