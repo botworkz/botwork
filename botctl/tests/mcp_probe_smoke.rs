@@ -1,4 +1,4 @@
-//! Integration smoke for `botwork-tools mcp-probe`.
+//! Integration smoke for `botctl mcp-probe`.
 //!
 //! Stands up a fake MCP server with [`hyper`] (no rmcp dependency —
 //! the probe drives the wire directly, so an in-process JSON-RPC
@@ -6,10 +6,10 @@
 //! a known shape).
 //!
 //! The headline scenario is `compose_pipeline_against_in_process_server`:
-//! exercises [`botwork_tools::mcp_probe::probe::handshake`] against a
+//! exercises [`botctl::mcp_probe::probe::handshake`] against a
 //! hyper server that answers `initialize`, `notifications/initialized`,
 //! and `tools/list`, then runs the captured catalog through
-//! [`botwork_tools::mcp_probe::compose::compose`] and asserts the
+//! [`botctl::mcp_probe::compose::compose`] and asserts the
 //! full label set matches the v1 schema. No docker, no patch, no
 //! verify — proves the probe→compose pipe end-to-end without a
 //! container runtime in CI.
@@ -38,10 +38,10 @@ use serde_json::{json, Value as JsonValue};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+use botctl::mcp_probe::compose::compose;
+use botctl::mcp_probe::probe::handshake;
+use botctl::VERSION;
 use botwork_api_core::package::{Isolation, PackageFileEntry, SpillEntry, SpillMode};
-use botwork_tools::mcp_probe::compose::compose;
-use botwork_tools::mcp_probe::probe::handshake;
-use botwork_tools::VERSION;
 
 /// Spin a fake MCP server on a random local port. Returns the URL
 /// the probe should hit + the JoinHandle (kept alive for the test
@@ -376,7 +376,7 @@ async fn probe_surfaces_handshake_shape_error_when_server_omits_serverinfo() {
 // feedback it has been dropped rather than carried as a permanent
 // TODO; the real end-to-end coverage is the
 // `actions/mcp-probe/action.yml` composite step exercised by
-// consumer-repo CI against the published `botwork-tools` binary. The
+// consumer-repo CI against the published `botctl` binary. The
 // three in-process tests above cover the probe→compose pipe directly
 // and need no docker, so the unit-test-side acceptance criterion
 // from the RFE is met without the placeholder.

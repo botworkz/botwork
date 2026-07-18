@@ -1,10 +1,10 @@
-# `botwork-tools mcp-probe` composite action.
+# `botctl mcp-probe` composite action.
 #
 # Filed against this RFE: https://github.com/botworkz/botwork/issues/147
 #
-# Thin wrapper around the released `botwork-tools` binary. The action
+# Thin wrapper around the released `botctl` binary. The action
 # downloads the release artifact (same one VM consumes), installs
-# `crane`, and invokes `botwork-tools mcp-probe <mode> ...` with the
+# `crane`, and invokes `botctl mcp-probe <mode> ...` with the
 # supplied inputs.
 #
 # Pinning policy: consumers MUST pin to a tagged release. The action
@@ -30,7 +30,7 @@
 #     contract change.
 #
 # Outputs are the action's exit status — every mcp-probe exit code
-# bubbles up. See `botwork-tools mcp-probe --help` for the full
+# bubbles up. See `botctl mcp-probe --help` for the full
 # table; the load-bearing ones are 0 (ok), 6 (verify drift), and 7
 # (crane+buildx both unavailable).
 
@@ -87,7 +87,7 @@ inputs:
     default: 'docker'
   tools_version:
     description: >-
-      The `botwork-tools` release tag to install. REQUIRED, no default
+      The `botctl` release tag to install. REQUIRED, no default
       — consumers must pin a tagged release so the action's runtime
       surface stays reproducible across runner upgrades. Set to `latest`
       explicitly if you really want floating-version behaviour and own
@@ -104,14 +104,14 @@ inputs:
 runs:
   using: 'composite'
   steps:
-  # ── Install botwork-tools ───────────────────────────────────────────
+  # ── Install botctl ───────────────────────────────────────────
   # We download from the matching release tag and drop the binary
   # into the runner's PATH. The release artifact is published by
   # `botwork`'s own ci.yml (release-binaries job) so there's no
   # separate "tools" release stream to track. `latest` is supported
   # explicitly for consumers who opt in to the floating tag (see the
   # input's docstring).
-  - name: Install botwork-tools (${{ inputs.tools_version }})
+  - name: Install botctl (${{ inputs.tools_version }})
     shell: bash
     run: |
       set -euo pipefail
@@ -121,17 +121,17 @@ runs:
       if [ "${version}" = "latest" ]; then
         gh release download \
           --repo botworkz/botwork \
-          --pattern 'botwork-tools' \
+          --pattern 'botctl' \
           --dir "${RUNNER_TEMP}"
       else
         gh release download "${version}" \
           --repo botworkz/botwork \
-          --pattern 'botwork-tools' \
+          --pattern 'botctl' \
           --dir "${RUNNER_TEMP}"
       fi
-      install -m 0755 "${RUNNER_TEMP}/botwork-tools" /usr/local/bin/botwork-tools
-      echo "::group::botwork-tools version"
-      botwork-tools --help
+      install -m 0755 "${RUNNER_TEMP}/botctl" /usr/local/bin/botctl
+      echo "::group::botctl version"
+      botctl --help
       echo "::endgroup::"
     env:
       GH_TOKEN: ${{ github.token }}
@@ -197,8 +197,8 @@ runs:
         fi
         argv+=( '--out' '${{ inputs.out }}' )
       fi
-      echo "::group::botwork-tools mcp-probe ${argv[*]}"
-      botwork-tools mcp-probe "${argv[@]}"
+      echo "::group::botctl mcp-probe ${argv[*]}"
+      botctl mcp-probe "${argv[@]}"
       echo "::endgroup::"
 
 branding:

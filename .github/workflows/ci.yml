@@ -136,7 +136,7 @@ jobs:
       needs-docker: ${{ matrix.needs-docker || false }}
 
   release-binaries:
-    # `botwork-launcher` and `botwork-tools` ride into the GitHub Release
+    # `botwork-launcher` and `botctl` ride into the GitHub Release
     # as binary assets. Today they are recompiled inside `release.yml`'s
     # publish job on every release push; this PR moves the build into CI
     # so the binaries attached to the Release are the same bytes that the
@@ -166,7 +166,7 @@ jobs:
         BOTWORK_GIT_SHA: ${{ github.sha }}
       run: |
         set -euo pipefail
-        cargo build --release --locked -p botwork-launcher -p botwork-tools
+        cargo build --release --locked -p botwork-launcher -p botctl
 
     - name: Upload release binaries
       uses: actions/upload-artifact@v4
@@ -174,7 +174,7 @@ jobs:
         name: release-binaries
         path: |
           target/release/botwork-launcher
-          target/release/botwork-tools
+          target/release/botctl
         if-no-files-found: error
 
   publish:
@@ -328,5 +328,5 @@ jobs:
         fail_on_unmatched_files: true
         files: |
           .ci-binaries/botwork-launcher
-          .ci-binaries/botwork-tools
+          .ci-binaries/botctl
           .ci-binaries/bw

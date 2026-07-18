@@ -13,7 +13,7 @@
 //!   { "error": "<machine code>", "message": "<human detail>" }
 //!   ```
 //!
-//! * `botwork-tools bootstrap` — surfaces the variant verbatim through
+//! * `botctl bootstrap` — surfaces the variant verbatim through
 //!   stderr; exit-code-mapping mirrors the bootstrap binary's so the
 //!   systemd-callable interface stays uniform across writers.
 //!

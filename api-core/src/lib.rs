@@ -6,8 +6,8 @@
 //!   Retired by RFE #106 PR4 (botwork#TBD); the crate stays available
 //!   during the cutover so its tests can keep using these types.
 //! * `botwork-api` — HTTP+JSON writer (RFE #106 PR3) consumed by
-//!   the operator UI and `botwork-tools bootstrap`.
-//! * `botwork-tools bootstrap` — operator-facing import subcommand;
+//!   the operator UI and `botctl bootstrap`.
+//! * `botctl bootstrap` — operator-facing import subcommand;
 //!   parses the same yaml shape and POSTs through api.
 //!
 //! The three writers are structurally different but the answer to
@@ -27,7 +27,7 @@
 //!   bootstrap's runtime stack (sea-orm, multi-thread tokio) just to
 //!   parse a config file.
 //! * [`package`] — `mcp-package.yaml` parser + validator consumed by
-//!   `botwork-tools mcp-probe`. Shares per-field rules with
+//!   `botctl mcp-probe`. Shares per-field rules with
 //!   [`plugin_spec`] (image-less plugin entry + `isolation` + `spill`)
 //!   so the producer-side rules and the consumer-side rules can't
 //!   drift apart.
@@ -38,7 +38,7 @@
 //!   it can be consumed by tests / tooling that don't link sea-orm.
 //!   Conversions live in the consumer crates.
 //! * Apply / upsert logic — `botwork-bootstrap::runner` (DB-side
-//!   sea-orm txn) and `botwork-tools::bootstrap` (HTTP POSTs through
+//!   sea-orm txn) and `botctl::bootstrap` (HTTP POSTs through
 //!   api) each own their own write path.
 //!
 //! # Stability

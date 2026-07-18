@@ -1,18 +1,18 @@
 [package]
-name = "botwork-tools"
+name = "botctl"
 version = "0.0.0"
 edition = "2021"
 
 [lib]
-name = "botwork_tools"
+name = "botctl"
 path = "src/lib.rs"
 
 [[bin]]
-name = "botwork-tools"
+name = "botctl"
 path = "src/main.rs"
 
 [dependencies]
-# RFE #106 PR4: `botwork-tools bootstrap` parses the same yaml the old
+# RFE #106 PR4: `botctl bootstrap` parses the same yaml the old
 # bootstrap binary parsed (via api-core) and POSTs through api.
 # api-core stays sea-orm-free so we don't drag the DB stack into the
 # operator tool.
@@ -23,7 +23,7 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `botwork-tools mcp-probe` reads + validates `mcp-package.yaml`. The
+# `botctl mcp-probe` reads + validates `mcp-package.yaml`. The
 # api-core validator is yaml-shaped, so the loader side stays yaml.
 # Matches api-core's serde_yaml pin so the parser is shared from the
 # dep cache.
@@ -40,7 +40,7 @@ tempfile = "3"
 # against control-plane (botworkz/botwork#112).
 wiremock = "0.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-# RFE #105 round-3 cleanup: `botwork-tools ps` now consumes
+# RFE #105 round-3 cleanup: `botctl ps` now consumes
 # session-broker's `GET /sessions` HTTP endpoint instead of reading
 # the retired `/var/lib/botwork/sessions.json` file. The deserialiser
 # tests stand up a small in-process HTTP server (same shape

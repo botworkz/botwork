@@ -1,4 +1,4 @@
-//! Wiremock-stubbed integration tests for `botwork-tools bootstrap`.
+//! Wiremock-stubbed integration tests for `botctl bootstrap`.
 //!
 //! Spins an in-process wiremock server that stands in for `botwork-api`
 //! and exercises the full `apply()` path (and the individual client
@@ -13,8 +13,8 @@
 //! The blocking `AdminClient` is driven from a `spawn_blocking` task so
 //! we stay on the tokio multi-thread executor without deadlocking.
 
-use botwork_tools::bootstrap::apply::{apply, ApplyOutcome};
-use botwork_tools::bootstrap::client::AdminClient;
+use botctl::bootstrap::apply::{apply, ApplyOutcome};
+use botctl::bootstrap::client::AdminClient;
 use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -447,7 +447,7 @@ async fn create_workspace_body_has_no_tenant_id_field() {
 
     let endpoint = server.uri();
     tokio::task::spawn_blocking(move || {
-        use botwork_tools::bootstrap::client::CreateWorkspace;
+        use botctl::bootstrap::client::CreateWorkspace;
         client(&endpoint)
             .create_workspace(TENANT, &CreateWorkspace { name: "mcp" })
             .expect("ok")
@@ -481,7 +481,7 @@ async fn create_workspace_plugin_carries_both_headers() {
 
     let endpoint = server.uri();
     tokio::task::spawn_blocking(move || {
-        use botwork_tools::bootstrap::client::CreateWorkspacePlugin;
+        use botctl::bootstrap::client::CreateWorkspacePlugin;
         client(&endpoint)
             .create_workspace_plugin(
                 TENANT,
@@ -503,7 +503,7 @@ async fn create_workspace_plugin_carries_both_headers() {
 /// is clear rather than silent.
 #[tokio::test]
 async fn old_url_prefix_returns_http_error_not_transport() {
-    use botwork_tools::bootstrap::client::ClientError;
+    use botctl::bootstrap::client::ClientError;
 
     let server = MockServer::start().await;
     // No mocks: wiremock returns 404 for every request by default.
