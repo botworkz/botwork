@@ -119,6 +119,8 @@ jobs:
           binary: bw
           artifact: binary
         - crate: opaque-handshake
+          # Keep `service` populated for a uniform matrix/job-display shape
+          # across artifact types; artifact=none skips all image behavior.
           service: botwork-opaque-handshake
           package: botwork-opaque-handshake
           artifact: none

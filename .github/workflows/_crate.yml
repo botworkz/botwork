@@ -102,7 +102,9 @@ on:
         default: ''
       artifact:
         description: >-
-          Artifact tail for this crate: none, binary, or container.
+          Artifact publishing behavior for this crate:
+          none (gates only), binary (release binary artifact),
+          or container (existing container image path).
         required: true
         type: string
       needs-db-migrate:
