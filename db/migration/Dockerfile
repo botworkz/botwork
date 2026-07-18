@@ -17,11 +17,13 @@ COPY api/ ./api/
 COPY api-core/ ./api-core/
 COPY ui/ ./ui/
 COPY bootstrap/ ./bootstrap/
+COPY botwork-cli/ ./botwork-cli/
 COPY config-broker/ ./config-broker/
 COPY control-plane/ ./control-plane/
 COPY db/ ./db/
-COPY session-broker/ ./session-broker/
 COPY launcher/ ./launcher/
+COPY opaque-handshake/ ./opaque-handshake/
+COPY session-broker/ ./session-broker/
 COPY tools/ ./tools/
 COPY version/ ./version/
 COPY VERSION ./VERSION
