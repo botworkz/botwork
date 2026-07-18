@@ -14,6 +14,8 @@ pub struct SeaOrmAgentSessionStore {
 }
 
 impl SeaOrmAgentSessionStore {
+    /// Create a SeaORM-backed [`AgentSessionStore`] delegating to
+    /// [`AgentSessionWriter`].
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self {
             writer: AgentSessionWriter::new(db),
@@ -85,6 +87,8 @@ pub struct SeaOrmSessionWorkerStore {
 }
 
 impl SeaOrmSessionWorkerStore {
+    /// Create a SeaORM-backed [`SessionWorkerStore`] delegating to
+    /// [`SessionWorkerWriter`].
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self {
             writer: SessionWorkerWriter::new(db),

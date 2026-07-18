@@ -51,20 +51,21 @@ impl MockAgentSessionStore {
         agent_session_id: impl Into<String>,
         id: Uuid,
     ) -> Self {
-        let mut inner = self.inner.lock().expect("lock");
-        inner.rows.insert(
-            (
-                tenant_name.into(),
-                workspace_name.into(),
-                agent_session_id.into(),
-            ),
-            AgentSessionRow {
-                id,
-                state: botwork_entity::agent_session::state::ACTIVE.to_string(),
-                reactivation_count: 0,
-            },
-        );
-        drop(inner);
+        {
+            let mut inner = self.inner.lock().expect("lock");
+            inner.rows.insert(
+                (
+                    tenant_name.into(),
+                    workspace_name.into(),
+                    agent_session_id.into(),
+                ),
+                AgentSessionRow {
+                    id,
+                    state: botwork_entity::agent_session::state::ACTIVE.to_string(),
+                    reactivation_count: 0,
+                },
+            );
+        }
         self
     }
 
@@ -76,20 +77,21 @@ impl MockAgentSessionStore {
         id: Uuid,
         state: impl Into<String>,
     ) -> Self {
-        let mut inner = self.inner.lock().expect("lock");
-        inner.rows.insert(
-            (
-                tenant_name.into(),
-                workspace_name.into(),
-                agent_session_id.into(),
-            ),
-            AgentSessionRow {
-                id,
-                state: state.into(),
-                reactivation_count: 0,
-            },
-        );
-        drop(inner);
+        {
+            let mut inner = self.inner.lock().expect("lock");
+            inner.rows.insert(
+                (
+                    tenant_name.into(),
+                    workspace_name.into(),
+                    agent_session_id.into(),
+                ),
+                AgentSessionRow {
+                    id,
+                    state: state.into(),
+                    reactivation_count: 0,
+                },
+            );
+        }
         self
     }
 
@@ -97,7 +99,7 @@ impl MockAgentSessionStore {
         std::mem::take(&mut self.inner.lock().expect("lock").recorded_bind)
     }
 
-    fn maybe_err(&self) -> Option<AgentSessionWriteError> {
+    fn maybe_db_err(&self) -> Option<AgentSessionWriteError> {
         self.always_error
             .as_ref()
             .map(|m| AgentSessionWriteError::Db(DbErr::Custom(m.clone())))
@@ -112,7 +114,7 @@ impl AgentSessionStore for MockAgentSessionStore {
         workspace_name: &str,
         agent_session_id: &str,
     ) -> Result<(), AgentSessionWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let mut inner = self.inner.lock().expect("lock");
@@ -150,7 +152,7 @@ impl AgentSessionStore for MockAgentSessionStore {
         workspace_name: &str,
         agent_session_id: &str,
     ) -> Result<(), AgentSessionWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let mut inner = self.inner.lock().expect("lock");
@@ -173,7 +175,7 @@ impl AgentSessionStore for MockAgentSessionStore {
         workspace_name: &str,
         agent_session_id: &str,
     ) -> Result<(), AgentSessionWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let mut inner = self.inner.lock().expect("lock");
@@ -196,7 +198,7 @@ impl AgentSessionStore for MockAgentSessionStore {
         workspace_name: &str,
         agent_session_id: &str,
     ) -> Result<(), AgentSessionWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let mut inner = self.inner.lock().expect("lock");
@@ -219,7 +221,7 @@ impl AgentSessionStore for MockAgentSessionStore {
         workspace_name: &str,
         agent_session_id: &str,
     ) -> Result<Option<Uuid>, AgentSessionWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         Ok(self
@@ -276,11 +278,12 @@ impl MockSessionWorkerStore {
     }
 
     pub fn with_plugin(self, id: Uuid, name: impl Into<String>) -> Self {
-        let mut inner = self.inner.lock().expect("lock");
-        let name = name.into();
-        inner.plugin_ids_by_name.insert(name.clone(), id);
-        inner.plugin_names_by_id.insert(id, name);
-        drop(inner);
+        {
+            let mut inner = self.inner.lock().expect("lock");
+            let name = name.into();
+            inner.plugin_ids_by_name.insert(name.clone(), id);
+            inner.plugin_names_by_id.insert(id, name);
+        }
         self
     }
 
@@ -291,20 +294,21 @@ impl MockSessionWorkerStore {
         mcp_session_id: impl Into<String>,
         plugin_id: Uuid,
     ) -> Self {
-        let mut inner = self.inner.lock().expect("lock");
-        let container_name = container_name.into();
-        inner.workers.insert(
-            container_name.clone(),
-            SessionWorkerRow {
-                container_name,
-                container_ip: container_ip.into(),
-                mcp_session_id: mcp_session_id.into(),
-                plugin_id,
-                agent_session_id: None,
-                reaped_at: None,
-            },
-        );
-        drop(inner);
+        {
+            let mut inner = self.inner.lock().expect("lock");
+            let container_name = container_name.into();
+            inner.workers.insert(
+                container_name.clone(),
+                SessionWorkerRow {
+                    container_name,
+                    container_ip: container_ip.into(),
+                    mcp_session_id: mcp_session_id.into(),
+                    plugin_id,
+                    agent_session_id: None,
+                    reaped_at: None,
+                },
+            );
+        }
         self
     }
 
@@ -312,7 +316,7 @@ impl MockSessionWorkerStore {
         std::mem::take(&mut self.inner.lock().expect("lock").recorded_reaps)
     }
 
-    fn maybe_err(&self) -> Option<SessionWorkerWriteError> {
+    fn maybe_db_err(&self) -> Option<SessionWorkerWriteError> {
         self.always_error
             .as_ref()
             .map(|m| SessionWorkerWriteError::Db(DbErr::Custom(m.clone())))
@@ -327,7 +331,7 @@ impl SessionWorkerStore for MockSessionWorkerStore {
         container_name: &str,
         container_ip: &str,
     ) -> Result<(), SessionWorkerWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let mut inner = self.inner.lock().expect("lock");
@@ -360,7 +364,7 @@ impl SessionWorkerStore for MockSessionWorkerStore {
         container_name: &str,
         mcp_session_id: &str,
     ) -> Result<(), SessionWorkerWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let mut inner = self.inner.lock().expect("lock");
@@ -381,7 +385,7 @@ impl SessionWorkerStore for MockSessionWorkerStore {
         container_name: &str,
         agent_session_id: Uuid,
     ) -> Result<(), SessionWorkerWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let mut inner = self.inner.lock().expect("lock");
@@ -398,7 +402,7 @@ impl SessionWorkerStore for MockSessionWorkerStore {
     }
 
     async fn record_reap(&self, container_name: &str) -> Result<(), SessionWorkerWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let mut inner = self.inner.lock().expect("lock");
@@ -415,7 +419,7 @@ impl SessionWorkerStore for MockSessionWorkerStore {
     }
 
     async fn list_live(&self) -> Result<Vec<LiveWorker>, SessionWorkerWriteError> {
-        if let Some(err) = self.maybe_err() {
+        if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
         let rows = self.inner.lock().expect("lock");
