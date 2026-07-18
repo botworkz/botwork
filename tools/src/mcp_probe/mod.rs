@@ -53,6 +53,7 @@ pub mod verify;
 use std::path::PathBuf;
 
 use thiserror::Error;
+use tracing::info;
 
 use crate::mcp_probe::compose::ComposeError;
 use crate::mcp_probe::package::PackageLoadError;
@@ -256,9 +257,11 @@ pub fn run(argv: &[String]) -> Result<i32, McpProbeError> {
                 .as_deref()
                 .expect("--out required in generate mode (validated in Args::from_argv)");
             patch::patch_image(&args.image_in, dest, &labels)?;
-            eprintln!(
-                "[mcp-probe] generate: wrote {n_labels} labels into {dest}",
+            info!(
                 n_labels = labels.len(),
+                dest,
+                "{}",
+                generate_success_message(dest, labels.len())
             );
             Ok(0)
         }
@@ -268,14 +271,23 @@ pub fn run(argv: &[String]) -> Result<i32, McpProbeError> {
             // produced. Drift surfaces as exit 6, not exit 0 — so
             // CI can wire the action's status straight to a gate.
             verify::verify(&args.image_in, &args.runtime, &labels)?;
-            eprintln!(
-                "[mcp-probe] verify: {n_labels} labels match {image}",
+            info!(
                 n_labels = labels.len(),
-                image = args.image_in,
+                image = %args.image_in,
+                "{}",
+                verify_success_message(&args.image_in, labels.len())
             );
             Ok(0)
         }
     }
+}
+
+fn generate_success_message(dest: &str, n_labels: usize) -> String {
+    format!("[mcp-probe] generate: wrote {n_labels} labels into {dest}")
+}
+
+fn verify_success_message(image: &str, n_labels: usize) -> String {
+    format!("[mcp-probe] verify: {n_labels} labels match {image}")
 }
 
 /// Errors surfaced by the mcp-probe subcommand.
@@ -440,5 +452,17 @@ mod tests {
         // accidentally maps Probe to exit 5 (instead of letting it
         // surface its own 4/5 distinction) trips here.
         assert_eq!(McpProbeError::InvalidUsage("x").exit_code(), 2);
+    }
+
+    #[test]
+    fn success_messages_preserve_human_readable_text() {
+        assert_eq!(
+            generate_success_message("ghcr.io/botwork/probed:latest", 42),
+            "[mcp-probe] generate: wrote 42 labels into ghcr.io/botwork/probed:latest"
+        );
+        assert_eq!(
+            verify_success_message("ghcr.io/botwork/probed:latest", 42),
+            "[mcp-probe] verify: 42 labels match ghcr.io/botwork/probed:latest"
+        );
     }
 }
