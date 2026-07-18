@@ -11,7 +11,11 @@ pub fn version_string() -> String {
 }
 
 pub fn run() -> i32 {
-    match cli::dispatch(std::env::args().collect()) {
+    run_with_args(std::env::args().collect())
+}
+
+pub fn run_with_args(args: Vec<String>) -> i32 {
+    match cli::dispatch(args) {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{err}");
