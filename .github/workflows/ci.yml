@@ -47,13 +47,13 @@ on:
 permissions:
   contents: read
 
-# Prevent two pushes to the same ref from racing each other through the
-# publish path. The publish job is gated on `branch == 'main'` so the
-# race only meaningfully exists there, but the policy is cheap to apply
-# uniformly. Matches mcp-extra's `ci.yml`.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: >-
+    ci-${{ github.workflow }}-${{
+      github.event_name == 'pull_request'
+      && github.event.pull_request.number
+      || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   containers:
