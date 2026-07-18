@@ -9,6 +9,7 @@ pub mod launcher;
 pub mod recovery;
 pub mod secrets;
 pub mod session_worker;
+pub mod store;
 pub mod sweeper;
 
 use std::collections::HashMap;
@@ -254,7 +255,7 @@ pub struct AppState {
     /// postgres at startup. The writer is internally cheap to clone
     /// (everything behind `Arc`) so every clone of `AppState` carries
     /// the same handle.
-    pub agent_session_writer: Option<Arc<crate::agent_session::AgentSessionWriter>>,
+    pub agent_session_writer: Option<Arc<dyn crate::store::AgentSessionStore>>,
     /// RFE #105 round-3 PR2: write-through handle for the
     /// `session_worker` table — one row per spawned plugin container.
     /// Same `None`-in-tests convention as `agent_session_writer`.
@@ -262,7 +263,7 @@ pub struct AppState {
     /// session-broker is the single writer of this table; reads happen
     /// from `recover_live_workers` at startup (paired with `docker ps`)
     /// and from the future janitor for sweep policy.
-    pub session_worker_writer: Option<Arc<crate::session_worker::SessionWorkerWriter>>,
+    pub session_worker_writer: Option<Arc<dyn crate::store::SessionWorkerStore>>,
     /// RFE #105 round-3 PR2: shared `DatabaseConnection` so the broker
     /// can resolve cross-table reads outside of either writer's
     /// surface. Currently used only to resolve the
@@ -342,12 +343,12 @@ pub async fn run() -> Result<(), String> {
         }
     };
     let db_arc = Arc::new(db);
-    let agent_session_writer = Some(Arc::new(crate::agent_session::AgentSessionWriter::new(
-        Arc::clone(&db_arc),
-    )));
-    let session_worker_writer = Some(Arc::new(crate::session_worker::SessionWorkerWriter::new(
-        Arc::clone(&db_arc),
-    )));
+    let agent_session_writer = Some(Arc::new(
+        crate::store::sea_orm_impl::SeaOrmAgentSessionStore::new(Arc::clone(&db_arc)),
+    ) as Arc<dyn crate::store::AgentSessionStore>);
+    let session_worker_writer = Some(Arc::new(
+        crate::store::sea_orm_impl::SeaOrmSessionWorkerStore::new(Arc::clone(&db_arc)),
+    ) as Arc<dyn crate::store::SessionWorkerStore>);
 
     let admin_addr = std::env::var("BOTWORK_SESSION_BROKER_ADMIN_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:9002".to_string());

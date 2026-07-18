@@ -591,6 +591,7 @@ dependencies = [
 name = "botwork-session-broker"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "axum 0.7.9",
  "base64",
  "botwork-bootstrap",

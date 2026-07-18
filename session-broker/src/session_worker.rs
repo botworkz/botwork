@@ -106,6 +106,16 @@ impl SessionWorkerWriter {
         }
     }
 
+    pub async fn try_record_spawn(
+        &self,
+        plugin_name: &str,
+        container_name: &str,
+        container_ip: &str,
+    ) -> Result<(), SessionWorkerWriteError> {
+        self.record_spawn_inner(plugin_name, container_name, container_ip)
+            .await
+    }
+
     async fn record_spawn_inner(
         &self,
         plugin_name: &str,
@@ -142,6 +152,15 @@ impl SessionWorkerWriter {
         }
     }
 
+    pub async fn try_record_mcp_session_id(
+        &self,
+        container_name: &str,
+        mcp_session_id: &str,
+    ) -> Result<(), SessionWorkerWriteError> {
+        self.record_mcp_session_id_inner(container_name, mcp_session_id)
+            .await
+    }
+
     async fn record_mcp_session_id_inner(
         &self,
         container_name: &str,
@@ -170,6 +189,15 @@ impl SessionWorkerWriter {
         }
     }
 
+    pub async fn try_record_agent_binding(
+        &self,
+        container_name: &str,
+        agent_session_id: Uuid,
+    ) -> Result<(), SessionWorkerWriteError> {
+        self.record_agent_binding_inner(container_name, agent_session_id)
+            .await
+    }
+
     async fn record_agent_binding_inner(
         &self,
         container_name: &str,
@@ -191,6 +219,13 @@ impl SessionWorkerWriter {
                  container={container_name}: {err}"
             );
         }
+    }
+
+    pub async fn try_record_reap(
+        &self,
+        container_name: &str,
+    ) -> Result<(), SessionWorkerWriteError> {
+        self.record_reap_inner(container_name).await
     }
 
     async fn record_reap_inner(&self, container_name: &str) -> Result<(), SessionWorkerWriteError> {
@@ -232,6 +267,16 @@ impl SessionWorkerWriter {
                 agent_session_id: row.agent_session_id,
             })
             .collect())
+    }
+
+    pub async fn resolve_plugin_name(
+        &self,
+        plugin_id: Uuid,
+    ) -> Result<Option<String>, sea_orm::DbErr> {
+        Ok(plugin::Entity::find_by_id(plugin_id)
+            .one(self.db.as_ref())
+            .await?
+            .map(|row| row.name))
     }
 
     /// Resolve `plugin_id` for the broker's spawn-time UPDATE.
