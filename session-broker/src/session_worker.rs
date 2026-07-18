@@ -295,9 +295,65 @@ pub enum SessionWorkerWriteError {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
 
     use super::*;
+    use botwork_entity::{agent_session, plugin, session_worker};
+
+    fn plugin_row(id: Uuid, name: &str) -> plugin::Model {
+        plugin::Model {
+            id,
+            name: name.to_string(),
+            image: "ghcr.io/example/plugin:1.0".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_auth: "none".to_string(),
+            env: serde_json::json!([]),
+            resources: None,
+            egress: serde_json::json!({"mode":"none"}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            current_facet_id: None,
+        }
+    }
+
+    fn worker_row(
+        id: Uuid,
+        plugin_id: Uuid,
+        container_name: &str,
+        mcp_session_id: &str,
+        reaped_at: Option<chrono::DateTime<Utc>>,
+    ) -> session_worker::Model {
+        session_worker::Model {
+            id,
+            agent_session_id: None,
+            plugin_id,
+            container_name: container_name.to_string(),
+            container_ip: "10.0.0.1".to_string(),
+            mcp_session_id: mcp_session_id.to_string(),
+            spawned_at: Utc::now(),
+            reaped_at,
+        }
+    }
+
+    fn agent_session_row(
+        id: Uuid,
+        tenant_id: Uuid,
+        workspace_id: Uuid,
+        agent_session_id: &str,
+    ) -> agent_session::Model {
+        agent_session::Model {
+            id,
+            tenant_id,
+            workspace_id,
+            agent_session_id: agent_session_id.to_string(),
+            state: agent_session::state::ACTIVE.to_string(),
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+            reactivation_count: 0,
+        }
+    }
 
     #[test]
     fn write_error_display_includes_context() {
@@ -321,5 +377,144 @@ mod tests {
         )
         .await
         .expect("writer should warn-and-carry-on on db errors");
+    }
+
+    #[tokio::test]
+    async fn record_spawn_uses_plugin_lookup_and_inserts() {
+        let plugin_id = Uuid::new_v4();
+        let writer = crate::test_support::mock_session_worker_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![plugin_row(plugin_id, "mcp-bash")]]),
+        );
+
+        writer
+            .record_spawn("mcp-bash", "mcp_session_1", "10.0.0.1")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn record_mcp_session_id_updates_existing_row() {
+        let plugin_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let writer =
+            crate::test_support::mock_session_worker_writer(
+                MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
+                    worker_row(worker_id, plugin_id, "mcp_session_1", "", None),
+                ]]),
+            );
+
+        writer
+            .record_mcp_session_id("mcp_session_1", "sid-abc")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn record_agent_binding_updates_existing_row() {
+        let plugin_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let writer =
+            crate::test_support::mock_session_worker_writer(
+                MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
+                    worker_row(worker_id, plugin_id, "mcp_session_1", "sid-abc", None),
+                ]]),
+            );
+
+        writer
+            .record_agent_binding("mcp_session_1", Uuid::new_v4())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn record_reap_noops_for_already_reaped_row() {
+        let plugin_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let writer = crate::test_support::mock_session_worker_writer(
+            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![worker_row(
+                worker_id,
+                plugin_id,
+                "mcp_session_1",
+                "sid-abc",
+                Some(Utc::now()),
+            )]]),
+        );
+
+        writer.record_reap("mcp_session_1").await;
+    }
+
+    #[tokio::test]
+    async fn record_reap_swallows_missing_container() {
+        let writer = crate::test_support::mock_session_worker_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([Vec::<session_worker::Model>::new()]),
+        );
+
+        writer.record_reap("mcp_session_missing").await;
+    }
+
+    #[tokio::test]
+    async fn list_live_maps_rows() {
+        let plugin_id = Uuid::new_v4();
+        let row1 = worker_row(Uuid::new_v4(), plugin_id, "mcp_session_1", "sid-1", None);
+        let row2 = worker_row(Uuid::new_v4(), plugin_id, "mcp_session_2", "", None);
+        let writer = crate::test_support::mock_session_worker_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![row1.clone(), row2.clone()]]),
+        );
+
+        let live = writer.list_live().await.expect("list live");
+        assert_eq!(
+            live,
+            vec![
+                LiveWorker {
+                    container_name: row1.container_name,
+                    container_ip: row1.container_ip,
+                    mcp_session_id: row1.mcp_session_id,
+                    plugin_id: row1.plugin_id,
+                    agent_session_id: row1.agent_session_id,
+                },
+                LiveWorker {
+                    container_name: row2.container_name,
+                    container_ip: row2.container_ip,
+                    mcp_session_id: row2.mcp_session_id,
+                    plugin_id: row2.plugin_id,
+                    agent_session_id: row2.agent_session_id,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_session_pk_handles_some_none_and_error() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let db_some = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![agent_session_row(
+                session_id,
+                tenant_id,
+                workspace_id,
+                "agent-1",
+            )]])
+            .into_connection();
+        let found = resolve_agent_session_pk(&db_some, tenant_id, workspace_id, "agent-1")
+            .await
+            .expect("query");
+        assert_eq!(found, Some(session_id));
+
+        let db_none = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<agent_session::Model>::new()])
+            .into_connection();
+        let missing = resolve_agent_session_pk(&db_none, tenant_id, workspace_id, "agent-2")
+            .await
+            .expect("query");
+        assert_eq!(missing, None);
+
+        let db_err = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_errors([DbErr::Custom("boom".to_string())])
+            .into_connection();
+        let err = resolve_agent_session_pk(&db_err, tenant_id, workspace_id, "agent-3")
+            .await
+            .expect_err("query should fail");
+        assert!(err.to_string().contains("boom"));
     }
 }

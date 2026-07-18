@@ -447,9 +447,49 @@ enum AgentSessionWriteError {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
 
     use super::*;
+    use botwork_entity::{agent_session, tenant, workspace};
+
+    fn tenant_row(id: Uuid, name: &str) -> tenant::Model {
+        tenant::Model {
+            id,
+            name: name.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn workspace_row(id: Uuid, tenant_id: Uuid, name: &str) -> workspace::Model {
+        workspace::Model {
+            id,
+            tenant_id,
+            name: name.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn agent_session_row(
+        id: Uuid,
+        tenant_id: Uuid,
+        workspace_id: Uuid,
+        agent_session_id: &str,
+        state: &str,
+    ) -> agent_session::Model {
+        agent_session::Model {
+            id,
+            tenant_id,
+            workspace_id,
+            agent_session_id: agent_session_id.to_string(),
+            state: state.to_string(),
+            created_at: Utc::now(),
+            last_active_at: Utc::now(),
+            reactivation_count: 0,
+        }
+    }
 
     #[test]
     fn write_error_display_includes_context() {
@@ -485,5 +525,126 @@ mod tests {
         )
         .await
         .expect("writer should warn-and-carry-on on db errors");
+    }
+
+    #[tokio::test]
+    async fn record_bind_agent_inserts_when_row_missing() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let writer = crate::test_support::mock_agent_session_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
+                .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
+                .append_query_results([Vec::<agent_session::Model>::new()]),
+        );
+
+        writer.record_bind_agent("phlax", "mcp", "agent-1").await;
+    }
+
+    #[tokio::test]
+    async fn record_bind_agent_updates_existing_row() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let existing_id = Uuid::new_v4();
+        let writer = crate::test_support::mock_agent_session_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
+                .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
+                .append_query_results([vec![agent_session_row(
+                    existing_id,
+                    tenant_id,
+                    workspace_id,
+                    "agent-1",
+                    agent_session::state::INACTIVE,
+                )]]),
+        );
+
+        writer.record_bind_agent("phlax", "mcp", "agent-1").await;
+    }
+
+    #[tokio::test]
+    async fn record_grace_swallows_missing_row() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let writer = crate::test_support::mock_agent_session_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
+                .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
+                .append_query_results([Vec::<agent_session::Model>::new()]),
+        );
+
+        writer.record_grace("phlax", "mcp", "agent-1").await;
+    }
+
+    #[tokio::test]
+    async fn record_inactive_updates_existing_row() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let existing_id = Uuid::new_v4();
+        let writer = crate::test_support::mock_agent_session_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
+                .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
+                .append_query_results([vec![agent_session_row(
+                    existing_id,
+                    tenant_id,
+                    workspace_id,
+                    "agent-1",
+                    agent_session::state::GRACE,
+                )]]),
+        );
+
+        writer.record_inactive("phlax", "mcp", "agent-1").await;
+    }
+
+    #[tokio::test]
+    async fn touch_last_active_swallows_missing_row() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let writer = crate::test_support::mock_agent_session_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
+                .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
+                .append_query_results([Vec::<agent_session::Model>::new()]),
+        );
+
+        writer.touch_last_active("phlax", "mcp", "agent-1").await;
+    }
+
+    #[tokio::test]
+    async fn resolve_pk_success_and_none_paths() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let existing_id = Uuid::new_v4();
+        let writer = crate::test_support::mock_agent_session_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(tenant_id, "phlax")]])
+                .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
+                .append_query_results([vec![agent_session_row(
+                    existing_id,
+                    tenant_id,
+                    workspace_id,
+                    "agent-1",
+                    agent_session::state::ACTIVE,
+                )]])
+                .append_query_results([Vec::<agent_session::Model>::new()]),
+        );
+
+        let found = writer.resolve_pk("phlax", "mcp", "agent-1").await;
+        assert_eq!(found, Some(existing_id));
+
+        let missing = writer.resolve_pk("phlax", "mcp", "agent-2").await;
+        assert_eq!(missing, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_pk_returns_none_on_db_error() {
+        let writer = crate::test_support::mock_agent_session_writer(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([DbErr::Custom("boom".to_string())]),
+        );
+
+        let resolved = writer.resolve_pk("phlax", "mcp", "agent-1").await;
+        assert_eq!(resolved, None);
     }
 }
