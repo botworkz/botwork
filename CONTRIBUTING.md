@@ -28,9 +28,24 @@ Coverage is **unit-test only** — the same tests that `cargo test
 
 - `botwork-ui-wasm`: this crate only targets `wasm32-unknown-unknown`
   and cannot be built for the host.
-- Docker-gated integration tests (e.g. `api`'s testcontainers-backed
-  tests): these skip cleanly when `DOCKER_HOST` points at a
-  non-existent socket, which both the `Makefile` target and CI do.
+
+### Two test tiers
+
+- **Unit tier (no docker):** use SeaORM's official
+  `sea_orm::MockDatabase` (with `DatabaseBackend::Postgres`) to drive
+  handler/logic code without a live postgres daemon. This is the tier
+  measured by the no-docker tarpaulin job.
+- **Integration tier (docker):** use `testcontainers` + real postgres
+  to exercise real SQL, constraints, and transaction behaviour. This
+  tier runs in crate smoke/CI jobs and is not instrumented by the
+  no-docker tarpaulin run.
+
+`MockDatabase` is a **fixture, not a database**: it replays canned
+query/exec results in queue order and does not enforce SQL semantics,
+constraints, ordering guarantees, or full transaction semantics. Keep
+SQL correctness checks (joins/filters/constraints/FK behaviour) in the
+integration tier; use unit tests for handler control flow, auth/header
+gates, parse/validation branches, and error mapping.
 
 ### Fail-under policy
 

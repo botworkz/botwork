@@ -45,6 +45,8 @@
 
 pub mod error;
 pub mod runner;
+#[cfg(test)]
+mod test_support;
 
 pub use error::BootstrapError;
 

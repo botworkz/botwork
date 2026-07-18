@@ -134,6 +134,8 @@ pub mod handler;
 pub mod read;
 pub mod secret_store;
 pub mod session_broker;
+#[cfg(test)]
+mod test_support;
 pub mod write;
 
 pub use control_plane::ControlPlaneClient;

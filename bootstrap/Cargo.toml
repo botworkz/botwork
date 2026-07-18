@@ -26,6 +26,7 @@ botwork-api-core = { path = "../api-core" }
 botwork-entity = { path = "../db/entity" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 sea-orm = { version = "1.1.20", default-features = false, features = [
+    "mock",
     "macros",
     "runtime-tokio-rustls",
     "sqlx-postgres",
