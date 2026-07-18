@@ -123,13 +123,14 @@ jobs:
           # across artifact types; artifact=none skips all image behavior.
           service: botwork-opaque-handshake
           package: botwork-opaque-handshake
+          binary: ''
           artifact: none
     uses: ./.github/workflows/_crate.yml
     with:
       crate: ${{ matrix.crate }}
       service: ${{ matrix.service }}
       package: ${{ matrix.package }}
-      binary: ${{ matrix.binary || '' }}
+      binary: ${{ matrix.binary }}
       artifact: ${{ matrix.artifact }}
       needs-db-migrate: ${{ matrix.needs-db-migrate || false }}
       needs-docker: ${{ matrix.needs-docker || false }}

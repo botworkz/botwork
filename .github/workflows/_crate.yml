@@ -97,9 +97,8 @@ on:
           Name of the binary cargo produces under `target/release/`.
           Usually identical to `package`. Used by artifact=binary and
           artifact=container; artifact=none ignores this input.
-        required: false
+        required: true
         type: string
-        default: ''
       artifact:
         description: >-
           Artifact publishing behavior for this crate:
