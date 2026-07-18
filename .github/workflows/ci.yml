@@ -47,13 +47,16 @@ on:
 permissions:
   contents: read
 
-# Prevent two pushes to the same ref from racing each other through the
-# publish path. The publish job is gated on `branch == 'main'` so the
-# race only meaningfully exists there, but the policy is cheap to apply
-# uniformly. Matches mcp-extra's `ci.yml`.
+# Auto-cancel superseded runs, but ONLY for pull requests. Pushes to a
+# branch (notably main / botwork-import) must never cancel an in-flight
+# run of an earlier push, because that run may be partway through the
+# publish path (GHCR push + GitHub Release). For PRs, the concurrency
+# group folds in the PR number so each PR cancels only its own prior
+# run; for push / workflow_dispatch the group is per-run (github.run_id),
+# so nothing is ever cancelled.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   containers:
