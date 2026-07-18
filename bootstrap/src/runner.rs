@@ -105,6 +105,11 @@ pub async fn apply_with_store<S: BootstrapStore>(
         let (tenant_id, outcome) = store.upsert_tenant(&tenant_entry.name).await?;
         match outcome {
             UpsertOutcome::Inserted => stats.tenants_inserted += 1,
+            // Tenant has no field-diff update logic — finding an existing row
+            // is always counted as "updated" for statistics purposes.
+            // (Neither `upsert_tenant` nor `db_upsert_tenant` returns
+            // `Unchanged`; the `Unchanged` arm is handled here defensively
+            // to keep the match exhaustive without a wildcard.)
             UpsertOutcome::Updated | UpsertOutcome::Unchanged => stats.tenants_updated += 1,
         }
         for workspace_entry in &tenant_entry.workspaces {
@@ -113,6 +118,8 @@ pub async fn apply_with_store<S: BootstrapStore>(
                 .await?;
             match outcome {
                 UpsertOutcome::Inserted => stats.workspaces_inserted += 1,
+                // Same semantics as tenant: workspace has no field-diff update
+                // logic, so "found existing" always maps to the updated counter.
                 UpsertOutcome::Updated | UpsertOutcome::Unchanged => stats.workspaces_updated += 1,
             }
             for binding in &workspace_entry.plugins {
@@ -496,7 +503,6 @@ plugins:
             .await
             .expect("should succeed");
 
-        assert_ne!(stats.tenants_inserted, 0);
         assert_eq!(stats.tenants_inserted, 1);
         assert_eq!(stats.tenants_updated, 0);
     }
