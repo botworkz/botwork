@@ -2119,18 +2119,15 @@ mod tests {
             .get(LOCATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        assert!(
-            create_location
-                .as_deref()
-                .expect("location")
-                .starts_with("/api/tenant/phlax/workspaces/")
-        );
+        assert!(create_location
+            .as_deref()
+            .expect("location")
+            .starts_with("/api/tenant/phlax/workspaces/"));
         let _ = json_body(create_response).await;
 
         let create_taken_state = app_state_with_mock_store_db_and_clients(
             tenant_store.clone(),
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![count_row(1)]]),
+            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![count_row(1)]]),
             ControlPlaneClient::disabled(),
             SecretStoreClient::disabled(),
             SessionBrokerClient::disabled(),
@@ -2145,23 +2142,27 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(create_taken.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(create_taken).await["error"]["code"], "already_exists");
+        assert_eq!(
+            json_body(create_taken).await["error"]["code"],
+            "already_exists"
+        );
 
-        let create_missing_tenant = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
-            MockApiStore::new(),
-            MockDatabase::new(DatabaseBackend::Postgres),
-            ControlPlaneClient::disabled(),
-            SecretStoreClient::disabled(),
-            SessionBrokerClient::disabled(),
-        ))
-        .oneshot(tenant_request(
-            "POST",
-            "/api/tenant/phlax/workspaces",
-            "phlax",
-            serde_json::json!({ "name": "mcp" }),
-        ))
-        .await
-        .expect("response");
+        let create_missing_tenant =
+            crate::handler::build_router(app_state_with_mock_store_db_and_clients(
+                MockApiStore::new(),
+                MockDatabase::new(DatabaseBackend::Postgres),
+                ControlPlaneClient::disabled(),
+                SecretStoreClient::disabled(),
+                SessionBrokerClient::disabled(),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspaces",
+                "phlax",
+                serde_json::json!({ "name": "mcp" }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(create_missing_tenant.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             json_body(create_missing_tenant).await["error"]["code"],
@@ -2170,96 +2171,110 @@ mod tests {
 
         let live_workspace = workspace_row(workspace_id, tenant_id, "mcp");
         let updated_workspace = workspace_row(workspace_id, tenant_id, "renamed");
-        let update_response = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
-            tenant_store.clone(),
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![live_workspace.clone()]])
-                .append_query_results([vec![count_row(0)]])
-                .append_query_results([vec![updated_workspace]]),
-            ControlPlaneClient::disabled(),
-            SecretStoreClient::disabled(),
-            SessionBrokerClient::disabled(),
-        ))
-        .oneshot(tenant_request(
-            "PUT",
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
-            "phlax",
-            serde_json::json!({
-                "name": "renamed",
-                "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_response =
+            crate::handler::build_router(app_state_with_mock_store_db_and_clients(
+                tenant_store.clone(),
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![live_workspace.clone()]])
+                    .append_query_results([vec![count_row(0)]])
+                    .append_query_results([vec![updated_workspace]]),
+                ControlPlaneClient::disabled(),
+                SecretStoreClient::disabled(),
+                SessionBrokerClient::disabled(),
+            ))
+            .oneshot(tenant_request(
+                "PUT",
+                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                "phlax",
+                serde_json::json!({
+                    "name": "renamed",
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_response.status(), StatusCode::OK);
         assert_eq!(json_body(update_response).await["name"], "renamed");
 
-        let update_missing = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
-            tenant_store.clone(),
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<workspace::Model>::new()]),
-            ControlPlaneClient::disabled(),
-            SecretStoreClient::disabled(),
-            SessionBrokerClient::disabled(),
-        ))
-        .oneshot(tenant_request(
-            "PUT",
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
-            "phlax",
-            serde_json::json!({
-                "name": "renamed",
-                "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_missing =
+            crate::handler::build_router(app_state_with_mock_store_db_and_clients(
+                tenant_store.clone(),
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([Vec::<workspace::Model>::new()]),
+                ControlPlaneClient::disabled(),
+                SecretStoreClient::disabled(),
+                SessionBrokerClient::disabled(),
+            ))
+            .oneshot(tenant_request(
+                "PUT",
+                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                "phlax",
+                serde_json::json!({
+                    "name": "renamed",
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(update_missing).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(update_missing).await["error"]["code"],
+            "not_found"
+        );
 
-        let update_mismatch = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
-            tenant_store.clone(),
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![workspace_row(workspace_id, Uuid::new_v4(), "mcp")]]),
-            ControlPlaneClient::disabled(),
-            SecretStoreClient::disabled(),
-            SessionBrokerClient::disabled(),
-        ))
-        .oneshot(tenant_request(
-            "PUT",
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
-            "phlax",
-            serde_json::json!({
-                "name": "renamed",
-                "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_mismatch =
+            crate::handler::build_router(app_state_with_mock_store_db_and_clients(
+                tenant_store.clone(),
+                MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
+                    workspace_row(workspace_id, Uuid::new_v4(), "mcp"),
+                ]]),
+                ControlPlaneClient::disabled(),
+                SecretStoreClient::disabled(),
+                SessionBrokerClient::disabled(),
+            ))
+            .oneshot(tenant_request(
+                "PUT",
+                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                "phlax",
+                serde_json::json!({
+                    "name": "renamed",
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_mismatch.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(update_mismatch).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(update_mismatch).await["error"]["code"],
+            "not_found"
+        );
 
-        let stale_response = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
-            tenant_store.clone(),
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![live_workspace.clone()]]),
-            ControlPlaneClient::disabled(),
-            SecretStoreClient::disabled(),
-            SessionBrokerClient::disabled(),
-        ))
-        .oneshot(tenant_request(
-            "PUT",
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
-            "phlax",
-            serde_json::json!({
-                "name": "renamed",
-                "if_unmodified_since": (fixed_time() + chrono::Duration::seconds(1))
-                    .to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let stale_response =
+            crate::handler::build_router(app_state_with_mock_store_db_and_clients(
+                tenant_store.clone(),
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![live_workspace.clone()]]),
+                ControlPlaneClient::disabled(),
+                SecretStoreClient::disabled(),
+                SessionBrokerClient::disabled(),
+            ))
+            .oneshot(tenant_request(
+                "PUT",
+                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                "phlax",
+                serde_json::json!({
+                    "name": "renamed",
+                    "if_unmodified_since": (fixed_time() + chrono::Duration::seconds(1))
+                        .to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(stale_response.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(stale_response).await["error"]["code"], "stale_write");
+        assert_eq!(
+            json_body(stale_response).await["error"]["code"],
+            "stale_write"
+        );
 
         let name_taken = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
             tenant_store,
@@ -2282,7 +2297,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(name_taken.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(name_taken).await["error"]["code"], "already_exists");
+        assert_eq!(
+            json_body(name_taken).await["error"]["code"],
+            "already_exists"
+        );
     }
 
     #[tokio::test]
@@ -2323,62 +2341,76 @@ mod tests {
         .expect("response");
         assert_eq!(delete_ok.status(), StatusCode::NO_CONTENT);
 
-        let delete_disabled = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
-            store.clone(),
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
-                .append_query_results([vec![workspace_plugin_row(workspace_id, plugin_id, None)]])
-                .append_query_results([vec![tenant_row(tenant_id, "phlax", fixed_time())]])
-                .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]])
-                .append_exec_results([MockExecResult {
-                    last_insert_id: 0,
-                    rows_affected: 1,
-                }]),
-            ControlPlaneClient::disabled(),
-            SecretStoreClient::disabled(),
-            SessionBrokerClient::disabled(),
-        ))
-        .oneshot(tenant_delete_request(
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
-            "phlax",
-        ))
-        .await
-        .expect("response");
+        let delete_disabled =
+            crate::handler::build_router(app_state_with_mock_store_db_and_clients(
+                store.clone(),
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
+                    .append_query_results([vec![workspace_plugin_row(
+                        workspace_id,
+                        plugin_id,
+                        None,
+                    )]])
+                    .append_query_results([vec![tenant_row(tenant_id, "phlax", fixed_time())]])
+                    .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]])
+                    .append_exec_results([MockExecResult {
+                        last_insert_id: 0,
+                        rows_affected: 1,
+                    }]),
+                ControlPlaneClient::disabled(),
+                SecretStoreClient::disabled(),
+                SessionBrokerClient::disabled(),
+            ))
+            .oneshot(tenant_delete_request(
+                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
         assert_eq!(delete_disabled.status(), StatusCode::NO_CONTENT);
 
-        let delete_missing = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
-            store.clone(),
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<workspace::Model>::new()]),
-            ControlPlaneClient::disabled(),
-            SecretStoreClient::disabled(),
-            SessionBrokerClient::disabled(),
-        ))
-        .oneshot(tenant_delete_request(
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
-            "phlax",
-        ))
-        .await
-        .expect("response");
+        let delete_missing =
+            crate::handler::build_router(app_state_with_mock_store_db_and_clients(
+                store.clone(),
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([Vec::<workspace::Model>::new()]),
+                ControlPlaneClient::disabled(),
+                SecretStoreClient::disabled(),
+                SessionBrokerClient::disabled(),
+            ))
+            .oneshot(tenant_delete_request(
+                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
         assert_eq!(delete_missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(delete_missing).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(delete_missing).await["error"]["code"],
+            "not_found"
+        );
 
-        let delete_mismatch = crate::handler::build_router(app_state_with_mock_store_db_and_clients(
-            store,
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![workspace_row(workspace_id, Uuid::new_v4(), "mcp")]]),
-            ControlPlaneClient::disabled(),
-            SecretStoreClient::disabled(),
-            SessionBrokerClient::disabled(),
-        ))
-        .oneshot(tenant_delete_request(
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
-            "phlax",
-        ))
-        .await
-        .expect("response");
+        let delete_mismatch =
+            crate::handler::build_router(app_state_with_mock_store_db_and_clients(
+                store,
+                MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
+                    workspace_row(workspace_id, Uuid::new_v4(), "mcp"),
+                ]]),
+                ControlPlaneClient::disabled(),
+                SecretStoreClient::disabled(),
+                SessionBrokerClient::disabled(),
+            ))
+            .oneshot(tenant_delete_request(
+                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
         assert_eq!(delete_mismatch.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(delete_mismatch).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(delete_mismatch).await["error"]["code"],
+            "not_found"
+        );
     }
 
     #[tokio::test]
@@ -2407,31 +2439,33 @@ mod tests {
             .get(LOCATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        assert!(
-            create_ok_location
-                .as_deref()
-                .expect("location")
-                .starts_with("/api/plugins/")
-        );
+        assert!(create_ok_location
+            .as_deref()
+            .expect("location")
+            .starts_with("/api/plugins/"));
         let _ = json_body(create_ok).await;
 
-        let create_taken = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![count_row(1)]]),
-        ))
-        .oneshot(admin_request(
-            "POST",
-            "/api/plugins",
-            serde_json::json!({
-                "name": "mcp-fetch",
-                "image": "ghcr.io/example/mcp-fetch:1.0",
-                "egress": "none"
-            }),
-        ))
-        .await
-        .expect("response");
+        let create_taken =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![count_row(1)]]),
+            ))
+            .oneshot(admin_request(
+                "POST",
+                "/api/plugins",
+                serde_json::json!({
+                    "name": "mcp-fetch",
+                    "image": "ghcr.io/example/mcp-fetch:1.0",
+                    "egress": "none"
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(create_taken.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(create_taken).await["error"]["code"], "already_exists");
+        assert_eq!(
+            json_body(create_taken).await["error"]["code"],
+            "already_exists"
+        );
 
         let live_plugin = plugin_row(plugin_id, "mcp-fetch");
         let updated_plugin = plugin_row(plugin_id, "renamed");
@@ -2456,69 +2490,83 @@ mod tests {
         assert_eq!(update_ok.status(), StatusCode::OK);
         assert_eq!(json_body(update_ok).await["name"], "renamed");
 
-        let update_missing = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<plugin::Model>::new()]),
-        ))
-        .oneshot(admin_request(
-            "PUT",
-            &format!("/api/plugins/{plugin_id}"),
-            serde_json::json!({
-                "name": "renamed",
-                "image": "ghcr.io/example/mcp-fetch:1.0",
-                "egress": "none",
-                "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_missing =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([Vec::<plugin::Model>::new()]),
+            ))
+            .oneshot(admin_request(
+                "PUT",
+                &format!("/api/plugins/{plugin_id}"),
+                serde_json::json!({
+                    "name": "renamed",
+                    "image": "ghcr.io/example/mcp-fetch:1.0",
+                    "egress": "none",
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(update_missing).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(update_missing).await["error"]["code"],
+            "not_found"
+        );
 
-        let update_stale = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![live_plugin.clone()]]),
-        ))
-        .oneshot(admin_request(
-            "PUT",
-            &format!("/api/plugins/{plugin_id}"),
-            serde_json::json!({
-                "name": "renamed",
-                "image": "ghcr.io/example/mcp-fetch:1.0",
-                "egress": "none",
-                "if_unmodified_since": (fixed_time() + chrono::Duration::seconds(1))
-                    .to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_stale =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![live_plugin.clone()]]),
+            ))
+            .oneshot(admin_request(
+                "PUT",
+                &format!("/api/plugins/{plugin_id}"),
+                serde_json::json!({
+                    "name": "renamed",
+                    "image": "ghcr.io/example/mcp-fetch:1.0",
+                    "egress": "none",
+                    "if_unmodified_since": (fixed_time() + chrono::Duration::seconds(1))
+                        .to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_stale.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(update_stale).await["error"]["code"], "stale_write");
+        assert_eq!(
+            json_body(update_stale).await["error"]["code"],
+            "stale_write"
+        );
 
-        let update_taken = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![live_plugin.clone()]])
-                .append_query_results([vec![count_row(1)]]),
-        ))
-        .oneshot(admin_request(
-            "PUT",
-            &format!("/api/plugins/{plugin_id}"),
-            serde_json::json!({
-                "name": "renamed",
-                "image": "ghcr.io/example/mcp-fetch:1.0",
-                "egress": "none",
-                "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_taken =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![live_plugin.clone()]])
+                    .append_query_results([vec![count_row(1)]]),
+            ))
+            .oneshot(admin_request(
+                "PUT",
+                &format!("/api/plugins/{plugin_id}"),
+                serde_json::json!({
+                    "name": "renamed",
+                    "image": "ghcr.io/example/mcp-fetch:1.0",
+                    "egress": "none",
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_taken.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(update_taken).await["error"]["code"], "already_exists");
+        assert_eq!(
+            json_body(update_taken).await["error"]["code"],
+            "already_exists"
+        );
 
         let delete_ok = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
             MockDatabase::new(DatabaseBackend::Postgres)
                 .append_query_results([vec![live_plugin.clone()]])
-                .append_query_results([Vec::<(workspace_plugin::Model, Option<workspace::Model>)>::new()])
+                .append_query_results([
+                    Vec::<(workspace_plugin::Model, Option<workspace::Model>)>::new(),
+                ])
                 .append_exec_results([MockExecResult {
                     last_insert_id: 0,
                     rows_affected: 1,
@@ -2529,37 +2577,44 @@ mod tests {
         .expect("response");
         assert_eq!(delete_ok.status(), StatusCode::NO_CONTENT);
 
-        let delete_dependents = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![live_plugin.clone()]])
-                .append_query_results([vec![(
-                    workspace_plugin_row(Uuid::new_v4(), plugin_id, None),
-                    Some(workspace_row(Uuid::new_v4(), Uuid::new_v4(), "mcp")),
-                )]])
-                .append_query_results([vec![tenant_row(Uuid::new_v4(), "phlax", fixed_time())]]),
-        ))
-        .oneshot(delete_request(&format!("/api/plugins/{plugin_id}")))
-        .await
-        .expect("response");
+        let delete_dependents =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![live_plugin.clone()]])
+                    .append_query_results([vec![(
+                        workspace_plugin_row(Uuid::new_v4(), plugin_id, None),
+                        Some(workspace_row(Uuid::new_v4(), Uuid::new_v4(), "mcp")),
+                    )]])
+                    .append_query_results([vec![tenant_row(
+                        Uuid::new_v4(),
+                        "phlax",
+                        fixed_time(),
+                    )]]),
+            ))
+            .oneshot(delete_request(&format!("/api/plugins/{plugin_id}")))
+            .await
+            .expect("response");
         assert_eq!(delete_dependents.status(), StatusCode::CONFLICT);
         let delete_dependents_body = json_body(delete_dependents).await;
         assert_eq!(delete_dependents_body["error"]["code"], "has_dependents");
-        assert!(
-            delete_dependents_body["error"]["message"]
-                .as_str()
-                .expect("message")
-                .contains("phlax/mcp")
-        );
+        assert!(delete_dependents_body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("phlax/mcp"));
 
-        let delete_missing = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<plugin::Model>::new()]),
-        ))
-        .oneshot(delete_request(&format!("/api/plugins/{plugin_id}")))
-        .await
-        .expect("response");
+        let delete_missing =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([Vec::<plugin::Model>::new()]),
+            ))
+            .oneshot(delete_request(&format!("/api/plugins/{plugin_id}")))
+            .await
+            .expect("response");
         assert_eq!(delete_missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(delete_missing).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(delete_missing).await["error"]["code"],
+            "not_found"
+        );
     }
 
     #[tokio::test]
@@ -2591,111 +2646,137 @@ mod tests {
         .expect("response");
         assert_eq!(create_ok.status(), StatusCode::CREATED);
         assert_eq!(
-            create_ok.headers().get(LOCATION).and_then(|v| v.to_str().ok()),
+            create_ok
+                .headers()
+                .get(LOCATION)
+                .and_then(|v| v.to_str().ok()),
             Some(
                 format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}").as_str()
             )
         );
 
-        let create_existing = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
-                .append_query_results([vec![workspace_plugin_row(workspace_id, plugin_id, None)]]),
-        ))
-        .oneshot(tenant_request(
-            "POST",
-            "/api/tenant/phlax/workspace_plugins",
-            "phlax",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "plugin_id": plugin_id
-            }),
-        ))
-        .await
-        .expect("response");
+        let create_existing =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([vec![workspace_plugin_row(
+                        workspace_id,
+                        plugin_id,
+                        None,
+                    )]]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(create_existing.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(create_existing).await["error"]["code"], "already_exists");
+        assert_eq!(
+            json_body(create_existing).await["error"]["code"],
+            "already_exists"
+        );
 
-        let create_missing = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<BTreeMap<String, sea_orm::Value>>::new()]),
-        ))
-        .oneshot(tenant_request(
-            "POST",
-            "/api/tenant/phlax/workspace_plugins",
-            "phlax",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "plugin_id": plugin_id
-            }),
-        ))
-        .await
-        .expect("response");
+        let create_missing =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([Vec::<BTreeMap<String, sea_orm::Value>>::new()]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(create_missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(create_missing).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(create_missing).await["error"]["code"],
+            "not_found"
+        );
 
-        let create_bad_config = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
-                .append_query_results([Vec::<workspace_plugin::Model>::new()]),
-        ))
-        .oneshot(tenant_request(
-            "POST",
-            "/api/tenant/phlax/workspace_plugins",
-            "phlax",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "plugin_id": plugin_id,
-                "config": 7
-            }),
-        ))
-        .await
-        .expect("response");
+        let create_bad_config =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id,
+                    "config": 7
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(create_bad_config.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             json_body(create_bad_config).await["error"]["code"],
             "validation_failed"
         );
 
-        let create_null_config = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
-                .append_query_results([Vec::<workspace_plugin::Model>::new()])
-                .append_query_results([vec![workspace_plugin_row(workspace_id, plugin_id, None)]]),
-        ))
-        .oneshot(tenant_request(
-            "POST",
-            "/api/tenant/phlax/workspace_plugins",
-            "phlax",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "plugin_id": plugin_id,
-                "config": null
-            }),
-        ))
-        .await
-        .expect("response");
+        let create_null_config =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()])
+                    .append_query_results([vec![workspace_plugin_row(
+                        workspace_id,
+                        plugin_id,
+                        None,
+                    )]]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id,
+                    "config": null
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(create_null_config.status(), StatusCode::CREATED);
         assert!(json_body(create_null_config).await["config"].is_null());
 
-        let create_empty_config = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
-                .append_query_results([Vec::<workspace_plugin::Model>::new()])
-                .append_query_results([vec![workspace_plugin_row(workspace_id, plugin_id, None)]]),
-        ))
-        .oneshot(tenant_request(
-            "POST",
-            "/api/tenant/phlax/workspace_plugins",
-            "phlax",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "plugin_id": plugin_id,
-                "config": {}
-            }),
-        ))
-        .await
-        .expect("response");
+        let create_empty_config =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()])
+                    .append_query_results([vec![workspace_plugin_row(
+                        workspace_id,
+                        plugin_id,
+                        None,
+                    )]]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id,
+                    "config": {}
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(create_empty_config.status(), StatusCode::CREATED);
         assert!(json_body(create_empty_config).await["config"].is_null());
 
@@ -2728,60 +2809,73 @@ mod tests {
         assert_eq!(update_ok.status(), StatusCode::OK);
         assert_eq!(json_body(update_ok).await["config"]["k"], "next");
 
-        let update_missing = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<workspace_plugin::Model>::new()]),
-        ))
-        .oneshot(tenant_request(
-            "PUT",
-            &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
-            "phlax",
-            serde_json::json!({
-                "config": { "k": "next" },
-                "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_missing =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+            ))
+            .oneshot(tenant_request(
+                "PUT",
+                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                "phlax",
+                serde_json::json!({
+                    "config": { "k": "next" },
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(update_missing).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(update_missing).await["error"]["code"],
+            "not_found"
+        );
 
-        let update_stale = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![live_binding.clone()]]),
-        ))
-        .oneshot(tenant_request(
-            "PUT",
-            &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
-            "phlax",
-            serde_json::json!({
-                "config": { "k": "next" },
-                "if_unmodified_since": (fixed_time() + chrono::Duration::seconds(1))
-                    .to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_stale =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![live_binding.clone()]]),
+            ))
+            .oneshot(tenant_request(
+                "PUT",
+                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                "phlax",
+                serde_json::json!({
+                    "config": { "k": "next" },
+                    "if_unmodified_since": (fixed_time() + chrono::Duration::seconds(1))
+                        .to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_stale.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(update_stale).await["error"]["code"], "stale_write");
+        assert_eq!(
+            json_body(update_stale).await["error"]["code"],
+            "stale_write"
+        );
 
-        let update_clear = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![live_binding.clone()]])
-                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
-                .append_query_results([vec![workspace_plugin_row(workspace_id, plugin_id, None)]]),
-        ))
-        .oneshot(tenant_request(
-            "PUT",
-            &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
-            "phlax",
-            serde_json::json!({
-                "config": null,
-                "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
-            }),
-        ))
-        .await
-        .expect("response");
+        let update_clear =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![live_binding.clone()]])
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([vec![workspace_plugin_row(
+                        workspace_id,
+                        plugin_id,
+                        None,
+                    )]]),
+            ))
+            .oneshot(tenant_request(
+                "PUT",
+                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                "phlax",
+                serde_json::json!({
+                    "config": null,
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
         assert_eq!(update_clear.status(), StatusCode::OK);
         assert!(json_body(update_clear).await["config"].is_null());
 
@@ -2805,7 +2899,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(update_unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json_body(update_unavailable).await["error"]["code"], "unavailable");
+        assert_eq!(
+            json_body(update_unavailable).await["error"]["code"],
+            "unavailable"
+        );
 
         let delete_ok = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
             MockDatabase::new(DatabaseBackend::Postgres)
@@ -2827,18 +2924,22 @@ mod tests {
         .expect("response");
         assert_eq!(delete_ok.status(), StatusCode::NO_CONTENT);
 
-        let delete_missing = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([Vec::<workspace_plugin::Model>::new()]),
-        ))
-        .oneshot(tenant_delete_request(
-            &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
-            "phlax",
-        ))
-        .await
-        .expect("response");
+        let delete_missing =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+            ))
+            .oneshot(tenant_delete_request(
+                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
         assert_eq!(delete_missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(delete_missing).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(delete_missing).await["error"]["code"],
+            "not_found"
+        );
 
         let delete_unavailable = crate::handler::build_router(app_state_with_mock_db_and_clients(
             MockDatabase::new(DatabaseBackend::Postgres)
@@ -2855,7 +2956,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(delete_unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json_body(delete_unavailable).await["error"]["code"], "unavailable");
+        assert_eq!(
+            json_body(delete_unavailable).await["error"]["code"],
+            "unavailable"
+        );
     }
 
     #[tokio::test]
@@ -3040,7 +3144,10 @@ mod tests {
         .expect("response");
         assert_eq!(create_ok.status(), StatusCode::CREATED);
         assert_eq!(
-            create_ok.headers().get(LOCATION).and_then(|v| v.to_str().ok()),
+            create_ok
+                .headers()
+                .get(LOCATION)
+                .and_then(|v| v.to_str().ok()),
             Some("/api/tenant/phlax/secrets/github/pat")
         );
 
@@ -3078,7 +3185,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(create_disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json_body(create_disabled).await["error"]["code"], "unavailable");
+        assert_eq!(
+            json_body(create_disabled).await["error"]["code"],
+            "unavailable"
+        );
 
         let create_conflict_store = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3106,7 +3216,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(create_conflict.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(create_conflict).await["error"]["code"], "already_exists");
+        assert_eq!(
+            json_body(create_conflict).await["error"]["code"],
+            "already_exists"
+        );
 
         let create_bad_request_store = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3134,7 +3247,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(create_bad_request.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(json_body(create_bad_request).await["error"]["code"], "bad_request");
+        assert_eq!(
+            json_body(create_bad_request).await["error"]["code"],
+            "bad_request"
+        );
 
         let create_unavailable = crate::handler::build_router(app_state_with_mock_db_and_clients(
             MockDatabase::new(DatabaseBackend::Postgres),
@@ -3156,7 +3272,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(create_unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json_body(create_unavailable).await["error"]["code"], "unavailable");
+        assert_eq!(
+            json_body(create_unavailable).await["error"]["code"],
+            "unavailable"
+        );
 
         let delete_disabled = crate::handler::build_router(app_state_with_mock_db_and_clients(
             MockDatabase::new(DatabaseBackend::Postgres),
@@ -3171,7 +3290,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(delete_disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json_body(delete_disabled).await["error"]["code"], "unavailable");
+        assert_eq!(
+            json_body(delete_disabled).await["error"]["code"],
+            "unavailable"
+        );
 
         let delete_missing_store = MockServer::start().await;
         Mock::given(method("DELETE"))
@@ -3193,7 +3315,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(delete_missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(json_body(delete_missing).await["error"]["code"], "not_found");
+        assert_eq!(
+            json_body(delete_missing).await["error"]["code"],
+            "not_found"
+        );
 
         let delete_bad_request_store = MockServer::start().await;
         Mock::given(method("DELETE"))
@@ -3215,7 +3340,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(delete_bad_request.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(json_body(delete_bad_request).await["error"]["code"], "bad_request");
+        assert_eq!(
+            json_body(delete_bad_request).await["error"]["code"],
+            "bad_request"
+        );
 
         let delete_unavailable = crate::handler::build_router(app_state_with_mock_db_and_clients(
             MockDatabase::new(DatabaseBackend::Postgres),
@@ -3230,7 +3358,10 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(delete_unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json_body(delete_unavailable).await["error"]["code"], "unavailable");
+        assert_eq!(
+            json_body(delete_unavailable).await["error"]["code"],
+            "unavailable"
+        );
     }
 
     #[tokio::test]
