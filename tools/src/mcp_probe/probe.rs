@@ -620,6 +620,8 @@ impl ProbeError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     #[test]
@@ -665,12 +667,78 @@ mod tests {
     }
 
     #[test]
+    fn ordered_catalog_with_empty_slice_returns_empty_map() {
+        let cat = ordered_catalog(&[]).unwrap();
+        assert!(cat.is_empty());
+    }
+
+    #[test]
     fn probe_error_exit_code_buckets_match_rfe() {
         assert_eq!(ProbeError::PortNeverAccepted { port: 1 }.exit_code(), 4);
         assert_eq!(ProbeError::HandshakeTimeout.exit_code(), 5);
         assert_eq!(ProbeError::JsonRpcError("e".into()).exit_code(), 5);
         assert_eq!(ProbeError::RuntimeMissing("d".into()).exit_code(), 4);
     }
+
+    #[test]
+    fn probe_error_all_variants_exit_codes() {
+        assert_eq!(ProbeError::RuntimeMissing("x".into()).exit_code(), 4);
+        assert_eq!(ProbeError::PortAlloc("x".into()).exit_code(), 4);
+        assert_eq!(ProbeError::Io("x".into()).exit_code(), 4);
+        assert_eq!(
+            ProbeError::ContainerStartFailed {
+                image: "x".into(),
+                stderr: "y".into()
+            }
+            .exit_code(),
+            4
+        );
+        assert_eq!(ProbeError::PortNeverAccepted { port: 8080 }.exit_code(), 4);
+        assert_eq!(ProbeError::HandshakeTimeout.exit_code(), 5);
+        assert_eq!(ProbeError::HttpTransport("x".into()).exit_code(), 5);
+        assert_eq!(ProbeError::HandshakeShape("x".into()).exit_code(), 5);
+        assert_eq!(ProbeError::JsonRpcError("x".into()).exit_code(), 5);
+    }
+
+    // --- ProbeError display ---
+
+    #[test]
+    fn probe_error_display_strings_are_non_empty() {
+        let errors = [
+            ProbeError::RuntimeMissing("podman".into()),
+            ProbeError::PortAlloc("bind failed".into()),
+            ProbeError::Io("io error".into()),
+            ProbeError::ContainerStartFailed {
+                image: "my-image:1".into(),
+                stderr: "pull rate limit".into(),
+            },
+            ProbeError::PortNeverAccepted { port: 9000 },
+            ProbeError::HandshakeTimeout,
+            ProbeError::HttpTransport("connect refused".into()),
+            ProbeError::HandshakeShape("missing field".into()),
+            ProbeError::JsonRpcError("method not found".into()),
+        ];
+        for err in &errors {
+            let msg = format!("{err}");
+            assert!(
+                !msg.is_empty(),
+                "ProbeError display should not be empty: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_start_failed_display_includes_image_and_stderr() {
+        let err = ProbeError::ContainerStartFailed {
+            image: "my-image:1".into(),
+            stderr: "pull rate limit exceeded".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("my-image:1"), "{msg}");
+        assert!(msg.contains("pull rate limit exceeded"), "{msg}");
+    }
+
+    // --- parse_sse_first_event ---
 
     #[test]
     fn parse_sse_first_event_pulls_data_payload() {
@@ -686,6 +754,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_sse_first_event_skips_empty_data_lines() {
+        // A `data:` line with only whitespace should be skipped and
+        // parsing should continue to the next real data line.
+        let body = b"data: \ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}\n\n";
+        let v = parse_sse_first_event(body).unwrap();
+        assert_eq!(v["result"]["ok"], true);
+    }
+
+    #[test]
+    fn parse_sse_first_event_errors_on_non_utf8() {
+        let body = &[b'd', b'a', b't', b'a', b':', 0xFF, 0xFE, b'\n', b'\n'];
+        let err = parse_sse_first_event(body).unwrap_err();
+        assert!(matches!(err, ProbeError::HandshakeShape(_)));
+    }
+
+    #[test]
+    fn parse_sse_first_event_errors_on_invalid_json() {
+        let body = b"data: not-valid-json\n\n";
+        let err = parse_sse_first_event(body).unwrap_err();
+        assert!(matches!(err, ProbeError::HandshakeShape(_)));
+    }
+
+    // --- has_capability ---
+
+    #[test]
     fn has_capability_treats_missing_as_false() {
         assert!(has_capability(&json!({"resources": {}}), "resources"));
         assert!(!has_capability(&json!({}), "resources"));
@@ -694,6 +787,16 @@ mod tests {
         // not crash, returns false.
         assert!(!has_capability(&json!([]), "resources"));
     }
+
+    #[test]
+    fn has_capability_checks_exact_key() {
+        let caps = json!({"tools": {}, "prompts": {}});
+        assert!(has_capability(&caps, "tools"));
+        assert!(has_capability(&caps, "prompts"));
+        assert!(!has_capability(&caps, "resources"));
+    }
+
+    // --- expect_result ---
 
     #[test]
     fn expect_result_surfaces_jsonrpc_errors() {
@@ -707,5 +810,57 @@ mod tests {
         let envelope = json!({"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}, "serverInfo": {"name": "x"}}});
         let (r, _) = expect_result(envelope).unwrap();
         assert_eq!(r["serverInfo"]["name"], "x");
+    }
+
+    #[test]
+    fn expect_result_null_envelope_returns_handshake_shape_error() {
+        let err = expect_result(serde_json::Value::Null).unwrap_err();
+        assert!(matches!(err, ProbeError::HandshakeShape(_)));
+    }
+
+    #[test]
+    fn expect_result_missing_result_field_returns_handshake_shape_error() {
+        // Envelope has neither "error" nor "result" — malformed server response.
+        let envelope = json!({"jsonrpc": "2.0", "id": 1});
+        let err = expect_result(envelope).unwrap_err();
+        assert!(
+            matches!(err, ProbeError::HandshakeShape(ref msg) if msg.contains("result")),
+            "expected HandshakeShape mentioning 'result'"
+        );
+    }
+
+    #[test]
+    fn expect_result_captures_session_id_when_present() {
+        let envelope = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"serverInfo": {"name": "x"}},
+            "session_id": "sess-abc-123"
+        });
+        let (_, session_id) = expect_result(envelope).unwrap();
+        assert_eq!(session_id.as_deref(), Some("sess-abc-123"));
+    }
+
+    #[test]
+    fn expect_result_session_id_absent_returns_none() {
+        let envelope = json!({"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "x"}}});
+        let (_, session_id) = expect_result(envelope).unwrap();
+        assert!(session_id.is_none());
+    }
+
+    // --- check_deadline ---
+
+    #[test]
+    fn check_deadline_returns_ok_for_future_deadline() {
+        let future = Instant::now() + Duration::from_secs(60);
+        assert!(check_deadline(future).is_ok());
+    }
+
+    #[test]
+    fn check_deadline_returns_handshake_timeout_for_expired_deadline() {
+        // A deadline one second in the past has definitely elapsed.
+        let past = Instant::now() - Duration::from_secs(1);
+        let err = check_deadline(past).unwrap_err();
+        assert!(matches!(err, ProbeError::HandshakeTimeout));
     }
 }
