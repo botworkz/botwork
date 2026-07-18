@@ -31,10 +31,12 @@ Coverage is **unit-test only** — the same tests that `cargo test
 
 ### Two test tiers
 
-- **Unit tier (no docker):** use SeaORM's official
-  `sea_orm::MockDatabase` (with `DatabaseBackend::Postgres`) to drive
-  handler/logic code without a live postgres daemon. This is the tier
-  measured by the no-docker tarpaulin job.
+- **Unit tier (no docker):** for `botwork-api`, use the store seam
+  in `api/src/store/` (approach A): handler tests should inject the
+  in-memory domain mocks from `api/src/store/mock.rs`; SeaORM-backed
+  store behavior can still be unit tested with `sea_orm::MockDatabase`
+  where needed. Reference shape: `botwork-extra/auth-broker/src/store/`.
+  This is the tier measured by the no-docker tarpaulin job.
 - **Integration tier (docker):** use `testcontainers` + real postgres
   to exercise real SQL, constraints, and transaction behaviour. This
   tier runs in crate smoke/CI jobs and is not instrumented by the

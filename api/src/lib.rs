@@ -134,6 +134,7 @@ pub mod handler;
 pub mod read;
 pub mod secret_store;
 pub mod session_broker;
+pub mod store;
 #[cfg(test)]
 mod test_support;
 pub mod write;

@@ -52,6 +52,7 @@ use uuid::Uuid;
 use crate::control_plane::ControlPlaneClient;
 use crate::secret_store::SecretStoreClient;
 use crate::session_broker::SessionBrokerClient;
+use crate::store::ApiStore;
 use crate::{read, write};
 
 pub(crate) const PREFIX: &str = "[api]";
@@ -74,6 +75,7 @@ pub(crate) const PREFIX: &str = "[api]";
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<DatabaseConnection>,
+    pub store: Arc<dyn ApiStore>,
     pub control_plane: ControlPlaneClient,
     pub secret_store: SecretStoreClient,
     pub session_broker: SessionBrokerClient,
@@ -350,6 +352,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::store::mock::MockApiStore;
 
     #[tokio::test]
     async fn api_error_envelope_is_structured_for_all_variants() {
@@ -460,19 +463,16 @@ mod tests {
     #[tokio::test]
     async fn resolve_tenant_id_hits_and_misses() {
         let id = Uuid::new_v4();
-        let hit_db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![tenant_row(id, "phlax")]])
-            .into_connection();
-        let miss_db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([Vec::<botwork_entity::tenant::Model>::new()])
-            .into_connection();
+        let hit_store: Arc<dyn ApiStore> =
+            Arc::new(MockApiStore::new().with_tenant(tenant_row(id, "phlax")));
+        let miss_store: Arc<dyn ApiStore> = Arc::new(MockApiStore::new());
 
-        let resolved = resolve_tenant_id(&hit_db, "phlax")
+        let resolved = resolve_tenant_id(&hit_store, "phlax")
             .await
             .expect("resolved id");
         assert_eq!(resolved, id);
 
-        let err = resolve_tenant_id(&miss_db, "missing")
+        let err = resolve_tenant_id(&miss_store, "missing")
             .await
             .expect_err("missing tenant");
         let response = err.into_response();
@@ -650,20 +650,12 @@ pub(crate) fn require_admin(headers: &HeaderMap) -> Result<(), ApiError> {
 /// Used by tenant-scoped handlers to translate the path segment `{tenant}`
 /// (a human-readable name) into the UUID primary key used for DB joins.
 pub(crate) async fn resolve_tenant_id(
-    db: &DatabaseConnection,
+    store: &Arc<dyn ApiStore>,
     tenant_name: &str,
 ) -> Result<Uuid, ApiError> {
-    use botwork_entity::tenant;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-
-    tenant::Entity::find()
-        .filter(tenant::Column::Name.eq(tenant_name))
-        .one(db)
-        .await?
-        .map(|t| t.id)
-        .ok_or_else(|| {
-            ApiError::not_found("tenant", format!("no tenant with name {tenant_name:?}"))
-        })
+    store.resolve_tenant_id(tenant_name).await?.ok_or_else(|| {
+        ApiError::not_found("tenant", format!("no tenant with name {tenant_name:?}"))
+    })
 }
 
 // ── JSON body parse helper with envelope-shaped errors ─────────────
