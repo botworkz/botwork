@@ -13,6 +13,22 @@
 #     wasm32-unknown-unknown; a host-target build hard-fails.
 #   * No fail-under threshold is set — this establishes the baseline.
 #     A maintainer will ratchet a floor in a later dedicated PR.
+#
+# Excluded from coverage denominator (exclude-files):
+#   * db/entity/src/* — SeaORM #[derive(DeriveEntityModel)] generated
+#     entity models (tenant, workspace, plugin, lease, agent_session,
+#     session_worker, opaque_password_file, plugin_image_facet,
+#     workspace_plugin, connection).  These are macro-expanded glue
+#     with no meaningful branch logic to unit-test.
+#   * db/migration/src/* — migration definitions (lib.rs, main.rs, and
+#     every m2026*.rs).  Migrations run only against a live database via
+#     the migration runner; they are exercised by integration/CI steps,
+#     not unit tests.
+#   * */main.rs — process-bootstrap entry points across the workspace
+#     binaries (api, session-broker, control-plane, config-broker,
+#     db/migration, botwork-cli, launcher, tools, ui/server).  These
+#     files contain only arg-parsing shell, tokio-runtime setup, and
+#     server bind/serve wiring that is not meaningfully unit-testable.
 
 [default]
 engine = "llvm"
@@ -20,5 +36,10 @@ locked = true
 workspace = true
 all-targets = true
 exclude = ["botwork-ui-wasm"]
+exclude-files = [
+  "db/entity/src/*",
+  "db/migration/src/*",
+  "*/main.rs",
+]
 out = ["Lcov", "Xml"]
 output-dir = "coverage"

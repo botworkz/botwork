@@ -29,6 +29,22 @@ Coverage is **unit-test only** — the same tests that `cargo test
 - `botwork-ui-wasm`: this crate only targets `wasm32-unknown-unknown`
   and cannot be built for the host.
 
+### What is excluded from the coverage denominator
+
+The following paths are listed in `tarpaulin.toml` under `exclude-files`
+so they do not inflate (or deflate) the reported percentage:
+
+| Pattern | Reason |
+|---|---|
+| `db/entity/src/*` | SeaORM `#[derive(DeriveEntityModel)]` generated entity models — macro-expanded glue with no meaningful branch logic. |
+| `db/migration/src/*` | Migration definitions (`lib.rs`, `main.rs`, every `m2026*.rs`) — these run only against a live database via the migration runner and are exercised by integration/CI steps, not unit tests. |
+| `*/main.rs` | Process-bootstrap entry points across every workspace binary (api, session-broker, control-plane, config-broker, botwork-cli, launcher, tools, ui/server) — arg-parsing shell, tokio-runtime setup, and server bind/serve wiring that is not meaningfully unit-testable. |
+
+To update this list, edit `tarpaulin.toml` (`exclude-files`) and update
+this table.  Do **not** add exclusions for files that contain real branch
+logic — only generated code, database-only migration runners, and
+process-bootstrap entry points qualify.
+
 ### Two test tiers
 
 - **Unit tier (no docker):** for `botwork-api`, use the store seam
