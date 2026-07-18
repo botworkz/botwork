@@ -775,6 +775,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_tenants_empty_returns_zero_items() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_get("/api/tenants"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert_eq!(json["total"], 0);
+        assert_eq!(json["items"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
     async fn list_tenants_maps_db_errors_to_internal() {
         let state =
             crate::test_support::app_state_with_mock_store(MockApiStore::always_error("boom"));
@@ -840,6 +856,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_tenant_returns_not_found_when_missing() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_get(&format!("/api/tenants/{}", Uuid::new_v4())))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
     async fn list_workspaces_requires_tenant_header_match() {
         let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
@@ -871,6 +901,52 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let json = json_body(response).await;
         assert_eq!(json["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn list_workspaces_returns_seeded_rows() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_workspace(workspace_row(workspace_id, tenant_id, "mcp")),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get("/api/tenant/phlax/workspaces", "phlax"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["items"][0]["id"], workspace_id.to_string());
+        assert_eq!(json["items"][0]["name"], "mcp");
+    }
+
+    #[tokio::test]
+    async fn get_workspace_returns_seeded_row() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_workspace(workspace_row(workspace_id, tenant_id, "mcp")),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert_eq!(json["id"], workspace_id.to_string());
+        assert_eq!(json["name"], "mcp");
     }
 
     #[tokio::test]
@@ -930,6 +1006,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_plugin_invalid_uuid_and_missing_row() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let invalid_uuid = app
+            .clone()
+            .oneshot(admin_get("/api/plugins/not-a-uuid"))
+            .await
+            .expect("response");
+        assert_eq!(invalid_uuid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(invalid_uuid).await["error"]["code"],
+            "bad_request"
+        );
+
+        let missing = app
+            .oneshot(admin_get(&format!("/api/plugins/{}", Uuid::new_v4())))
+            .await
+            .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(missing).await["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
     async fn list_workspace_plugins_invalid_query_param_is_bad_request() {
         let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
@@ -962,6 +1062,60 @@ mod tests {
         let json = json_body(response).await;
         assert_eq!(json["total"], 0);
         assert_eq!(json["items"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_workspace_plugins_returns_seeded_rows() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_workspace(workspace_row(workspace_id, tenant_id, "mcp"))
+                .with_workspace_plugin(workspace_plugin::Model {
+                    workspace_id,
+                    plugin_id,
+                    config: Some(serde_json::json!({"k":"v"})),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                }),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get("/api/tenant/phlax/workspace_plugins", "phlax"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["items"][0]["workspace_id"], workspace_id.to_string());
+        assert_eq!(json["items"][0]["plugin_id"], plugin_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn get_workspace_plugin_missing_row_returns_not_found() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_workspace(workspace_row(workspace_id, tenant_id, "mcp")),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "not_found");
     }
 
     #[tokio::test]
@@ -1026,6 +1180,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_agent_sessions_returns_seeded_rows() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_agent_session(agent_session_row(session_id, tenant_id, workspace_id)),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get("/api/tenant/phlax/agent_sessions", "phlax"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["items"][0]["id"], session_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn get_agent_session_success_and_invalid_uuid() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_agent_session(agent_session_row(session_id, tenant_id, workspace_id)),
+        );
+        let app = crate::handler::build_router(state);
+
+        let invalid_uuid = app
+            .clone()
+            .oneshot(tenant_get(
+                "/api/tenant/phlax/agent_sessions/not-a-uuid",
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(invalid_uuid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(invalid_uuid).await["error"]["code"],
+            "bad_request"
+        );
+
+        let success = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/agent_sessions/{session_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(success.status(), StatusCode::OK);
+        assert_eq!(json_body(success).await["id"], session_id.to_string());
+    }
+
+    #[tokio::test]
     async fn list_session_workers_invalid_plugin_id_is_bad_request() {
         let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
@@ -1061,6 +1274,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_session_workers_returns_seeded_rows() {
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_agent_session(agent_session_row(session_id, tenant_id, workspace_id))
+                .with_session_worker(session_worker_row(worker_id, Some(session_id), plugin_id)),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get("/api/tenant/phlax/session_workers", "phlax"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["items"][0]["id"], worker_id.to_string());
+    }
+
+    #[tokio::test]
     async fn get_session_worker_returns_not_found_on_cross_tenant_ownership() {
         let path_tenant_id = Uuid::new_v4();
         let other_tenant_id = Uuid::new_v4();
@@ -1087,5 +1325,42 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let json = json_body(response).await;
         assert_eq!(json["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn get_session_worker_invalid_uuid_and_unbound_worker() {
+        let tenant_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_session_worker(session_worker_row(worker_id, None, plugin_id)),
+        );
+        let app = crate::handler::build_router(state);
+
+        let invalid_uuid = app
+            .clone()
+            .oneshot(tenant_get(
+                "/api/tenant/phlax/session_workers/not-a-uuid",
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(invalid_uuid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(invalid_uuid).await["error"]["code"],
+            "bad_request"
+        );
+
+        let unbound = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/session_workers/{worker_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(unbound.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(unbound).await["error"]["code"], "not_found");
     }
 }
