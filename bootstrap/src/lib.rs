@@ -45,10 +45,10 @@
 
 pub mod error;
 pub mod runner;
-#[cfg(test)]
-mod test_support;
+pub mod store;
 
 pub use error::BootstrapError;
+pub use store::BootstrapStore;
 
 // Re-export from api-core so existing consumers
 // (`botwork-api`, `botwork-config-broker`,
@@ -59,4 +59,4 @@ pub use botwork_api_core::{
     WorkspaceEntry, WorkspacePluginEntry,
 };
 
-pub use runner::apply;
+pub use runner::{apply, apply_with_store};
