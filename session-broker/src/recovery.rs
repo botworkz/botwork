@@ -1027,4 +1027,108 @@ mod tests {
         // config-broker at 127.0.0.1:1 refuses connection → skip; nothing seeded.
         assert!(state.transport_sessions.lock().await.is_empty());
     }
+
+    #[tokio::test]
+    async fn recover_with_seam_skips_when_record_reap_errors() {
+        // DB row present, container absent → record_reap is called. When
+        // record_reap returns an error the function should log and continue,
+        // not panic.
+        let pid = Uuid::new_v4();
+        let writer = MockSessionWorkerStore::new()
+            .with_live_worker("mcp_session_reap_fail", "10.0.0.1", "sess-rf", pid)
+            .fail_on_reap();
+        let state = app_state_with_writer(Some(Arc::new(writer)));
+        crate::test_support::start_log_capture();
+
+        recover_live_workers_with(&state, || Some(HashSet::new()), |_| None).await;
+        let logs = crate::test_support::take_log_capture().join("\n");
+        // record_reap failed but state is still consistent and no panic occurred.
+        assert!(state.transport_sessions.lock().await.is_empty());
+        assert!(
+            logs.contains("record_reap failed") || logs.contains("reap"),
+            "expected a reap-related log, got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_skips_when_resolve_plugin_name_errors() {
+        // Container + DB row + inspect succeeds, but resolve_plugin_name
+        // returns Err → warn (via tracing, not log_info) + skip; nothing seeded.
+        let pid = Uuid::new_v4();
+        let writer = MockSessionWorkerStore::new()
+            .with_live_worker("mcp_session_rpe", "10.0.0.2", "sess-rpe", pid)
+            .fail_on_resolve_plugin_name();
+        let state = app_state_with_writer(Some(Arc::new(writer)));
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_rpe".to_string()])),
+            |_| Some(synthetic_inspect("10.0.0.2", "acme", "mcp")),
+        )
+        .await;
+        // The Err arm should have skipped seeding; no session in the map.
+        assert!(
+            state.transport_sessions.lock().await.is_empty(),
+            "expected no sessions seeded when resolve_plugin_name errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_seeds_transport_when_config_broker_responds() {
+        // Full happy path: container running + DB row + plugin resolved +
+        // inspect succeeds + config-broker returns a valid descriptor.
+        // Spin up a minimal TCP server that serves a one-shot descriptor.
+        use tokio::io::AsyncWriteExt;
+        let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = tcp_listener.local_addr().unwrap().port();
+        let plugin_port: u16 = 8000;
+        let descriptor_json = format!(
+            r#"{{"image":"img:1","port":{plugin_port},"path":"/mcp","upstream_auth":"none"}}"#
+        );
+        let body_len = descriptor_json.len();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n{descriptor_json}"
+        );
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = tcp_listener.accept().await {
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let pid = Uuid::new_v4();
+        let writer = MockSessionWorkerStore::new()
+            .with_plugin(pid, "mcp-bash")
+            .with_live_worker("mcp_session_seed", "10.0.0.3", "sess-seed", pid);
+        let mut state = app_state_with_writer(Some(Arc::new(writer)));
+        state.config_broker_endpoint = format!("http://127.0.0.1:{port}");
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_seed".to_string()])),
+            |_| {
+                Some(InspectResult {
+                    container_ip: "10.0.0.3".to_string(),
+                    tenant: "acme".to_string(),
+                    workspace: "mcp".to_string(),
+                    agent_session_label: None,
+                    staging_token: Some("tok-seed".to_string()),
+                })
+            },
+        )
+        .await;
+
+        let sessions = state.transport_sessions.lock().await;
+        assert!(
+            sessions.contains_key("sess-seed"),
+            "transport should be seeded for mcp_session_id=sess-seed"
+        );
+        let t = sessions.get("sess-seed").unwrap();
+        assert_eq!(t.container_name, "mcp_session_seed");
+        assert_eq!(t.container_ip, "10.0.0.3");
+        assert_eq!(t.tenant_name, "acme");
+        assert_eq!(t.workspace, "mcp");
+        assert_eq!(t.port, plugin_port);
+    }
 }

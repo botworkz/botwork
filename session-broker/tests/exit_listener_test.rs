@@ -227,3 +227,178 @@ async fn container_exit_with_session_worker_writer_swallows_db_error() {
         .await
         .contains_key("sess-db-warn"));
 }
+
+// ── serve_exit_listener end-to-end ──────────────────────────────────────────
+
+/// Spin up `serve_exit_listener` on a temporary Unix socket, send a real
+/// HTTP POST /container-exit, and verify the response status code.
+/// This covers the `serve_exit_listener` accept loop and `handle_exit_request`
+/// which can only be reached through a live Hyper connection.
+#[tokio::test]
+async fn serve_exit_listener_forwards_exit_event_returns_200() {
+    use botwork_session_broker::exit_listener::serve_exit_listener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket_path = tmp.path().join("broker.sock");
+    let socket_path_str = socket_path.to_string_lossy().to_string();
+
+    let state = make_state();
+    // Pre-populate a transport so handle_container_exit returns 200 rather than 404.
+    insert_transport(&state, "sess-e2e", sample_transport("mcp_session_e2e")).await;
+
+    // Spawn the server.
+    let server_task =
+        tokio::spawn(async move { serve_exit_listener(state, &socket_path_str).await });
+
+    // Wait briefly for the server to bind and enter its accept loop.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send a POST /container-exit request.
+    let body = r#"{"name":"mcp_session_e2e","event":"die","exit_code":0}"#;
+    let request = format!(
+        "POST /container-exit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+
+    // Read the response status line.
+    let mut response = vec![0u8; 1024];
+    let n = stream.read(&mut response).await.expect("read response");
+    let response_str = String::from_utf8_lossy(&response[..n]);
+    assert!(
+        response_str.starts_with("HTTP/1.1 200"),
+        "expected HTTP 200, got: {response_str:?}"
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn serve_exit_listener_returns_404_for_unknown_container() {
+    use botwork_session_broker::exit_listener::serve_exit_listener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket_path = tmp.path().join("broker2.sock");
+    let socket_path_str = socket_path.to_string_lossy().to_string();
+
+    let state = make_state(); // no transports seeded → any container name is unknown
+
+    let server_task =
+        tokio::spawn(async move { serve_exit_listener(state, &socket_path_str).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let body = r#"{"name":"mcp_session_unknown","event":"die"}"#;
+    let request = format!(
+        "POST /container-exit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+
+    let mut response = vec![0u8; 1024];
+    let n = stream.read(&mut response).await.expect("read response");
+    let response_str = String::from_utf8_lossy(&response[..n]);
+    assert!(
+        response_str.starts_with("HTTP/1.1 404"),
+        "expected HTTP 404 for unknown container, got: {response_str:?}"
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn serve_exit_listener_returns_500_for_malformed_json() {
+    use botwork_session_broker::exit_listener::serve_exit_listener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket_path = tmp.path().join("broker3.sock");
+    let socket_path_str = socket_path.to_string_lossy().to_string();
+
+    let state = make_state();
+
+    let server_task =
+        tokio::spawn(async move { serve_exit_listener(state, &socket_path_str).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let body = "not-json";
+    let request = format!(
+        "POST /container-exit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+
+    let mut response = vec![0u8; 1024];
+    let n = stream.read(&mut response).await.expect("read response");
+    let response_str = String::from_utf8_lossy(&response[..n]);
+    // Malformed JSON causes dispatch_exit_request to return Err →
+    // handle_exit_request returns 500.
+    assert!(
+        response_str.starts_with("HTTP/1.1 500"),
+        "expected HTTP 500 for malformed JSON, got: {response_str:?}"
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn serve_exit_listener_returns_404_for_non_post_method() {
+    use botwork_session_broker::exit_listener::serve_exit_listener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket_path = tmp.path().join("broker4.sock");
+    let socket_path_str = socket_path.to_string_lossy().to_string();
+
+    let state = make_state();
+
+    let server_task =
+        tokio::spawn(async move { serve_exit_listener(state, &socket_path_str).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send GET instead of POST.
+    let request =
+        "GET /container-exit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+
+    let mut response = vec![0u8; 1024];
+    let n = stream.read(&mut response).await.expect("read response");
+    let response_str = String::from_utf8_lossy(&response[..n]);
+    assert!(
+        response_str.starts_with("HTTP/1.1 404"),
+        "expected HTTP 404 for GET method, got: {response_str:?}"
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
+}

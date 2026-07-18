@@ -479,4 +479,85 @@ mod tests {
         };
         assert_eq!(creds.describe(), "uid=0 gid=0 pid=unknown");
     }
+
+    // ── bind_listener ────────────────────────────────────────────────────────
+
+    fn test_config(socket_path: String) -> crate::Config {
+        crate::Config {
+            socket_path,
+            socket_group: None,
+            allowed_peer_uid: None,
+            allowed_peer_gid: None,
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            image_allowlist_regex: r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$".to_string(),
+            container_pids_limit: 256,
+            container_cpu_limit: "1.0".to_string(),
+            container_memory_limit: "512m".to_string(),
+            container_read_only_rootfs: false,
+            broker_socket_path: "/run/botwork/broker.sock".to_string(),
+            default_network: "botwork-plugin".to_string(),
+            egress_proxy: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_listener_creates_socket_file() {
+        use super::bind_listener;
+        use tempfile::tempdir;
+        let tmp = tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("test.sock").to_string_lossy().to_string();
+        let config = test_config(socket_path.clone());
+
+        let listener = bind_listener(&config).expect("bind_listener should succeed");
+        drop(listener);
+        // The socket file must have been created.
+        assert!(
+            std::path::Path::new(&socket_path).exists(),
+            "socket file should exist after bind_listener"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_listener_replaces_existing_socket_file() {
+        use super::bind_listener;
+        use tempfile::tempdir;
+        let tmp = tempdir().expect("tempdir");
+        let socket_path = tmp
+            .path()
+            .join("replace.sock")
+            .to_string_lossy()
+            .to_string();
+
+        // Pre-create the socket file (as a regular file to simulate a stale socket).
+        std::fs::write(&socket_path, b"stale").expect("write stale file");
+        assert!(
+            std::path::Path::new(&socket_path).exists(),
+            "precondition: file must exist"
+        );
+
+        let config = test_config(socket_path.clone());
+        let listener = bind_listener(&config).expect("bind_listener should replace stale socket");
+        drop(listener);
+        assert!(
+            std::path::Path::new(&socket_path).exists(),
+            "new socket file should exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_listener_creates_parent_directory() {
+        use super::bind_listener;
+        use tempfile::tempdir;
+        let tmp = tempdir().expect("tempdir");
+        // Nested directory that doesn't exist yet.
+        let nested = tmp.path().join("subdir").join("nested");
+        let socket_path = nested.join("test.sock").to_string_lossy().to_string();
+
+        let config = test_config(socket_path.clone());
+        let listener =
+            bind_listener(&config).expect("bind_listener should create parent directory");
+        drop(listener);
+        assert!(nested.exists(), "parent directory should have been created");
+    }
 }

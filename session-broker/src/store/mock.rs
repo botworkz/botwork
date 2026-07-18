@@ -263,6 +263,8 @@ struct SessionWorkerInner {
 pub struct MockSessionWorkerStore {
     inner: Arc<Mutex<SessionWorkerInner>>,
     always_error: Option<String>,
+    fail_on_reap: bool,
+    fail_on_resolve_plugin_name: bool,
 }
 
 impl MockSessionWorkerStore {
@@ -274,7 +276,25 @@ impl MockSessionWorkerStore {
         Self {
             inner: Arc::new(Mutex::new(SessionWorkerInner::default())),
             always_error: Some(msg.into()),
+            fail_on_reap: false,
+            fail_on_resolve_plugin_name: false,
         }
+    }
+
+    /// Builder: make `record_reap` return a DB error while all other methods
+    /// succeed normally.  Useful for exercising the `record_reap` failure
+    /// branch in `recover_live_workers_with` without failing `list_live`.
+    pub fn fail_on_reap(mut self) -> Self {
+        self.fail_on_reap = true;
+        self
+    }
+
+    /// Builder: make `resolve_plugin_name` return a DB error while all other
+    /// methods succeed normally.  Useful for testing the `Err` branch in
+    /// `recover_live_workers_with` without failing `list_live`.
+    pub fn fail_on_resolve_plugin_name(mut self) -> Self {
+        self.fail_on_resolve_plugin_name = true;
+        self
     }
 
     pub fn with_plugin(self, id: Uuid, name: impl Into<String>) -> Self {
@@ -405,6 +425,11 @@ impl SessionWorkerStore for MockSessionWorkerStore {
         if let Some(err) = self.maybe_db_err() {
             return Err(err);
         }
+        if self.fail_on_reap {
+            return Err(SessionWorkerWriteError::Db(DbErr::Custom(
+                "mock: record_reap forced failure".to_string(),
+            )));
+        }
         let mut inner = self.inner.lock().expect("lock");
         inner.recorded_reaps.push(container_name.to_string());
         let Some(row) = inner.workers.get_mut(container_name) else {
@@ -440,6 +465,11 @@ impl SessionWorkerStore for MockSessionWorkerStore {
     async fn resolve_plugin_name(&self, plugin_id: Uuid) -> Result<Option<String>, DbErr> {
         if let Some(msg) = &self.always_error {
             return Err(DbErr::Custom(msg.clone()));
+        }
+        if self.fail_on_resolve_plugin_name {
+            return Err(DbErr::Custom(
+                "mock: resolve_plugin_name forced failure".to_string(),
+            ));
         }
         Ok(self
             .inner

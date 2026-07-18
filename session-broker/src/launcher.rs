@@ -718,4 +718,110 @@ mod tests {
             "expected BindHttp{{500}}, got {err:?}"
         );
     }
+
+    // ── call_teardown ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn call_teardown_does_not_panic_and_discards_result() {
+        // call_teardown is fire-and-forget; it must not panic when the
+        // launcher socket is missing (the result is silently discarded).
+        call_teardown(
+            "/nonexistent/launcher.sock",
+            "mcp_session_abc",
+            "/var/lib/botwork/tenants/acme/staging/tok1",
+        )
+        .await;
+        // If we reach here, no panic occurred.
+    }
+
+    #[tokio::test]
+    async fn call_teardown_sends_request_to_socket() {
+        // Verify that call_teardown actually sends an HTTP POST to the socket
+        // when the socket is present.
+        let temp_dir = tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("teardown.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind");
+        let path = path_to_string(&socket_path);
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 4096];
+            let n = stream.read(&mut buf).await.expect("read");
+            // Respond so the client doesn't hang
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write");
+            buf[..n].to_vec()
+        });
+
+        call_teardown(
+            &path,
+            "mcp_session_abc",
+            "/var/lib/botwork/tenants/acme/staging/tok1",
+        )
+        .await;
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("timeout")
+            .expect("join");
+        let text = String::from_utf8_lossy(&received);
+        assert!(
+            text.contains("/teardown"),
+            "expected /teardown in request, got: {text}"
+        );
+        assert!(
+            text.contains("POST"),
+            "expected POST method in request, got: {text}"
+        );
+    }
+
+    // ── probe_ready ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn probe_ready_returns_true_when_port_is_listening() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        // Accept one connection in background so probe_ready can connect.
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let result = probe_ready(
+            "127.0.0.1",
+            port,
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            result,
+            "probe_ready should return true when port is listening"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_ready_returns_false_when_nothing_listening() {
+        // Use a port that nothing is listening on; use a very short total
+        // timeout so the test is fast.  We bind and immediately close to
+        // grab an ephemeral port number that is unlikely to be reused.
+        let tmp = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = tmp.local_addr().unwrap().port();
+        drop(tmp); // release the port — nothing listens on it now
+
+        let result = probe_ready(
+            "127.0.0.1",
+            port,
+            Duration::from_millis(50),
+            Duration::from_millis(10), // shorter than PROBE_SLEEP so loop exits on deadline
+        )
+        .await;
+        assert!(
+            !result,
+            "probe_ready should return false when nothing is listening"
+        );
+    }
 }

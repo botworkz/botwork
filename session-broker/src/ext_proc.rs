@@ -3929,4 +3929,22 @@ mod tests {
     fn upstream_format() {
         assert_eq!(upstream("mcp_session_abc", 8000), "mcp_session_abc:8000");
     }
+
+    // ── teardown_unannounced_container ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn teardown_unannounced_container_spawns_task_without_panic() {
+        // The function spawns a fire-and-forget task that calls call_teardown.
+        // With a non-existent socket the teardown silently fails, but the
+        // call itself must not panic.
+        let state = test_app_state("p", UpstreamAuth::None);
+        teardown_unannounced_container(
+            &state,
+            "mcp_session_test",
+            "/var/lib/botwork/tenants/acme/staging/tok1",
+        )
+        .await;
+        // Give the spawned task a tick to run so any panic propagates.
+        tokio::task::yield_now().await;
+    }
 }
