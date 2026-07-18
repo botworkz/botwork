@@ -1439,6 +1439,21 @@ mod tests {
             .expect("request")
     }
 
+    fn tenant_request(
+        method: &str,
+        path: &str,
+        tenant: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(crate::handler::TENANT_HEADER, tenant)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request")
+    }
+
     fn tenant_delete_request(path: &str, tenant: &str) -> Request<Body> {
         Request::builder()
             .method("DELETE")
@@ -1566,6 +1581,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_tenant_rejects_missing_required_field() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_request("POST", "/api/tenants", serde_json::json!({})))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
     async fn create_tenant_rejects_invalid_and_reserved_names() {
         let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
@@ -1645,6 +1674,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_tenant_success_sets_location_and_records_write() {
+        let store = MockApiStore::new();
+        let state = crate::test_support::app_state_with_mock_store(store.clone());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_request(
+                "POST",
+                "/api/tenants",
+                serde_json::json!({ "name": "phlax" }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .expect("location header")
+            .to_str()
+            .expect("location ascii")
+            .to_string();
+        let body = json_body(response).await;
+        let id = Uuid::parse_str(body["id"].as_str().expect("id as str")).expect("uuid");
+        assert_eq!(body["name"], "phlax");
+        assert_eq!(location, format!("/api/tenants/{id}"));
+        assert_eq!(store.drain_created_tenants().await, vec![id]);
+    }
+
+    #[tokio::test]
+    async fn update_tenant_rejects_invalid_id_and_missing_lock() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let invalid_id = app
+            .clone()
+            .oneshot(admin_request(
+                "PUT",
+                "/api/tenants/not-a-uuid",
+                serde_json::json!({
+                    "name": "phlax",
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(invalid_id.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(invalid_id).await["error"]["code"], "bad_request");
+
+        let missing_lock = app
+            .oneshot(admin_request(
+                "PUT",
+                &format!("/api/tenants/{}", Uuid::new_v4()),
+                serde_json::json!({ "name": "phlax" }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(missing_lock.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(missing_lock).await["error"]["code"],
+            "bad_request"
+        );
+    }
+
+    #[tokio::test]
     async fn update_tenant_stale_lock_returns_conflict() {
         let id = Uuid::new_v4();
         let live_updated_at = fixed_time();
@@ -1668,6 +1762,56 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(json_body(response).await["error"]["code"], "stale_write");
+    }
+
+    #[tokio::test]
+    async fn update_tenant_with_matching_lock_updates_and_records_write() {
+        let id = Uuid::new_v4();
+        let updated_at = fixed_time();
+        let store = MockApiStore::new().with_tenant(tenant_row(id, "phlax", updated_at));
+        let state = crate::test_support::app_state_with_mock_store(store.clone());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_request(
+                "PUT",
+                &format!("/api/tenants/{id}"),
+                serde_json::json!({
+                    "name": "renamed",
+                    "if_unmodified_since": updated_at.to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["id"], id.to_string());
+        assert_eq!(body["name"], "renamed");
+        assert_eq!(store.drain_updated_tenants().await, vec![id]);
+    }
+
+    #[tokio::test]
+    async fn delete_tenant_rejects_invalid_id_and_invalid_lock_query() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let invalid_id = app
+            .clone()
+            .oneshot(delete_request("/api/tenants/not-a-uuid"))
+            .await
+            .expect("response");
+        assert_eq!(invalid_id.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(invalid_id).await["error"]["code"], "bad_request");
+
+        let invalid_lock = app
+            .oneshot(delete_request(&format!(
+                "/api/tenants/{}?if_unmodified_since=not-a-timestamp",
+                Uuid::new_v4()
+            )))
+            .await
+            .expect("response");
+        assert_eq!(invalid_lock.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1698,9 +1842,8 @@ mod tests {
     async fn delete_tenant_with_no_dependents_proceeds() {
         let id = Uuid::new_v4();
         let updated_at = fixed_time();
-        let state = crate::test_support::app_state_with_mock_store(
-            MockApiStore::new().with_tenant(tenant_row(id, "phlax", updated_at)),
-        );
+        let store = MockApiStore::new().with_tenant(tenant_row(id, "phlax", updated_at));
+        let state = crate::test_support::app_state_with_mock_store(store.clone());
         let app = crate::handler::build_router(state);
         let lock = updated_at.to_rfc3339_opts(SecondsFormat::Micros, true);
 
@@ -1712,6 +1855,175 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(store.drain_deleted_tenants().await, vec![id]);
+    }
+
+    #[tokio::test]
+    async fn create_workspace_rejects_unknown_field_and_invalid_name() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let unknown_field = app
+            .clone()
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspaces",
+                "phlax",
+                serde_json::json!({ "name": "mcp", "extra": true }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(unknown_field.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(unknown_field).await["error"]["code"],
+            "bad_request"
+        );
+
+        let invalid_name = app
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspaces",
+                "phlax",
+                serde_json::json!({ "name": "bad.name" }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(invalid_name.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(invalid_name).await["error"]["code"],
+            "invalid_name"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_and_plugin_mutations_reject_invalid_path_ids() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+        let lock = fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true);
+
+        let update_workspace = app
+            .clone()
+            .oneshot(tenant_request(
+                "PUT",
+                "/api/tenant/phlax/workspaces/not-a-uuid",
+                "phlax",
+                serde_json::json!({
+                    "name": "mcp",
+                    "if_unmodified_since": lock
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(update_workspace.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(update_workspace).await["error"]["code"],
+            "bad_request"
+        );
+
+        let delete_workspace = app
+            .clone()
+            .oneshot(tenant_delete_request(
+                "/api/tenant/phlax/workspaces/not-a-uuid",
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(delete_workspace.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(delete_workspace).await["error"]["code"],
+            "bad_request"
+        );
+
+        let update_plugin = app
+            .clone()
+            .oneshot(admin_request(
+                "PUT",
+                "/api/plugins/not-a-uuid",
+                serde_json::json!({
+                    "name": "mcp-fetch",
+                    "image": "ghcr.io/example/mcp-fetch:1.0",
+                    "port": 8000,
+                    "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(update_plugin.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(update_plugin).await["error"]["code"],
+            "bad_request"
+        );
+
+        let delete_plugin = app
+            .oneshot(delete_request("/api/plugins/not-a-uuid"))
+            .await
+            .expect("response");
+        assert_eq!(delete_plugin.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(delete_plugin).await["error"]["code"],
+            "bad_request"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_plugin_rejects_missing_required_name() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(admin_request(
+                "POST",
+                "/api/plugins",
+                serde_json::json!({
+                    "image": "ghcr.io/example/mcp-fetch:1.0",
+                    "port": 8000
+                }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn create_and_delete_secret_reject_invalid_components() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let create_invalid = app
+            .clone()
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/secrets",
+                "phlax",
+                serde_json::json!({
+                    "service": "../github",
+                    "name": "pat",
+                    "kind": "token",
+                    "value_b64": "dG9rZW4="
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(create_invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(create_invalid).await["error"]["code"],
+            "validation_failed"
+        );
+
+        let delete_invalid = app
+            .oneshot(tenant_delete_request(
+                "/api/tenant/phlax/secrets/github/.env",
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(delete_invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(delete_invalid).await["error"]["code"],
+            "validation_failed"
+        );
     }
 
     #[tokio::test]

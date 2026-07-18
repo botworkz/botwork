@@ -94,6 +94,16 @@ impl MockApiStore {
         std::mem::take(&mut inner.created_tenants)
     }
 
+    pub async fn drain_updated_tenants(&self) -> Vec<Uuid> {
+        let mut inner = self.inner.lock().expect("lock");
+        std::mem::take(&mut inner.updated_tenants)
+    }
+
+    pub async fn drain_deleted_tenants(&self) -> Vec<Uuid> {
+        let mut inner = self.inner.lock().expect("lock");
+        std::mem::take(&mut inner.deleted_tenants)
+    }
+
     fn maybe_db_err(&self) -> Option<DbErr> {
         self.always_error
             .as_ref()
