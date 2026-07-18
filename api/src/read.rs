@@ -534,7 +534,7 @@ mod tests {
             .expect("request")
     }
 
-    fn get(path: &str) -> Request<Body> {
+    fn anonymous_get(path: &str) -> Request<Body> {
         Request::builder()
             .method("GET")
             .uri(path)
@@ -674,11 +674,15 @@ mod tests {
 
     #[tokio::test]
     async fn list_tenants_requires_admin_header() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
-        let response = app.oneshot(get("/api/tenants")).await.expect("response");
+        let response = app
+            .oneshot(anonymous_get("/api/tenants"))
+            .await
+            .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let json = json_body(response).await;
         assert_eq!(json["error"]["code"], "admin_required");
@@ -686,8 +690,9 @@ mod tests {
 
     #[tokio::test]
     async fn get_tenant_invalid_uuid_is_bad_request() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -703,9 +708,8 @@ mod tests {
     async fn get_tenant_returns_mocked_row() {
         let id = Uuid::new_v4();
         let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![tenant_row(
-                id, "phlax",
-            )]]),
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![tenant_row(id, "phlax")]]),
         );
         let app = crate::handler::build_router(state);
 
@@ -721,12 +725,13 @@ mod tests {
 
     #[tokio::test]
     async fn list_workspaces_requires_tenant_header_match() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(get("/api/tenant/phlax/workspaces"))
+            .oneshot(anonymous_get("/api/tenant/phlax/workspaces"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -781,11 +786,15 @@ mod tests {
 
     #[tokio::test]
     async fn list_plugins_requires_admin_header() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
-        let response = app.oneshot(get("/api/plugins")).await.expect("response");
+        let response = app
+            .oneshot(anonymous_get("/api/plugins"))
+            .await
+            .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let json = json_body(response).await;
         assert_eq!(json["error"]["code"], "admin_required");
@@ -795,10 +804,8 @@ mod tests {
     async fn get_plugin_returns_mocked_row() {
         let plugin_id = Uuid::new_v4();
         let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![plugin_row(
-                plugin_id,
-                "mcp-fetch",
-            )]]),
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]]),
         );
         let app = crate::handler::build_router(state);
 
@@ -814,8 +821,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_workspace_plugins_invalid_query_param_is_bad_request() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -872,8 +880,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_agent_sessions_invalid_workspace_id_is_bad_request() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -919,8 +928,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_session_workers_invalid_plugin_id_is_bad_request() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let response = app

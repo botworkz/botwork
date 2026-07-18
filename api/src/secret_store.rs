@@ -406,13 +406,13 @@ mod tests {
         assert_eq!(ok.stored, "github.com/pat");
         assert!(ok.created);
 
-        let server = MockServer::start().await;
+        let conflict_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/secrets"))
             .respond_with(ResponseTemplate::new(409).set_body_string("exists"))
-            .mount(&server)
+            .mount(&conflict_server)
             .await;
-        let client = SecretStoreClient::with_endpoint(server.uri());
+        let client = SecretStoreClient::with_endpoint(conflict_server.uri());
         let err = client.put_secret(sample_put()).await.expect_err("conflict");
         assert!(matches!(err, SecretStoreError::AlreadyExists(_)));
     }
@@ -433,14 +433,14 @@ mod tests {
             .expect_err("not found");
         assert!(matches!(err, SecretStoreError::NotFound(_)));
 
-        let server = MockServer::start().await;
+        let success_server = MockServer::start().await;
         Mock::given(method("DELETE"))
             .and(path("/secrets/github.com/pat"))
             .and(query_param("tenant", "phlax"))
             .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
+            .mount(&success_server)
             .await;
-        let client = SecretStoreClient::with_endpoint(server.uri());
+        let client = SecretStoreClient::with_endpoint(success_server.uri());
         client
             .delete_secret("phlax", "github.com", "pat")
             .await

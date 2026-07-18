@@ -243,13 +243,13 @@ mod tests {
             .await
             .expect("evict ok");
 
-        let server = MockServer::start().await;
+        let error_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/evict-tenant/phlax"))
             .respond_with(ResponseTemplate::new(503).set_body_string("down"))
-            .mount(&server)
+            .mount(&error_server)
             .await;
-        let client = SessionBrokerClient::with_endpoint(server.uri());
+        let client = SessionBrokerClient::with_endpoint(error_server.uri());
         let err = client
             .evict_tenant_sessions("phlax")
             .await

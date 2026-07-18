@@ -1385,11 +1385,13 @@ mod tests {
     use super::*;
     use crate::{AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient};
 
-    fn admin_request(
-        method: &str,
-        path: &str,
-        body: serde_json::Value,
-    ) -> Request<Body> {
+    fn fixed_time() -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .expect("fixed timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn admin_request(method: &str, path: &str, body: serde_json::Value) -> Request<Body> {
         Request::builder()
             .method(method)
             .uri(path)
@@ -1440,8 +1442,8 @@ mod tests {
             id,
             tenant_id,
             name: name.to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: fixed_time(),
+            updated_at: fixed_time(),
         }
     }
 
@@ -1456,8 +1458,8 @@ mod tests {
             env: serde_json::json!([]),
             resources: None,
             egress: serde_json::json!({ "mode": "none" }),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: fixed_time(),
+            updated_at: fixed_time(),
             current_facet_id: None,
         }
     }
@@ -1471,8 +1473,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_tenant_requires_admin_header() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1490,8 +1493,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_workspace_requires_matching_tenant_header() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1504,13 +1508,17 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(json_body(response).await["error"]["code"], "cross_tenant_forbidden");
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "cross_tenant_forbidden"
+        );
     }
 
     #[tokio::test]
     async fn create_tenant_rejects_unknown_field_and_invalid_shape() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let unknown_response = app
@@ -1545,8 +1553,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_tenant_rejects_invalid_and_reserved_names() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let invalid_response = app
@@ -1581,8 +1590,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_plugin_maps_validator_failure_to_422() {
-        let state =
-            crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres));
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1599,7 +1609,10 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(json_body(response).await["error"]["code"], "validation_failed");
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "validation_failed"
+        );
     }
 
     #[tokio::test]
@@ -1626,12 +1639,13 @@ mod tests {
     #[tokio::test]
     async fn update_tenant_stale_lock_returns_conflict() {
         let id = Uuid::new_v4();
-        let live_updated_at = chrono::Utc::now();
-        let submitted = live_updated_at + chrono::Duration::seconds(1);
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(id, "phlax", live_updated_at)]]),
-        );
+        let live_updated_at = fixed_time();
+        let newer_timestamp = live_updated_at + chrono::Duration::seconds(1);
+        let state =
+            crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![tenant_row(id, "phlax", live_updated_at)]]),
+            );
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1640,7 +1654,7 @@ mod tests {
                 &format!("/api/tenants/{id}"),
                 serde_json::json!({
                     "name": "phlax",
-                    "if_unmodified_since": submitted.to_rfc3339_opts(SecondsFormat::Micros, true)
+                    "if_unmodified_since": newer_timestamp.to_rfc3339_opts(SecondsFormat::Micros, true)
                 }),
             ))
             .await
@@ -1653,7 +1667,7 @@ mod tests {
     #[tokio::test]
     async fn delete_tenant_with_matching_lock_and_dependents_returns_has_dependents() {
         let id = Uuid::new_v4();
-        let updated_at = chrono::Utc::now();
+        let updated_at = fixed_time();
         let workspace_id = Uuid::new_v4();
         let state = crate::test_support::app_state_with_mock_db(
             MockDatabase::new(DatabaseBackend::Postgres)
@@ -1677,7 +1691,7 @@ mod tests {
     #[tokio::test]
     async fn delete_tenant_with_no_dependents_proceeds() {
         let id = Uuid::new_v4();
-        let updated_at = chrono::Utc::now();
+        let updated_at = fixed_time();
         let state = crate::test_support::app_state_with_mock_db(
             MockDatabase::new(DatabaseBackend::Postgres)
                 .append_query_results([vec![tenant_row(id, "phlax", updated_at)]])
@@ -1708,16 +1722,16 @@ mod tests {
         let plugin_id = Uuid::new_v4();
 
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![tenant_row(tenant_id, path_tenant, chrono::Utc::now())]])
+            .append_query_results([vec![tenant_row(tenant_id, path_tenant, fixed_time())]])
             .append_query_results([vec![workspace_row(workspace_id, tenant_id, "mcp")]])
             .append_query_results([vec![workspace_plugin::Model {
                 workspace_id,
                 plugin_id,
                 config: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: fixed_time(),
+                updated_at: fixed_time(),
             }]])
-            .append_query_results([vec![tenant_row(tenant_id, path_tenant, chrono::Utc::now())]])
+            .append_query_results([vec![tenant_row(tenant_id, path_tenant, fixed_time())]])
             .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]]);
         let state = AppState {
             db: Arc::new(db.into_connection()),

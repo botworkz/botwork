@@ -343,8 +343,8 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Body;
     use axum::body::to_bytes;
+    use axum::body::Body;
     use http::{Request, StatusCode};
     use sea_orm::{DatabaseBackend, DbErr, MockDatabase, MockExecResult};
     use tower::ServiceExt;
@@ -467,7 +467,9 @@ mod tests {
             .append_query_results([Vec::<botwork_entity::tenant::Model>::new()])
             .into_connection();
 
-        let resolved = resolve_tenant_id(&hit_db, "phlax").await.expect("resolved id");
+        let resolved = resolve_tenant_id(&hit_db, "phlax")
+            .await
+            .expect("resolved id");
         assert_eq!(resolved, id);
 
         let err = resolve_tenant_id(&miss_db, "missing")
@@ -493,8 +495,8 @@ mod tests {
             }
         );
 
-        let err = parse_body::<Demo>(serde_json::json!({ "wrong": "field" }))
-            .expect_err("invalid parse");
+        let err =
+            parse_body::<Demo>(serde_json::json!({ "wrong": "field" })).expect_err("invalid parse");
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
