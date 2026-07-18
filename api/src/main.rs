@@ -12,6 +12,7 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use botwork_api::store::sea_orm_impl::SeaOrmApiStore;
 use botwork_api::{
     build_router, AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient,
 };
@@ -111,6 +112,7 @@ async fn main() -> ExitCode {
 
     let bind = bind_from_env();
     let app = build_router(AppState {
+        store: Arc::new(SeaOrmApiStore::new(db.clone())),
         db,
         control_plane,
         secret_store,

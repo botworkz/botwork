@@ -21,6 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use botwork_api::store::sea_orm_impl::SeaOrmApiStore;
 use botwork_api::{
     build_router, AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient,
 };
@@ -139,8 +140,10 @@ async fn spawn_server(
     let cfg = BootstrapConfig::from_raw(raw).expect("bootstrap validate");
     apply(&db, &cfg).await.expect("bootstrap apply");
 
+    let db = Arc::new(db);
     let state = AppState {
-        db: Arc::new(db),
+        store: Arc::new(SeaOrmApiStore::new(db.clone())),
+        db,
         control_plane: ControlPlaneClient::disabled(),
         secret_store,
         session_broker,

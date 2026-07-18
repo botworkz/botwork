@@ -228,7 +228,7 @@ fn require_secret_component(field: &str, value: &str) -> Result<String, ApiError
 /// `to_rfc3339()` round-trip. Postgres' `timestamp with time zone`
 /// preserves microsecond precision, so a value the client got via
 /// our own GET will round-trip cleanly.
-fn check_lock(
+pub(crate) fn check_lock(
     submitted: &DateTime<Utc>,
     live: &DateTime<Utc>,
     label: &str,
@@ -318,34 +318,15 @@ async fn create_tenant(
     validate_tenant_name(&name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
-    // Case-insensitive uniqueness: normalise_name lowercases so
-    // "Phlax" blocks "phlax" / "PHLAX" from being created.
-    let normalised = normalise_name(&name);
-    if tenant_name_taken(state.db.as_ref(), &normalised, None).await? {
-        return Err(ApiError::already_exists(format!(
-            "tenant with name {name:?} already exists (case-insensitive)"
-        )));
-    }
-
-    let id = Uuid::new_v4();
-    let now = Utc::now();
-    // Store the un-normalised name (preserve case); uniqueness is enforced
-    // separately via LOWER(name) checks.
-    let row = tenant::ActiveModel {
-        id: Set(id),
-        name: Set(name.clone()),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(state.db.as_ref())
-    .await?;
+    let row = state.store.create_tenant(name.clone()).await?;
+    let created_id = row.id;
 
     audit_event(&op, "create", "tenant", row.id, &format!("name={name:?}"));
 
     let mut response = (StatusCode::CREATED, Json(row)).into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/api/tenants/{id}")).expect("uuid is ascii"),
+        HeaderValue::from_str(&format!("/api/tenants/{created_id}")).expect("uuid is ascii"),
     );
     Ok(response)
 }
@@ -363,31 +344,10 @@ async fn update_tenant(
     validate_tenant_name(&name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
-    let tx = state.db.begin().await?;
-    let live = tenant::Entity::find_by_id(id)
-        .one(&tx)
-        .await?
-        .or_not_found("tenant", format!("no tenant with id {id}"))?;
-    check_lock(&body.if_unmodified_since, &live.updated_at, "tenant")?;
-
-    // Case-insensitive uniqueness: check no OTHER tenant has the same
-    // normalised name. The exclude_id skips the current tenant so a
-    // rename to a different capitalisation of the same name is allowed.
-    let normalised = normalise_name(&name);
-    if tenant_name_taken(&tx, &normalised, Some(live.id)).await? {
-        return Err(ApiError::already_exists(format!(
-            "tenant with name {name:?} already exists (case-insensitive)"
-        )));
-    }
-
-    let now = Utc::now();
-    let mut active: tenant::ActiveModel = live.into();
-    // Store the un-normalised name (preserve case); uniqueness is enforced
-    // separately via LOWER(name) checks.
-    active.name = Set(name.clone());
-    active.updated_at = Set(now);
-    let row = active.update(&tx).await?;
-    tx.commit().await?;
+    let row = state
+        .store
+        .update_tenant(id, name.clone(), body.if_unmodified_since)
+        .await?;
 
     audit_event(&op, "update", "tenant", id, &format!("name={name:?}"));
     Ok((StatusCode::OK, Json(row)))
@@ -409,16 +369,83 @@ async fn delete_tenant(
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid tenant id", err))?;
     let op = operator(&headers);
 
-    let tx = state.db.begin().await?;
+    let live = state.store.delete_tenant(id, q.if_unmodified_since).await?;
+
+    audit_event(
+        &op,
+        "delete",
+        "tenant",
+        id,
+        &format!("name={:?}", live.name),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn db_create_tenant(
+    db: &DatabaseConnection,
+    name: String,
+) -> Result<tenant::Model, ApiError> {
+    let normalised = normalise_name(&name);
+    if tenant_name_taken(db, &normalised, None).await? {
+        return Err(ApiError::already_exists(format!(
+            "tenant with name {name:?} already exists (case-insensitive)"
+        )));
+    }
+
+    let id = Uuid::new_v4();
+    let now = Utc::now();
+    tenant::ActiveModel {
+        id: Set(id),
+        name: Set(name),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(db)
+    .await
+    .map_err(ApiError::from)
+}
+
+pub(crate) async fn db_update_tenant(
+    db: &DatabaseConnection,
+    id: Uuid,
+    name: String,
+    if_unmodified_since: DateTime<Utc>,
+) -> Result<tenant::Model, ApiError> {
+    let tx = db.begin().await?;
     let live = tenant::Entity::find_by_id(id)
         .one(&tx)
         .await?
         .or_not_found("tenant", format!("no tenant with id {id}"))?;
-    if let Some(lock) = q.if_unmodified_since {
-        check_lock(&lock, &live.updated_at, "tenant")?;
+    check_lock(&if_unmodified_since, &live.updated_at, "tenant")?;
+
+    let normalised = normalise_name(&name);
+    if tenant_name_taken(&tx, &normalised, Some(live.id)).await? {
+        return Err(ApiError::already_exists(format!(
+            "tenant with name {name:?} already exists (case-insensitive)"
+        )));
     }
 
-    // Delete-guard: workspace.tenant_id is RESTRICT.
+    let mut active: tenant::ActiveModel = live.into();
+    active.name = Set(name);
+    active.updated_at = Set(Utc::now());
+    let row = active.update(&tx).await?;
+    tx.commit().await?;
+    Ok(row)
+}
+
+pub(crate) async fn db_delete_tenant(
+    db: &DatabaseConnection,
+    id: Uuid,
+    if_unmodified_since: Option<DateTime<Utc>>,
+) -> Result<tenant::Model, ApiError> {
+    let tx = db.begin().await?;
+    let live = tenant::Entity::find_by_id(id)
+        .one(&tx)
+        .await?
+        .or_not_found("tenant", format!("no tenant with id {id}"))?;
+    if let Some(lock) = if_unmodified_since {
+        check_lock(&lock, &live.updated_at, "tenant")?;
+    }
     let dependents = workspace::Entity::find()
         .filter(workspace::Column::TenantId.eq(id))
         .all(&tx)
@@ -432,18 +459,9 @@ async fn delete_tenant(
             names
         )));
     }
-
     tenant::Entity::delete_by_id(id).exec(&tx).await?;
     tx.commit().await?;
-
-    audit_event(
-        &op,
-        "delete",
-        "tenant",
-        id,
-        &format!("name={:?}", live.name),
-    );
-    Ok(StatusCode::NO_CONTENT)
+    Ok(live)
 }
 
 // ── workspace ──────────────────────────────────────────────────────
@@ -474,7 +492,7 @@ async fn create_workspace(
     let op = operator(&headers);
 
     // Resolve tenant name to UUID (path-borne tenant is the source of truth).
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
 
     // Case-insensitive uniqueness within the tenant: (tenant_id, LOWER(name)).
     let normalised = normalise_name(&name);
@@ -527,7 +545,7 @@ async fn update_workspace(
     validate_workspace_name(&name).map_err(ApiError::from)?;
     let op = operator(&headers);
 
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
     let tx = state.db.begin().await?;
     let live = workspace::Entity::find_by_id(id)
         .one(&tx)
@@ -579,7 +597,7 @@ async fn delete_workspace(
     let id = Uuid::from_str(&id).map_err(|err| bad_request("invalid workspace id", err))?;
     let op = operator(&headers);
 
-    let tenant_id = resolve_tenant_id(state.db.as_ref(), &tenant_name).await?;
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
     let tx = state.db.begin().await?;
     let live = workspace::Entity::find_by_id(id)
         .one(&tx)
@@ -1378,11 +1396,13 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use chrono::SecondsFormat;
     use http::{Request, StatusCode};
-    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+    use sea_orm::{DatabaseBackend, MockDatabase};
     use tower::ServiceExt;
     use uuid::Uuid;
 
     use super::*;
+    use crate::store::mock::MockApiStore;
+    use crate::store::sea_orm_impl::SeaOrmApiStore;
     use crate::{AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient};
 
     fn fixed_time() -> chrono::DateTime<Utc> {
@@ -1473,9 +1493,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_tenant_requires_admin_header() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1493,9 +1511,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_workspace_requires_matching_tenant_header() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1516,9 +1532,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_tenant_rejects_unknown_field_and_invalid_shape() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let unknown_response = app
@@ -1553,9 +1567,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_tenant_rejects_invalid_and_reserved_names() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let invalid_response = app
@@ -1590,9 +1602,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_plugin_maps_validator_failure_to_422() {
-        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
-            DatabaseBackend::Postgres,
-        ));
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1617,10 +1627,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_tenant_maps_mock_db_error_to_internal() {
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_errors([sea_orm::DbErr::Custom("boom".to_string())]),
-        );
+        let state =
+            crate::test_support::app_state_with_mock_store(MockApiStore::always_error("boom"));
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1641,11 +1649,9 @@ mod tests {
         let id = Uuid::new_v4();
         let live_updated_at = fixed_time();
         let newer_timestamp = live_updated_at + chrono::Duration::seconds(1);
-        let state =
-            crate::test_support::app_state_with_mock_db(
-                MockDatabase::new(DatabaseBackend::Postgres)
-                    .append_query_results([vec![tenant_row(id, "phlax", live_updated_at)]]),
-            );
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row(id, "phlax", live_updated_at)),
+        );
         let app = crate::handler::build_router(state);
 
         let response = app
@@ -1669,10 +1675,10 @@ mod tests {
         let id = Uuid::new_v4();
         let updated_at = fixed_time();
         let workspace_id = Uuid::new_v4();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(id, "phlax", updated_at)]])
-                .append_query_results([vec![workspace_row(workspace_id, id, "mcp")]]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(id, "phlax", updated_at))
+                .with_workspace(workspace_row(workspace_id, id, "mcp")),
         );
         let app = crate::handler::build_router(state);
         let lock = updated_at.to_rfc3339_opts(SecondsFormat::Micros, true);
@@ -1692,14 +1698,8 @@ mod tests {
     async fn delete_tenant_with_no_dependents_proceeds() {
         let id = Uuid::new_v4();
         let updated_at = fixed_time();
-        let state = crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![tenant_row(id, "phlax", updated_at)]])
-                .append_query_results([Vec::<workspace::Model>::new()])
-                .append_exec_results([MockExecResult {
-                    last_insert_id: 0,
-                    rows_affected: 1,
-                }]),
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row(id, "phlax", updated_at)),
         );
         let app = crate::handler::build_router(state);
         let lock = updated_at.to_rfc3339_opts(SecondsFormat::Micros, true);
@@ -1733,8 +1733,10 @@ mod tests {
             }]])
             .append_query_results([vec![tenant_row(tenant_id, path_tenant, fixed_time())]])
             .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]]);
+        let db = Arc::new(db.into_connection());
         let state = AppState {
-            db: Arc::new(db.into_connection()),
+            store: Arc::new(SeaOrmApiStore::new(db.clone())),
+            db,
             control_plane: ControlPlaneClient::with_endpoint("http://127.0.0.1:1"),
             secret_store: SecretStoreClient::disabled(),
             session_broker: SessionBrokerClient::disabled(),
