@@ -9,7 +9,7 @@
 #      runtime image built BINARY_SOURCE=prebuilt, smoke test, image +
 #      binary uploaded as artifacts).
 #
-#   2. `release-binaries` — builds the launcher + tools release binaries
+#   2. `release-binaries` — builds the launcher + tools + bw release binaries
 #      that ride into the GitHub Release. Same rust-cache key as
 #      `rust.yml` is fine; separate job because release-profile builds
 #      live under a different `target/` subdirectory.
@@ -116,7 +116,8 @@ jobs:
       needs-docker: ${{ matrix.needs-docker || false }}
 
   release-binaries:
-    # `botwork-launcher` and `botwork-tools` ride into the GitHub Release
+    # `botwork-launcher`, `botwork-tools`, and `bw` (`botwork-cli`) ride into
+    # the GitHub Release
     # as binary assets. Today they are recompiled inside `release.yml`'s
     # publish job on every release push; this PR moves the build into CI
     # so the binaries attached to the Release are the same bytes that the
@@ -138,12 +139,12 @@ jobs:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
-    - name: Build launcher + tools (release)
+    - name: Build launcher + tools + bw (release)
       env:
         BOTWORK_GIT_SHA: ${{ github.sha }}
       run: |
         set -euo pipefail
-        cargo build --release --locked -p botwork-launcher -p botwork-tools
+        cargo build --release --locked -p botwork-launcher -p botwork-tools -p botwork-cli
 
     - name: Upload release binaries
       uses: actions/upload-artifact@v4
@@ -152,6 +153,7 @@ jobs:
         path: |
           target/release/botwork-launcher
           target/release/botwork-tools
+          target/release/bw
         if-no-files-found: error
 
   publish:
@@ -294,3 +296,4 @@ jobs:
         files: |
           .ci-binaries/botwork-launcher
           .ci-binaries/botwork-tools
+          .ci-binaries/bw

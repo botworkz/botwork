@@ -5,10 +5,12 @@
 //! the consumer's own `/VERSION` file at the workspace root). The
 //! crate provides:
 //!
+//! * [`VERSION`] — compile-time pin of the repository root `/VERSION`.
 //! * [`GIT_SHA`] — compile-time pin of `BOTWORK_GIT_SHA`. Common to
 //!   every consumer in the ecosystem because the env var name is the
 //!   shared contract CI sets on every build.
 //! * [`format_full`] — the canonical `<VERSION>[+<short-sha>]` formatter.
+//! * [`version_string`] — canonical formatted version for this repository.
 //!
 //! ## Usage from a consumer's `main.rs`
 //!
@@ -31,6 +33,9 @@
 //! This matches the [semver build metadata](https://semver.org/#spec-item-10)
 //! shape, and the dev-vs-clean predicate is identical to the one
 //! `.github/workflows/ci.yml`'s publish gate uses (`*-*`).
+
+/// Repository version baked in at compile time from `/VERSION`.
+pub const VERSION: &str = include_str!("../../VERSION").trim_ascii();
 
 /// Git sha baked in at build time via `BOTWORK_GIT_SHA`. Empty when
 /// the env var was unset at compile time (local-dev builds).
@@ -57,6 +62,11 @@ pub fn format_full(version: &str, git_sha: &str) -> String {
         // across rebuilds defeats the point.
         version.to_string()
     }
+}
+
+/// Canonical version string for botwork binaries.
+pub fn version_string() -> String {
+    format_full(VERSION, GIT_SHA)
 }
 
 #[cfg(test)]
@@ -91,6 +101,11 @@ mod tests {
     #[test]
     fn short_sha_uses_all_of_it_when_under_seven_chars() {
         assert_eq!(format_full("0.4.0-dev", "abc"), "0.4.0-dev+abc");
+    }
+
+    #[test]
+    fn version_const_is_non_empty() {
+        assert!(!VERSION.is_empty());
     }
 
     #[test]
