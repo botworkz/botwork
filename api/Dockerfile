@@ -16,7 +16,7 @@ COPY api/ ./api/
 COPY api-core/ ./api-core/
 COPY ui/ ./ui/
 COPY bootstrap/ ./bootstrap/
-COPY botwork-cli/ ./botwork-cli/
+COPY cli/ ./cli/
 COPY config-broker/ ./config-broker/
 COPY control-plane/ ./control-plane/
 COPY db/ ./db/
