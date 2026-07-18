@@ -50,11 +50,13 @@ struct LaunchRequest<'a> {
     labels: Vec<(String, String)>,
 }
 
+#[cfg_attr(test, derive(Debug))]
 struct BindAgentRequest<'a> {
     staging_path: &'a str,
     agent_dir: &'a str,
 }
 
+#[cfg_attr(test, derive(Debug))]
 struct TeardownRequest<'a> {
     name: &'a str,
     staging_path: &'a str,
@@ -676,10 +678,11 @@ mod tests {
     use http_body_util::Full;
     use hyper::Request;
     use serde_json::{Map, Value};
+    use tempfile::TempDir;
 
     use super::{
-        inject_proxy_env, parse_json_bytes, parse_json_object, parse_launch_payload,
-        render_json_object,
+        inject_proxy_env, parse_bind_agent_payload, parse_json_bytes, parse_json_object,
+        parse_launch_payload, parse_teardown_payload, render_json_object,
     };
     use crate::error::LauncherError;
     use crate::validate::{Validators, RESERVED_ENV_NAMES};
@@ -1421,5 +1424,190 @@ mod tests {
             parse_launch_payload(&payload, &validators, "botwork-test"),
             Err(LauncherError::BadRequest(msg)) if msg == "invalid labels"
         ));
+    }
+
+    // ── render_json_object edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn render_json_object_empty_fields_produces_empty_object() {
+        assert_eq!(render_json_object(&[]), "{}");
+    }
+
+    #[test]
+    fn render_json_object_odd_count_drops_trailing_unpaired_key() {
+        // Three elements: only the first pair "a":"b" is emitted;
+        // the dangling "c" is silently dropped.
+        let out = render_json_object(&["a", "b", "c"]);
+        assert_eq!(out, r#"{"a": "b"}"#);
+    }
+
+    // ── parse_json_bytes edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn parse_json_bytes_empty_body_returns_empty_object() {
+        let v = parse_json_bytes(b"").expect("empty body must succeed");
+        assert!(matches!(v, Value::Object(ref m) if m.is_empty()));
+    }
+
+    // ── parse_bind_agent_payload ──────────────────────────────────────────────
+
+    fn valid_bind_agent_payload(base: &str) -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert(
+            "staging_path".to_string(),
+            Value::String(format!("{base}/acme/staging/aabbccddeeff")),
+        );
+        m.insert(
+            "agent_dir".to_string(),
+            Value::String(format!("{base}/acme/workspaces/ws/agents/agent-1")),
+        );
+        m
+    }
+
+    fn valid_teardown_payload(base: &str) -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert(
+            "name".to_string(),
+            Value::String("mcp_session_aabbccddeeff".to_string()),
+        );
+        m.insert(
+            "staging_path".to_string(),
+            Value::String(format!("{base}/acme/staging/aabbccddeeff")),
+        );
+        m
+    }
+
+    #[test]
+    fn parse_bind_agent_missing_staging_path_returns_bad_request() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let mut payload = valid_bind_agent_payload(&base);
+        payload.remove("staging_path");
+        let err = parse_bind_agent_payload(&payload, &validators).expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_bind_agent_invalid_staging_path_returns_bad_request() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let mut payload = valid_bind_agent_payload(&base);
+        payload.insert(
+            "staging_path".to_string(),
+            Value::String("/outside/staging/abc".to_string()),
+        );
+        let err = parse_bind_agent_payload(&payload, &validators).expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_bind_agent_missing_agent_dir_returns_bad_request() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let mut payload = valid_bind_agent_payload(&base);
+        payload.remove("agent_dir");
+        let err = parse_bind_agent_payload(&payload, &validators).expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_bind_agent_invalid_agent_dir_returns_bad_request() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let mut payload = valid_bind_agent_payload(&base);
+        payload.insert(
+            "agent_dir".to_string(),
+            Value::String("/outside/agents/agent-1".to_string()),
+        );
+        let err = parse_bind_agent_payload(&payload, &validators).expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    // ── parse_teardown_payload ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_teardown_missing_name_returns_bad_request() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let mut payload = valid_teardown_payload(&base);
+        payload.remove("name");
+        let err = parse_teardown_payload(&payload, &validators).expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_teardown_invalid_name_returns_bad_request() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let mut payload = valid_teardown_payload(&base);
+        payload.insert(
+            "name".to_string(),
+            Value::String("INVALID_CONTAINER_NAME_!!!".to_string()),
+        );
+        let err = parse_teardown_payload(&payload, &validators).expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_teardown_missing_staging_path_returns_bad_request() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let mut payload = valid_teardown_payload(&base);
+        payload.remove("staging_path");
+        let err = parse_teardown_payload(&payload, &validators).expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_teardown_invalid_staging_path_returns_bad_request() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let mut payload = valid_teardown_payload(&base);
+        payload.insert(
+            "staging_path".to_string(),
+            Value::String("/outside/staging/abc".to_string()),
+        );
+        let err = parse_teardown_payload(&payload, &validators).expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
     }
 }
