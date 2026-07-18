@@ -387,9 +387,12 @@ mod tests {
                 .append_query_results([vec![plugin_row(plugin_id, "mcp-bash")]]),
         );
 
-        writer
-            .record_spawn("mcp-bash", "mcp_session_1", "10.0.0.1")
-            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_spawn("mcp-bash", "mcp_session_1", "10.0.0.1"),
+        )
+        .await
+        .expect("spawn write path should complete");
     }
 
     #[tokio::test]
@@ -403,9 +406,12 @@ mod tests {
                 ]]),
             );
 
-        writer
-            .record_mcp_session_id("mcp_session_1", "sid-abc")
-            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_mcp_session_id("mcp_session_1", "sid-abc"),
+        )
+        .await
+        .expect("mcp_session_id update should complete");
     }
 
     #[tokio::test]
@@ -419,9 +425,12 @@ mod tests {
                 ]]),
             );
 
-        writer
-            .record_agent_binding("mcp_session_1", Uuid::new_v4())
-            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_agent_binding("mcp_session_1", Uuid::new_v4()),
+        )
+        .await
+        .expect("agent binding update should complete");
     }
 
     #[tokio::test]
@@ -438,7 +447,12 @@ mod tests {
             )]]),
         );
 
-        writer.record_reap("mcp_session_1").await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_reap("mcp_session_1"),
+        )
+        .await
+        .expect("already-reaped path should complete");
     }
 
     #[tokio::test]
@@ -448,7 +462,12 @@ mod tests {
                 .append_query_results([Vec::<session_worker::Model>::new()]),
         );
 
-        writer.record_reap("mcp_session_missing").await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_reap("mcp_session_missing"),
+        )
+        .await
+        .expect("missing-container path should be swallowed");
     }
 
     #[tokio::test]

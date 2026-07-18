@@ -538,7 +538,12 @@ mod tests {
                 .append_query_results([Vec::<agent_session::Model>::new()]),
         );
 
-        writer.record_bind_agent("phlax", "mcp", "agent-1").await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_bind_agent("phlax", "mcp", "agent-1"),
+        )
+        .await
+        .expect("insert path should complete without blocking");
     }
 
     #[tokio::test]
@@ -559,7 +564,12 @@ mod tests {
                 )]]),
         );
 
-        writer.record_bind_agent("phlax", "mcp", "agent-1").await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_bind_agent("phlax", "mcp", "agent-1"),
+        )
+        .await
+        .expect("update path should complete without blocking");
     }
 
     #[tokio::test]
@@ -573,7 +583,12 @@ mod tests {
                 .append_query_results([Vec::<agent_session::Model>::new()]),
         );
 
-        writer.record_grace("phlax", "mcp", "agent-1").await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_grace("phlax", "mcp", "agent-1"),
+        )
+        .await
+        .expect("missing-row grace transition should be swallowed");
     }
 
     #[tokio::test]
@@ -594,7 +609,12 @@ mod tests {
                 )]]),
         );
 
-        writer.record_inactive("phlax", "mcp", "agent-1").await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.record_inactive("phlax", "mcp", "agent-1"),
+        )
+        .await
+        .expect("inactive transition should complete without blocking");
     }
 
     #[tokio::test]
@@ -608,7 +628,12 @@ mod tests {
                 .append_query_results([Vec::<agent_session::Model>::new()]),
         );
 
-        writer.touch_last_active("phlax", "mcp", "agent-1").await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            writer.touch_last_active("phlax", "mcp", "agent-1"),
+        )
+        .await
+        .expect("missing-row touch should be swallowed");
     }
 
     #[tokio::test]

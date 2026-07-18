@@ -505,7 +505,12 @@ mod tests {
 
     #[test]
     fn list_running_session_containers_is_total_function() {
-        let _ = list_running_session_containers();
+        if let Some(names) = list_running_session_containers() {
+            assert!(
+                names.iter().all(|name| name.starts_with("mcp_session_")),
+                "docker filter should only return mcp_session_* containers"
+            );
+        }
     }
 
     #[test]
@@ -524,7 +529,10 @@ mod tests {
 
     #[test]
     fn force_remove_container_total_function() {
+        let before = list_running_session_containers();
         force_remove_container("mcp_session_definitely_missing_for_test");
+        let after = list_running_session_containers();
+        assert_eq!(before.is_some(), after.is_some());
     }
 
     #[tokio::test]
