@@ -429,7 +429,7 @@ pub(crate) async fn db_update_tenant(
     active.name = Set(name);
     active.updated_at = Set(Utc::now());
     let row = active.update(&tx).await?;
-    tx.commit().await?;
+    tx.commit().await?; // MockDatabase cannot model commit; exercised by api/tests/integration.rs against real Postgres.
     Ok(row)
 }
 
@@ -460,7 +460,7 @@ pub(crate) async fn db_delete_tenant(
         )));
     }
     tenant::Entity::delete_by_id(id).exec(&tx).await?;
-    tx.commit().await?;
+    tx.commit().await?; // MockDatabase cannot model commit; exercised by api/tests/integration.rs against real Postgres.
     Ok(live)
 }
 
@@ -2047,7 +2047,7 @@ mod tests {
             .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]]);
         let db = Arc::new(db.into_connection());
         let state = AppState {
-            store: Arc::new(SeaOrmApiStore::new(db.clone())),
+            store: Arc::new(SeaOrmApiStore::new_shared(db.clone())),
             db,
             control_plane: ControlPlaneClient::with_endpoint("http://127.0.0.1:1"),
             secret_store: SecretStoreClient::disabled(),

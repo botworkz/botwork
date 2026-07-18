@@ -38,30 +38,18 @@ jobs:
     - uses: Swatinem/rust-cache@v2
     - uses: taiki-e/install-action@cargo-tarpaulin
     - name: Run coverage (unit tier — no docker)
+      # All flags (engine, excludes, output format) live in tarpaulin.toml
+      # at the workspace root so local runs and CI use identical settings.
       # Notes:
-      #   * Dev profile only — [profile.release] sets panic = "abort" which
-      #     is incompatible with tarpaulin's LLVM instrumentation. Tarpaulin
-      #     targets dev/test profile by default; do not add --release here.
-      #   * botwork-ui-wasm is excluded because that crate only links against
-      #     wasm32-unknown-unknown; a host-target build would hard-fail.
       #   * DOCKER_HOST points at a non-existent socket so any runtime
       #     docker-availability probe (e.g. api's testcontainers-backed
       #     integration tests) fails fast and those tests log-skip cleanly
       #     rather than causing the job to fail.
-      #   * No --fail-under threshold is set here — this run establishes the
+      #   * No --fail-under threshold is set — this run establishes the
       #     baseline. A maintainer will ratchet a floor in a later dedicated PR.
       env:
         DOCKER_HOST: unix:///nonexistent
-      run: |
-        cargo tarpaulin \
-          --engine llvm \
-          --locked \
-          --workspace \
-          --all-targets \
-          --exclude botwork-ui-wasm \
-          --out Lcov \
-          --out Xml \
-          --output-dir coverage
+      run: cargo tarpaulin
     - name: Upload coverage report
       uses: actions/upload-artifact@v4
       with:

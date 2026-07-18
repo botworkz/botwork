@@ -18,7 +18,8 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use botwork_opaque_handshake::{
-    client as opaque_client, LoginResponse, OpaqueError, RegistrationResponse, SessionKey,
+    client as opaque_client, LoginFinalization, LoginRequest, LoginResponse, OpaqueError,
+    RegistrationRequest, RegistrationResponse, RegistrationUpload, SessionKey,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -83,12 +84,7 @@ pub async fn run_login(
     let start_url = base_url
         .join("auth/login/start")
         .expect("endpoint path is always valid");
-    let start_body = json!({
-        "tenant": tenant,
-        "credential_identifier": credential_identifier,
-        "login_request": URL_SAFE_NO_PAD.encode(cl.request.serialize()),
-        "lease_seconds_requested": lease_seconds,
-    });
+    let start_body = login_start_body(tenant, credential_identifier, &cl.request, lease_seconds);
     let body: LoginStartResponseBody =
         post_json_and_parse(&http, start_url.as_str(), &start_body).await?;
     let response_bytes = decode_b64(start_url.as_str(), "login_response", &body.login_response)?;
@@ -112,10 +108,7 @@ pub async fn run_login(
     let finish_url = base_url
         .join("auth/login/finish")
         .expect("endpoint path is always valid");
-    let finish_body = json!({
-        "handshake_id": body.handshake_id,
-        "login_finalization": URL_SAFE_NO_PAD.encode(finish.finalization.serialize()),
-    });
+    let finish_body = login_finish_body(body.handshake_id, &finish.finalization);
     let body: LoginFinishResponseBody =
         post_json_and_parse(&http, finish_url.as_str(), &finish_body).await?;
     Ok(LoginOutcome {
@@ -145,11 +138,7 @@ pub async fn run_register(
     let start_url = base_url
         .join("auth/register/start")
         .expect("endpoint path is always valid");
-    let start_body = json!({
-        "tenant": tenant,
-        "credential_identifier": credential_identifier,
-        "registration_request": URL_SAFE_NO_PAD.encode(cr.request.serialize()),
-    });
+    let start_body = register_start_body(tenant, credential_identifier, &cr.request);
     let body: RegisterStartResponseBody =
         match post_json_and_parse_with_tenant_arms(&http, start_url.as_str(), &start_body, tenant)
             .await
@@ -169,11 +158,7 @@ pub async fn run_register(
     let finish_url = base_url
         .join("auth/register/finish")
         .expect("endpoint path is always valid");
-    let finish_body = json!({
-        "tenant": tenant,
-        "credential_identifier": credential_identifier,
-        "registration_upload": URL_SAFE_NO_PAD.encode(cf.upload.serialize()),
-    });
+    let finish_body = register_finish_body(tenant, credential_identifier, &cf.upload);
     let body: RegisterFinishResponseBody =
         post_json_and_parse_with_tenant_arms(&http, finish_url.as_str(), &finish_body, tenant)
             .await?;
@@ -218,6 +203,51 @@ fn build_http_client_with_ca(ca_path: Option<&Path>) -> Result<reqwest::Client, 
     })
 }
 
+fn login_start_body(
+    tenant: &str,
+    credential_identifier: &str,
+    login_request: &LoginRequest,
+    lease_seconds: u64,
+) -> serde_json::Value {
+    json!({
+        "tenant": tenant,
+        "credential_identifier": credential_identifier,
+        "login_request": URL_SAFE_NO_PAD.encode(login_request.serialize()),
+        "lease_seconds_requested": lease_seconds,
+    })
+}
+
+fn login_finish_body(handshake_id: Uuid, finalization: &LoginFinalization) -> serde_json::Value {
+    json!({
+        "handshake_id": handshake_id,
+        "login_finalization": URL_SAFE_NO_PAD.encode(finalization.serialize()),
+    })
+}
+
+fn register_start_body(
+    tenant: &str,
+    credential_identifier: &str,
+    registration_request: &RegistrationRequest,
+) -> serde_json::Value {
+    json!({
+        "tenant": tenant,
+        "credential_identifier": credential_identifier,
+        "registration_request": URL_SAFE_NO_PAD.encode(registration_request.serialize()),
+    })
+}
+
+fn register_finish_body(
+    tenant: &str,
+    credential_identifier: &str,
+    registration_upload: &RegistrationUpload,
+) -> serde_json::Value {
+    json!({
+        "tenant": tenant,
+        "credential_identifier": credential_identifier,
+        "registration_upload": URL_SAFE_NO_PAD.encode(registration_upload.serialize()),
+    })
+}
+
 /// One-shot `POST` + JSON-parse helper. The wire-error mapping is
 /// shared by every endpoint:
 ///
@@ -250,23 +280,10 @@ async fn post_json_and_parse<T: for<'de> Deserialize<'de>>(
             url: url.to_string(),
             source,
         })?;
-    if status.is_success() {
-        return serde_json::from_slice(&bytes).map_err(|source| LoginError::MalformedResponse {
-            url: url.to_string(),
-            source,
-        });
+    if let Some(err) = login_status_error(status, url, &bytes) {
+        return Err(err);
     }
-    // 401 on `/auth/login/finish` is the OPAQUE-server-side
-    // `InvalidLogin` arm — see the comment in `run_login` for the
-    // double-detection rationale.
-    if status == reqwest::StatusCode::UNAUTHORIZED && url.ends_with("/auth/login/finish") {
-        return Err(LoginError::InvalidLogin("<unknown-tenant>".to_string()));
-    }
-    Err(LoginError::UnexpectedStatus {
-        status: status.as_u16(),
-        url: url.to_string(),
-        body: truncate_body_bytes(&bytes),
-    })
+    parse_json_body(url, &bytes)
 }
 
 /// Variant of [`post_json_and_parse`] that additionally maps the
@@ -297,22 +314,55 @@ async fn post_json_and_parse_with_tenant_arms<T: for<'de> Deserialize<'de>>(
             url: url.to_string(),
             source,
         })?;
+    if let Some(err) = register_status_error(status, url, &bytes, tenant) {
+        return Err(err);
+    }
+    parse_json_body(url, &bytes)
+}
+
+fn parse_json_body<T: for<'de> Deserialize<'de>>(url: &str, bytes: &[u8]) -> Result<T, LoginError> {
+    serde_json::from_slice(bytes).map_err(|source| LoginError::MalformedResponse {
+        url: url.to_string(),
+        source,
+    })
+}
+
+fn login_status_error(status: reqwest::StatusCode, url: &str, body: &[u8]) -> Option<LoginError> {
     if status.is_success() {
-        return serde_json::from_slice(&bytes).map_err(|source| LoginError::MalformedResponse {
-            url: url.to_string(),
-            source,
-        });
+        return None;
     }
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return Err(LoginError::UnknownTenant(tenant.to_string()));
+    // 401 on `/auth/login/finish` is the OPAQUE-server-side
+    // `InvalidLogin` arm — see the comment in `run_login` for the
+    // double-detection rationale.
+    if status == reqwest::StatusCode::UNAUTHORIZED && url.ends_with("/auth/login/finish") {
+        return Some(LoginError::InvalidLogin("<unknown-tenant>".to_string()));
     }
-    if status == reqwest::StatusCode::CONFLICT {
-        return Err(LoginError::AlreadyRegistered(tenant.to_string()));
-    }
-    Err(LoginError::UnexpectedStatus {
+    Some(LoginError::UnexpectedStatus {
         status: status.as_u16(),
         url: url.to_string(),
-        body: truncate_body_bytes(&bytes),
+        body: truncate_body_bytes(body),
+    })
+}
+
+fn register_status_error(
+    status: reqwest::StatusCode,
+    url: &str,
+    body: &[u8],
+    tenant: &str,
+) -> Option<LoginError> {
+    if status.is_success() {
+        return None;
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Some(LoginError::UnknownTenant(tenant.to_string()));
+    }
+    if status == reqwest::StatusCode::CONFLICT {
+        return Some(LoginError::AlreadyRegistered(tenant.to_string()));
+    }
+    Some(LoginError::UnexpectedStatus {
+        status: status.as_u16(),
+        url: url.to_string(),
+        body: truncate_body_bytes(body),
     })
 }
 
@@ -385,6 +435,7 @@ struct RegisterFinishResponseBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use botwork_opaque_handshake::{client, server, ServerSetup};
     use std::path::Path;
 
     const SINGLE_CERT_PEM: &[u8] = b"
@@ -444,21 +495,57 @@ mod tests {
         file
     }
 
-    /// Mirror of the status-mapping arms inside [`post_json_and_parse`];
-    /// kept here so unit tests can pin the wire-error contract
-    /// without a live broker.
-    fn classify_status(status: u16, url: &str, body: &[u8]) -> Option<LoginError> {
-        if (200..300).contains(&status) {
-            return None;
-        }
-        if status == 401 && url.ends_with("/auth/login/finish") {
-            return Some(LoginError::InvalidLogin("<unknown-tenant>".to_string()));
-        }
-        Some(LoginError::UnexpectedStatus {
-            status,
-            url: url.to_string(),
-            body: truncate_body_bytes(body),
-        })
+    #[derive(Debug, Deserialize)]
+    struct Tiny {
+        value: u8,
+    }
+
+    fn fixture_input() -> Vec<u8> {
+        [104_u8, 117, 110, 116, 101, 114, 50].to_vec()
+    }
+
+    fn fixture_registration() -> (RegistrationRequest, RegistrationUpload) {
+        let mut rng = rand::thread_rng();
+        let setup = ServerSetup::generate(&mut rng);
+        let input = fixture_input();
+        let start = client::registration_start(&mut rng, input.as_slice()).unwrap();
+        let request = start.request.clone();
+        let response =
+            server::registration_start(&setup, request.clone(), b"phlax@example.com").unwrap();
+        let finish =
+            client::registration_finish(&mut rng, start.state, input.as_slice(), response.response)
+                .unwrap();
+        (request, finish.upload)
+    }
+
+    fn fixture_login() -> (LoginRequest, LoginFinalization) {
+        let mut rng = rand::thread_rng();
+        let setup = ServerSetup::generate(&mut rng);
+        let input = fixture_input();
+        let registration = client::registration_start(&mut rng, input.as_slice()).unwrap();
+        let response =
+            server::registration_start(&setup, registration.request, b"phlax@example.com").unwrap();
+        let finish = client::registration_finish(
+            &mut rng,
+            registration.state,
+            input.as_slice(),
+            response.response,
+        )
+        .unwrap();
+        let password_file = server::registration_finish(finish.upload);
+        let login = client::login_start(&mut rng, input.as_slice()).unwrap();
+        let request = login.request.clone();
+        let response = server::login_start(
+            &mut rng,
+            &setup,
+            Some(&password_file),
+            request.clone(),
+            b"phlax@example.com",
+        )
+        .unwrap();
+        let finish =
+            client::login_finish(login.state, input.as_slice(), response.response).unwrap();
+        (request, finish.finalization)
     }
 
     #[test]
@@ -484,13 +571,23 @@ mod tests {
 
     #[test]
     fn status_mapping_invalidlogin_on_401_at_login_finish() {
-        let err = classify_status(401, "http://x/auth/login/finish", b"").expect("401 must map");
+        let err = login_status_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "http://x/auth/login/finish",
+            b"",
+        )
+        .expect("401 must map");
         assert!(matches!(err, LoginError::InvalidLogin(_)), "got {err:?}");
     }
 
     #[test]
     fn status_mapping_unexpected_for_500() {
-        let err = classify_status(500, "http://x/auth/check", b"boom").expect("500 must map");
+        let err = login_status_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "http://x/auth/check",
+            b"boom",
+        )
+        .expect("500 must map");
         match err {
             LoginError::UnexpectedStatus { status, url, body } => {
                 assert_eq!(status, 500);
@@ -503,8 +600,35 @@ mod tests {
 
     #[test]
     fn status_mapping_none_for_200() {
-        assert!(classify_status(200, "http://x", b"{}").is_none());
-        assert!(classify_status(201, "http://x", b"{}").is_none());
+        assert!(login_status_error(reqwest::StatusCode::OK, "http://x", b"{}").is_none());
+        assert!(login_status_error(reqwest::StatusCode::CREATED, "http://x", b"{}").is_none());
+    }
+
+    #[test]
+    fn status_mapping_401_on_other_endpoint_is_unexpected() {
+        let err = login_status_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "http://x/auth/login/start",
+            b"denied",
+        )
+        .expect("401 must map");
+        assert!(
+            matches!(err, LoginError::UnexpectedStatus { status: 401, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn register_status_mapping_special_cases() {
+        assert!(matches!(
+            register_status_error(reqwest::StatusCode::NOT_FOUND, "http://x", b"", "phlax"),
+            Some(LoginError::UnknownTenant(ref tenant)) if tenant == "phlax"
+        ));
+        assert!(matches!(
+            register_status_error(reqwest::StatusCode::CONFLICT, "http://x", b"", "phlax"),
+            Some(LoginError::AlreadyRegistered(ref tenant)) if tenant == "phlax"
+        ));
+        assert!(register_status_error(reqwest::StatusCode::OK, "http://x", b"", "phlax").is_none());
     }
 
     #[test]
@@ -537,6 +661,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn build_http_client_with_missing_pem_is_actionable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("missing.pem");
+        let err = build_http_client_with_ca(Some(path.as_path())).unwrap_err();
+        assert!(
+            matches!(err, LoginError::CaCert(ref msg) if msg.contains("failed to read --cacert file")),
+            "got {err:?}"
+        );
+    }
+
     /// Verify the four endpoint URLs are built correctly from a base
     /// URL whether or not it has a trailing slash.
     #[test]
@@ -563,6 +698,74 @@ mod tests {
                 "http://127.0.0.1:9100/auth/register/finish",
                 "register/finish from {base_str}"
             );
+        }
+    }
+
+    #[test]
+    fn login_request_bodies_encode_expected_fields() {
+        let (request, finalization) = fixture_login();
+        let handshake_id = Uuid::new_v4();
+
+        let start_body = login_start_body("phlax", "phlax@example.com", &request, 604_800);
+        assert_eq!(start_body["tenant"], "phlax");
+        assert_eq!(start_body["credential_identifier"], "phlax@example.com");
+        assert_eq!(start_body["lease_seconds_requested"], 604_800);
+        assert_eq!(
+            start_body["login_request"],
+            URL_SAFE_NO_PAD.encode(request.serialize())
+        );
+
+        let finish_body = login_finish_body(handshake_id, &finalization);
+        assert_eq!(finish_body["handshake_id"], handshake_id.to_string());
+        assert_eq!(
+            finish_body["login_finalization"],
+            URL_SAFE_NO_PAD.encode(finalization.serialize())
+        );
+    }
+
+    #[test]
+    fn register_request_bodies_encode_expected_fields() {
+        let (request, upload) = fixture_registration();
+        let start_body = register_start_body("phlax", "phlax@example.com", &request);
+        assert_eq!(start_body["tenant"], "phlax");
+        assert_eq!(start_body["credential_identifier"], "phlax@example.com");
+        assert_eq!(
+            start_body["registration_request"],
+            URL_SAFE_NO_PAD.encode(request.serialize())
+        );
+
+        let finish_body = register_finish_body("phlax", "phlax@example.com", &upload);
+        assert_eq!(finish_body["tenant"], "phlax");
+        assert_eq!(finish_body["credential_identifier"], "phlax@example.com");
+        assert_eq!(
+            finish_body["registration_upload"],
+            URL_SAFE_NO_PAD.encode(upload.serialize())
+        );
+    }
+
+    #[test]
+    fn parse_json_body_success_and_error_are_shaped() {
+        let parsed: Tiny = parse_json_body("http://x", br#"{"value":7}"#).unwrap();
+        assert_eq!(parsed.value, 7);
+
+        let err = parse_json_body::<Tiny>("http://x", b"not-json").unwrap_err();
+        assert!(matches!(err, LoginError::MalformedResponse { ref url, .. } if url == "http://x"));
+    }
+
+    #[test]
+    fn decode_b64_success_and_error_are_shaped() {
+        let decoded = decode_b64("http://x", "field", &URL_SAFE_NO_PAD.encode(b"hello")).unwrap();
+        assert_eq!(decoded, b"hello");
+
+        let err = decode_b64("http://x", "field", "%%%").unwrap_err();
+        match err {
+            LoginError::MalformedResponse { url, source } => {
+                assert_eq!(url, "http://x");
+                assert!(source
+                    .to_string()
+                    .contains("`field` is not valid url-safe-base64"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
         }
     }
 }

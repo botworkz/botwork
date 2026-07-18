@@ -51,3 +51,15 @@ pub mod keyring_store;
 pub use config::{Config, ResolvedServerSettings, TenantConfig};
 pub use error::{exit_code_for, LoginError};
 pub use keyring_store::{KeyringEntry, KeyringStore};
+
+#[cfg(test)]
+pub(crate) mod test_env_lock {
+    use std::sync::Mutex;
+
+    /// Shared process-wide lock for tests that mutate environment
+    /// variables.
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
+    }
+}

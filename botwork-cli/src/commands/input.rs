@@ -61,18 +61,7 @@ fn read_one_line_from_stdin() -> Result<Zeroizing<Vec<u8>>, LoginError> {
         .lock()
         .read_line(&mut line)
         .map_err(|err| LoginError::Other(format!("failed to read password from stdin: {err}")))?;
-    // Strip a single trailing newline — same conservative trimming
-    // the vault CLI does for header-bound secrets, but no more
-    // (passwords with significant whitespace stay intact).
-    while matches!(line.chars().last(), Some('\n' | '\r')) {
-        line.pop();
-    }
-    if line.is_empty() {
-        return Err(LoginError::Other(
-            "password from stdin was empty".to_string(),
-        ));
-    }
-    Ok(Zeroizing::new(line.into_bytes()))
+    password_bytes_from_line(line, "password from stdin was empty")
 }
 
 fn prompt_password(confirm: bool) -> Result<Zeroizing<Vec<u8>>, LoginError> {
@@ -81,10 +70,7 @@ fn prompt_password(confirm: bool) -> Result<Zeroizing<Vec<u8>>, LoginError> {
         return Ok(first);
     }
     let second = read_password_with_prompt("Confirm password: ")?;
-    if first.as_slice() != second.as_slice() {
-        return Err(LoginError::Other("passwords do not match".to_string()));
-    }
-    Ok(first)
+    confirm_passwords(first, second)
 }
 
 fn read_password_with_prompt(prompt: &str) -> Result<Zeroizing<Vec<u8>>, LoginError> {
@@ -99,10 +85,7 @@ fn read_password_with_prompt(prompt: &str) -> Result<Zeroizing<Vec<u8>>, LoginEr
     } else {
         read_line_with_prompt(prompt)?
     };
-    if value.is_empty() {
-        return Err(LoginError::Other("password must not be empty".to_string()));
-    }
-    Ok(Zeroizing::new(value.into_bytes()))
+    password_bytes_from_line(value, "password must not be empty")
 }
 
 fn read_line_with_prompt(prompt: &str) -> Result<String, LoginError> {
@@ -113,8 +96,103 @@ fn read_line_with_prompt(prompt: &str) -> Result<String, LoginError> {
         .lock()
         .read_line(&mut line)
         .map_err(|err| LoginError::Other(format!("failed to read password: {err}")))?;
+    Ok(trim_password_line(line))
+}
+
+fn trim_password_line(mut line: String) -> String {
+    // Strip a trailing CR/LF pair (or lone newline) but preserve
+    // every other byte so whitespace inside the password stays
+    // significant.
     while matches!(line.chars().last(), Some('\n' | '\r')) {
         line.pop();
     }
-    Ok(line)
+    line
+}
+
+fn password_bytes_from_line(
+    line: String,
+    empty_message: &str,
+) -> Result<Zeroizing<Vec<u8>>, LoginError> {
+    let line = trim_password_line(line);
+    if line.is_empty() {
+        return Err(LoginError::Other(empty_message.to_string()));
+    }
+    Ok(Zeroizing::new(line.into_bytes()))
+}
+
+fn confirm_passwords(
+    first: Zeroizing<Vec<u8>>,
+    second: Zeroizing<Vec<u8>>,
+) -> Result<Zeroizing<Vec<u8>>, LoginError> {
+    if first.as_slice() != second.as_slice() {
+        return Err(LoginError::Other("passwords do not match".to_string()));
+    }
+    Ok(first)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_defaults_match_subcommands() {
+        assert!(matches!(
+            PasswordSource::for_login(false),
+            PasswordSource::Prompt { confirm: false }
+        ));
+        assert!(matches!(
+            PasswordSource::for_login(true),
+            PasswordSource::Stdin
+        ));
+        assert!(matches!(
+            PasswordSource::for_register(false),
+            PasswordSource::Prompt { confirm: true }
+        ));
+        assert!(matches!(
+            PasswordSource::for_register(true),
+            PasswordSource::Stdin
+        ));
+    }
+
+    #[test]
+    fn trim_password_line_removes_only_trailing_newlines() {
+        assert_eq!(trim_password_line("secret\r\n".to_string()), "secret");
+        assert_eq!(trim_password_line("secret\n".to_string()), "secret");
+        assert_eq!(
+            trim_password_line(" secret value ".to_string()),
+            " secret value "
+        );
+    }
+
+    #[test]
+    fn password_bytes_from_line_rejects_empty_after_trimming() {
+        let err = password_bytes_from_line("\r\n".to_string(), "empty").unwrap_err();
+        assert!(matches!(err, LoginError::Other(msg) if msg == "empty"));
+    }
+
+    #[test]
+    fn password_bytes_from_line_preserves_significant_whitespace() {
+        let value = password_bytes_from_line(" secret value \n".to_string(), "empty").unwrap();
+        assert_eq!(value.as_slice(), b" secret value ");
+    }
+
+    #[test]
+    fn confirm_passwords_rejects_mismatch() {
+        let err = confirm_passwords(
+            Zeroizing::new(b"one".to_vec()),
+            Zeroizing::new(b"two".to_vec()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, LoginError::Other(msg) if msg == "passwords do not match"));
+    }
+
+    #[test]
+    fn confirm_passwords_accepts_match() {
+        let value = confirm_passwords(
+            Zeroizing::new(b"same".to_vec()),
+            Zeroizing::new(b"same".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(value.as_slice(), b"same");
+    }
 }

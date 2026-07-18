@@ -16,7 +16,11 @@ pub struct SeaOrmApiStore {
 }
 
 impl SeaOrmApiStore {
-    pub fn new(db: Arc<DatabaseConnection>) -> Self {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { db: Arc::new(db) }
+    }
+
+    pub fn new_shared(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
 }

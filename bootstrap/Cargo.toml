@@ -52,6 +52,7 @@ tempfile = "3"
 # this crate uses chrono::Utc from the main [dependencies] above.
 serde_yaml = "0.9"
 sea-orm = { version = "1.1.20", default-features = false, features = [
+    "mock",
     "macros",
     "runtime-tokio-rustls",
     "sqlx-postgres",

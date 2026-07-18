@@ -100,6 +100,7 @@ pub async fn launcher_post(
 /// a launch failure. `raw` is the verbatim launcher response, kept so
 /// the spawn path's existing logging continues to surface unknown
 /// fields.
+#[cfg_attr(test, derive(Debug))]
 pub struct LaunchOutcome {
     pub container_ip: String,
     pub raw: Value,
@@ -344,8 +345,8 @@ mod tests {
     }
 
     async fn capture_launch_body(env: &[(String, String)], resources: &PluginResources) -> String {
-        let temp = tempdir().expect("tempdir");
-        let socket_path = temp.path().join("launcher.sock");
+        let temp_dir = tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("launcher.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
 
         let server = tokio::spawn(async move {
@@ -438,8 +439,8 @@ mod tests {
         resources: &PluginResources,
         labels: &[(String, String)],
     ) -> String {
-        let temp = tempdir().expect("tempdir");
-        let socket_path = temp.path().join("launcher.sock");
+        let temp_dir = tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("launcher.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
 
         let server = tokio::spawn(async move {
@@ -522,5 +523,199 @@ mod tests {
             })
             .unwrap_or(0);
         Some((header_end, content_length))
+    }
+
+    /// Spin up a fake unix socket server that reads the client request (to
+    /// unblock the sender) and writes back `http_response`, then run
+    /// `launch_session` against it.  Returns the result of `launch_session`.
+    async fn launch_session_with_fake_response(
+        http_response: &str,
+    ) -> Result<LaunchOutcome, LauncherError> {
+        let temp_dir = tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("launcher.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind");
+        let resp = http_response.to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            // drain the incoming request so the client's write doesn't stall
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            stream.write_all(resp.as_bytes()).await.expect("write");
+        });
+        let result = launch_session(
+            path_to_string(&socket_path).as_str(),
+            "mcp_session_abc",
+            "botwork/mcp-a:local",
+            "/tmp/staging",
+            &[],
+            &PluginResources::default(),
+            &[],
+        )
+        .await;
+        let _ = server.await;
+        result
+    }
+
+    /// Same helper for `call_bind_agent`.
+    async fn bind_agent_with_fake_response(http_response: &str) -> Result<(), LauncherError> {
+        let temp_dir = tempdir().expect("tempdir");
+        let socket_path = temp_dir.path().join("bind.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind");
+        let resp = http_response.to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            stream.write_all(resp.as_bytes()).await.expect("write");
+        });
+        let result = call_bind_agent(
+            path_to_string(&socket_path).as_str(),
+            "/tmp/staging",
+            "/tmp/agent",
+        )
+        .await;
+        let _ = server.await;
+        result
+    }
+
+    // ── LauncherError::status_code ────────────────────────────────────────────
+
+    #[test]
+    fn launcher_error_status_code_probe_timeout_is_504() {
+        let err = LauncherError::ProbeTimeout {
+            host: "host".to_string(),
+            port: 8080,
+        };
+        assert_eq!(err.status_code(), 504);
+    }
+
+    #[test]
+    fn launcher_error_status_code_other_variants_are_502() {
+        assert_eq!(LauncherError::Launch("x".to_string()).status_code(), 502);
+        assert_eq!(
+            LauncherError::LaunchHttp {
+                status: 503,
+                detail: String::new(),
+            }
+            .status_code(),
+            502
+        );
+        assert_eq!(LauncherError::LaunchInvalidJson.status_code(), 502);
+        assert_eq!(
+            LauncherError::BindConflict("x".to_string()).status_code(),
+            502
+        );
+        assert_eq!(
+            LauncherError::BindHttp {
+                status: 500,
+                detail: String::new(),
+            }
+            .status_code(),
+            502
+        );
+    }
+
+    // ── launch_session error paths ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn launch_session_non_200_returns_launch_http_error() {
+        let resp =
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let err = launch_session_with_fake_response(resp)
+            .await
+            .expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::LaunchHttp { status: 503, .. }),
+            "expected LaunchHttp{{503}}, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_session_invalid_json_body_returns_launch_invalid_json() {
+        let body = b"not-json";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let err = launch_session_with_fake_response(&resp)
+            .await
+            .expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::LaunchInvalidJson),
+            "expected LaunchInvalidJson, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_session_missing_container_ip_returns_launch_http_error() {
+        let body = r#"{"name":"abc","status":"started"}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let err = launch_session_with_fake_response(&resp)
+            .await
+            .expect_err("expected error");
+        assert!(
+            matches!(
+                err,
+                LauncherError::LaunchHttp {
+                    status: 200,
+                    ref detail,
+                } if detail.contains("container_ip")
+            ),
+            "expected LaunchHttp{{200}} mentioning container_ip, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_session_non_ipv4_container_ip_returns_launch_http_error() {
+        let body = r#"{"name":"abc","status":"started","container_ip":"not-an-ip"}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let err = launch_session_with_fake_response(&resp)
+            .await
+            .expect_err("expected error");
+        assert!(
+            matches!(
+                err,
+                LauncherError::LaunchHttp {
+                    status: 200,
+                    ref detail,
+                } if detail.contains("non-IPv4")
+            ),
+            "expected LaunchHttp{{200}} mentioning non-IPv4, got {err:?}"
+        );
+    }
+
+    // ── call_bind_agent error paths ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn call_bind_agent_409_returns_bind_conflict() {
+        let resp =
+            "HTTP/1.1 409 Conflict\r\nContent-Length: 7\r\nConnection: close\r\n\r\nconflict";
+        let err = bind_agent_with_fake_response(resp)
+            .await
+            .expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BindConflict(_)),
+            "expected BindConflict, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_bind_agent_non_200_non_409_returns_bind_http() {
+        let resp =
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror";
+        let err = bind_agent_with_fake_response(resp)
+            .await
+            .expect_err("expected error");
+        assert!(
+            matches!(err, LauncherError::BindHttp { status: 500, .. }),
+            "expected BindHttp{{500}}, got {err:?}"
+        );
     }
 }

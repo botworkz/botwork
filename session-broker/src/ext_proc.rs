@@ -2394,6 +2394,31 @@ mod tests {
     }
 
     #[test]
+    fn resolve_spawn_upstream_authorization_bearer_non_utf8_secret_returns_error() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let err = resolve_spawn_upstream_authorization(
+            "tenant1",
+            "plugin-a",
+            &UpstreamAuth::Bearer {
+                service: "github.com".to_string(),
+            },
+            &[test_secret("github.com", "bad-secret", b"\xff\xfe")],
+        )
+        .expect_err("non-UTF-8 secret should fail");
+        let logs = take_log_capture().join("\n");
+
+        assert!(
+            err.contains("valid UTF-8"),
+            "error should mention UTF-8: {err}"
+        );
+        assert!(
+            logs.contains("non-UTF-8 secret"),
+            "log should mention non-UTF-8: {logs}"
+        );
+    }
+
+    #[test]
     fn route_authorization_for_transport_logs_each_outcome() {
         let _guard = log_capture_guard();
         let base_transport = TransportState {
