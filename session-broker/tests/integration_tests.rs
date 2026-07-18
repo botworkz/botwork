@@ -78,7 +78,7 @@ async fn admin_get_sessions_returns_expected_json_shape() {
     // (no `version` / `updated_at` wrapper any more — those belonged
     // to the on-disk registry surface that's gone). Sessions are
     // keyed by container name, same as the operator-facing shape
-    // `botwork-tools ps` consumes.
+    // `botctl ps` consumes.
     assert!(json["sessions"].is_object(), "sessions must be an object");
     assert!(
         json["sessions"].as_object().unwrap().is_empty(),

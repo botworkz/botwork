@@ -1,7 +1,7 @@
 //! `mcp-package.yaml` parsing + validation.
 //!
 //! Single producer-side entry point for the operator-curated package
-//! file consumed by `botwork-tools mcp-probe`. The schema mirrors the
+//! file consumed by `botctl mcp-probe`. The schema mirrors the
 //! bootstrap.yaml plugin-entry shape one-for-one on every field they
 //! share — same regexes, same caps, same reserved-env-name set —
 //! because the labels this validator approves end up on a plugin

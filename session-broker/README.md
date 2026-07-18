@@ -132,7 +132,7 @@ session-broker exposes one read-only HTTP endpoint on
 
 - `GET /sessions` — operator-visible view of the live in-memory
   `transport_sessions` map. Container-name-keyed shape that
-  `botwork-tools ps` consumes; one entry per spawned container with
+  `botctl ps` consumes; one entry per spawned container with
   ip, tenant, workspace, plugin, and (post-bind) agent id.
 
 `GET /control-plane/sessions` used to be the recovery-sync surface

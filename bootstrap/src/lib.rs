@@ -9,12 +9,12 @@
 //!
 //! All three of those are gone:
 //!
-//!   1. botwork#118 added `botwork-tools bootstrap`, an
+//!   1. botwork#118 added `botctl bootstrap`, an
 //!      operator-facing replacement that POSTs through
 //!      `botwork-api` instead of writing sea-orm directly.
 //!   2. botwork#vm-side replaced `botwork-bootstrap.service`
 //!      with `botwork-import.service` (a host-side oneshot
-//!      calling `botwork-tools bootstrap`).
+//!      calling `botctl bootstrap`).
 //!   3. This PR drops the container, the binary, the Earthfile
 //!      target, and the CI plumbing that built them.
 //!

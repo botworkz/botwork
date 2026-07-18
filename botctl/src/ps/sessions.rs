@@ -40,7 +40,7 @@ use thiserror::Error;
 /// 5s upper bound on the round trip. The broker serves this from an
 /// in-memory map under a `Mutex` it holds for microseconds; 5s is
 /// generous and accommodates a slow loopback during boot (where
-/// `botwork-tools ps` is sometimes invoked from a shell-script
+/// `botctl ps` is sometimes invoked from a shell-script
 /// readiness probe).
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -55,7 +55,7 @@ pub struct SessionView {
     /// broker reading from postgres post-cutover, the user-facing
     /// identifier for "which thing is this" is the plugin name —
     /// stable across version bumps and operator-meaningful.
-    /// Rendered in the IMAGE column of `botwork-tools ps`.
+    /// Rendered in the IMAGE column of `botctl ps`.
     pub plugin: String,
     /// Goose agent-session-id; `None` until the agent's first
     /// non-init JSON-RPC call surfaces `_meta.agent-session-id`

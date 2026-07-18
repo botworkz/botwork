@@ -19,7 +19,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-use botwork_tools::ps::sessions::{fetch, SessionsError};
+use botctl::ps::sessions::{fetch, SessionsError};
 
 /// Stand up a minimal HTTP server on a random local port that always
 /// returns the supplied body + status. Returns the URL the test

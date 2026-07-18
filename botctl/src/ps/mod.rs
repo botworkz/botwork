@@ -1,4 +1,4 @@
-//! `botwork-tools ps` — list live `mcp_session_*` containers.
+//! `botctl ps` — list live `mcp_session_*` containers.
 //!
 //! Reads the operator-visible view from session-broker's admin
 //! `GET /sessions` endpoint (rendered from the broker's in-memory
@@ -27,7 +27,7 @@
 //!    explicitly to back this command — see the comment in
 //!    `admin.rs`: "Anything that needs to observe in-memory state
 //!    from outside the broker still uses this `GET /sessions`
-//!    view (`botwork-tools ps` reads it)."
+//!    view (`botctl ps` reads it)."
 //!
 //! We picked (2). The broker endpoint is on `botwork-internal`
 //! only (trust boundary = docker network membership, same posture
@@ -117,7 +117,7 @@ pub(crate) fn build_rows(
 }
 
 fn print_usage() {
-    println!("Usage: botwork-tools ps");
+    println!("Usage: botctl ps");
     println!();
     println!("Lists running mcp_session_* containers with their bound");
     println!("agent identity, plugin, and age.");
@@ -130,7 +130,7 @@ fn print_usage() {
 
 #[derive(Debug, Error)]
 pub enum PsError {
-    #[error("usage: botwork-tools ps")]
+    #[error("usage: botctl ps")]
     InvalidUsage,
     #[error(transparent)]
     Sessions(#[from] SessionsError),
