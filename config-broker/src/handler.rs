@@ -324,6 +324,8 @@ mod tests {
 
     use super::*;
 
+    // ── helpers ──────────────────────────────────────────────────────────────
+
     fn resolve_request(tenant: &str, workspace: &str, plugin: &str) -> Request<Body> {
         Request::builder()
             .method("POST")
@@ -340,19 +342,33 @@ mod tests {
             .expect("request")
     }
 
-    #[tokio::test]
-    async fn resolve_uses_mock_database_results() {
+    fn resolve_request_partial(json: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&json).expect("json body")))
+            .expect("request")
+    }
+
+    fn empty_state() -> AppState {
+        crate::test_support::app_state_with_mock_db(MockDatabase::new(DatabaseBackend::Postgres))
+    }
+
+    fn now_binding(plugin_id: Uuid, workspace_id: Uuid) -> workspace_plugin::Model {
         let now = chrono::Utc::now();
-        let plugin_id = Uuid::new_v4();
-        let workspace_id = Uuid::new_v4();
-        let binding = workspace_plugin::Model {
+        workspace_plugin::Model {
             workspace_id,
             plugin_id,
             config: Some(serde_json::json!({ "url": "https://example.com" })),
             created_at: now,
             updated_at: now,
-        };
-        let plugin = plugin::Model {
+        }
+    }
+
+    fn now_plugin(plugin_id: Uuid) -> plugin::Model {
+        let now = chrono::Utc::now();
+        plugin::Model {
             id: plugin_id,
             name: "mcp-fetch".to_string(),
             image: "ghcr.io/example/mcp-fetch:1.0".to_string(),
@@ -365,7 +381,24 @@ mod tests {
             created_at: now,
             updated_at: now,
             current_facet_id: None,
-        };
+        }
+    }
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    // ── existing tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_uses_mock_database_results() {
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = now_binding(plugin_id, workspace_id);
+        let plugin = now_plugin(plugin_id);
         let state = crate::test_support::app_state_with_mock_db(
             MockDatabase::new(DatabaseBackend::Postgres)
                 .append_query_results([vec![(binding, Some(plugin))]]),
@@ -378,10 +411,7 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body bytes");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        let json = json_body(response).await;
         assert_eq!(json["image"], "ghcr.io/example/mcp-fetch:1.0");
         assert_eq!(json["port"], 8001);
         assert_eq!(json["env"][0]["name"], "LOG_LEVEL");
@@ -401,10 +431,364 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = to_bytes(response.into_body(), usize::MAX)
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "internal");
+    }
+
+    // ── bad-input (pre-DB) tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_rejects_missing_json_body() {
+        let app = build_router(empty_state());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/resolve")
+            .body(Body::empty())
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_missing_tenant() {
+        let app = build_router(empty_state());
+        let request = resolve_request_partial(serde_json::json!({
+            "workspace": "mcp",
+            "plugin": "mcp-fetch",
+        }));
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "invalid_request");
+        assert!(
+            json["message"].as_str().unwrap_or("").contains("tenant"),
+            "message should mention 'tenant'"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_missing_workspace() {
+        let app = build_router(empty_state());
+        let request = resolve_request_partial(serde_json::json!({
+            "tenant": "phlax",
+            "plugin": "mcp-fetch",
+        }));
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "invalid_request");
+        assert!(
+            json["message"].as_str().unwrap_or("").contains("workspace"),
+            "message should mention 'workspace'"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_missing_plugin() {
+        let app = build_router(empty_state());
+        let request = resolve_request_partial(serde_json::json!({
+            "tenant": "phlax",
+            "workspace": "mcp",
+        }));
+
+        let response = app.oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "invalid_request");
+        assert!(
+            json["message"].as_str().unwrap_or("").contains("plugin"),
+            "message should mention 'plugin'"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_invalid_tenant_shape() {
+        let app = build_router(empty_state());
+
+        let response = app
+            .oneshot(resolve_request("UPPER_CASE", "mcp", "mcp-fetch"))
             .await
-            .expect("body bytes");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "invalid_request");
+        assert!(
+            json["message"].as_str().unwrap_or("").contains("tenant"),
+            "message should mention 'tenant'"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_invalid_workspace_shape() {
+        let app = build_router(empty_state());
+
+        let response = app
+            .oneshot(resolve_request("phlax", "bad workspace", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "invalid_workspace");
+        assert!(
+            json["message"].as_str().unwrap_or("").contains("workspace"),
+            "message should mention 'workspace'"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_invalid_plugin_shape() {
+        let app = build_router(empty_state());
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "1starts-with-digit"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "invalid_request");
+        assert!(
+            json["message"].as_str().unwrap_or("").contains("plugin"),
+            "message should mention 'plugin'"
+        );
+    }
+
+    // ── not-found paths ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_returns_not_found_for_empty_result() {
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([
+                vec![] as Vec<(workspace_plugin::Model, Option<plugin::Model>)>
+            ]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "unknown_plugin");
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_not_found_when_plugin_row_absent() {
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = now_binding(plugin_id, workspace_id);
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![(binding, None::<plugin::Model>)]]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = json_body(response).await;
+        assert_eq!(json["error"], "unknown_plugin");
+    }
+
+    // ── response-shape tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_omits_config_blob_when_config_is_null() {
+        let now = chrono::Utc::now();
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = workspace_plugin::Model {
+            workspace_id,
+            plugin_id,
+            config: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let plugin = now_plugin(plugin_id);
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![(binding, Some(plugin))]]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert!(
+            json.get("config_blob").is_none(),
+            "config_blob should be absent when config is null"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_omits_config_blob_when_config_is_empty_object() {
+        let now = chrono::Utc::now();
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = workspace_plugin::Model {
+            workspace_id,
+            plugin_id,
+            config: Some(serde_json::json!({})),
+            created_at: now,
+            updated_at: now,
+        };
+        let plugin = now_plugin(plugin_id);
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![(binding, Some(plugin))]]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert!(
+            json.get("config_blob").is_none(),
+            "config_blob should be absent for empty config object"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_includes_all_resource_fields() {
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = now_binding(plugin_id, workspace_id);
+        let plugin = plugin::Model {
+            resources: Some(serde_json::json!({ "cpus": "0.5", "memory": "256m", "pids": 64 })),
+            ..now_plugin(plugin_id)
+        };
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![(binding, Some(plugin))]]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert_eq!(json["resources"]["cpus"], "0.5");
+        assert_eq!(json["resources"]["memory"], "256m");
+        assert_eq!(json["resources"]["pids"], 64);
+    }
+
+    #[tokio::test]
+    async fn resolve_omits_null_resource_fields() {
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = now_binding(plugin_id, workspace_id);
+        let plugin = plugin::Model {
+            resources: None,
+            ..now_plugin(plugin_id)
+        };
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![(binding, Some(plugin))]]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        // resources is present as an object but all optional fields are absent
+        assert!(json["resources"].is_object());
+        assert!(json["resources"].get("cpus").is_none());
+        assert!(json["resources"].get("memory").is_none());
+        assert!(json["resources"].get("pids").is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_env_skips_malformed_entries() {
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = now_binding(plugin_id, workspace_id);
+        // Mix valid entries with entries that are missing name/value fields.
+        let plugin = plugin::Model {
+            env: serde_json::json!([
+                { "name": "GOOD", "value": "yes" },
+                { "name": "NO_VALUE" },
+                "not-an-object",
+                { "value": "no-name" },
+                { "name": "ALSO_GOOD", "value": "also-yes" },
+            ]),
+            ..now_plugin(plugin_id)
+        };
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![(binding, Some(plugin))]]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        let env = json["env"].as_array().expect("env array");
+        assert_eq!(
+            env.len(),
+            2,
+            "only the two well-formed entries should survive"
+        );
+        assert_eq!(env[0]["name"], "GOOD");
+        assert_eq!(env[1]["name"], "ALSO_GOOD");
+    }
+
+    #[tokio::test]
+    async fn resolve_maps_out_of_range_port_to_internal_error() {
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = now_binding(plugin_id, workspace_id);
+        let plugin = plugin::Model {
+            port: 99_999, // out of u16 range → render() returns DbErr::Custom
+            ..now_plugin(plugin_id)
+        };
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![(binding, Some(plugin))]]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = json_body(response).await;
         assert_eq!(json["error"], "internal");
     }
 }
