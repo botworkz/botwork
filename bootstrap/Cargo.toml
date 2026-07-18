@@ -22,6 +22,7 @@ path = "src/lib.rs"
 [dependencies]
 # api-core owns the bootstrap-config shape + validators; this
 # crate is just the sea-orm writer that walks a validated tree.
+async-trait = "0.1"
 botwork-api-core = { path = "../api-core" }
 botwork-entity = { path = "../db/entity" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
