@@ -4,10 +4,16 @@ use std::time::{Duration, Instant};
 
 use botwork_session_broker::config_broker::UpstreamAuth;
 use botwork_session_broker::exit_listener::handle_container_exit;
+use botwork_session_broker::session_worker::SessionWorkerWriter;
 use botwork_session_broker::{AppState, TransportState};
+use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
 use tokio::sync::Mutex;
 
 fn make_state() -> AppState {
+    make_state_with_worker(None)
+}
+
+fn make_state_with_worker(writer: Option<Arc<SessionWorkerWriter>>) -> AppState {
     AppState {
         transport_sessions: Arc::new(Mutex::new(HashMap::new())),
         pending_init: Arc::new(Mutex::new(HashMap::new())),
@@ -25,7 +31,7 @@ fn make_state() -> AppState {
         // keeps the setup hermetic — no testcontainers postgres
         // required.
         agent_session_writer: None,
-        session_worker_writer: None,
+        session_worker_writer: writer,
         db: None,
     }
 }
@@ -195,4 +201,31 @@ async fn container_exit_removes_routing_state() {
             .contains_key("sess-reg-gone"),
         "transport session row should be removed"
     );
+}
+
+#[tokio::test]
+async fn container_exit_with_session_worker_writer_swallows_db_error() {
+    let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+        MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_errors([DbErr::Custom("boom".to_string())])
+            .into_connection(),
+    )));
+    let state = make_state_with_worker(Some(writer));
+    insert_transport(
+        &state,
+        "sess-db-warn",
+        sample_transport("mcp_session_db_warn"),
+    )
+    .await;
+
+    let response = handle_container_exit(&state, "mcp_session_db_warn", "die", Some(0))
+        .await
+        .expect("handle_container_exit should not fail");
+
+    assert_eq!(response.status(), 200);
+    assert!(!state
+        .transport_sessions
+        .lock()
+        .await
+        .contains_key("sess-db-warn"));
 }

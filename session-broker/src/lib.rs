@@ -448,3 +448,75 @@ pub async fn run() -> Result<(), String> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_transport(token: Option<&str>) -> TransportState {
+        TransportState {
+            container_name: "mcp_session_1".to_string(),
+            container_ip: "172.20.0.5".to_string(),
+            staging_token: "stage-1".to_string(),
+            tenant_name: "acme".to_string(),
+            workspace: "mcp".to_string(),
+            plugin_name: "plugin-a".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::None,
+            upstream_authorization: token.map(str::to_string),
+            agent_id: Some("agent-1".to_string()),
+            egress_policy: None,
+        }
+    }
+
+    #[test]
+    fn redact_token_keeps_prefix_and_redacts_rest() {
+        assert_eq!(redact_token("abcdef123"), "abcdef…");
+        assert_eq!(redact_token("abc"), "abc…");
+    }
+
+    #[test]
+    fn transport_debug_redacts_upstream_authorization() {
+        let state = sample_transport(Some("ghp_SECRET_TOKEN"));
+        let rendered = format!("{state:?}");
+        assert!(rendered.contains(&redact_token("ghp_SECRET_TOKEN")));
+        assert!(!rendered.contains("ghp_SECRET_TOKEN"));
+    }
+
+    #[test]
+    fn pending_init_debug_redacts_upstream_authorization() {
+        let pending = PendingInit {
+            container_name: "mcp_session_1".to_string(),
+            container_ip: "172.20.0.5".to_string(),
+            staging_token: "stage-1".to_string(),
+            tenant_name: "acme".to_string(),
+            workspace: "mcp".to_string(),
+            plugin_name: "plugin-a".to_string(),
+            descriptor: PluginDescriptor {
+                image: "ghcr.io/example/plugin:1.0".to_string(),
+                port: 8000,
+                path: "/mcp".to_string(),
+                upstream_auth: UpstreamAuth::None,
+                resources: Default::default(),
+                env: Vec::new(),
+                config_blob: None,
+                egress: None,
+            },
+            upstream_authorization: Some("ghp_SECRET_TOKEN".to_string()),
+            created_at: "now".to_string(),
+        };
+        let rendered = format!("{pending:?}");
+        assert!(rendered.contains(&redact_token("ghp_SECRET_TOKEN")));
+        assert!(!rendered.contains("ghp_SECRET_TOKEN"));
+    }
+
+    #[test]
+    fn version_string_contains_workspace_version() {
+        let version = version_string();
+        assert!(
+            version.contains(VERSION),
+            "version string should include VERSION constant"
+        );
+    }
+}
