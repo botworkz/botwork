@@ -469,4 +469,46 @@ mod tests {
         let err = validate_egress_proxy("http://egress_envoy:3128/proxy").expect_err("path");
         assert!(err.contains("path"), "{err}");
     }
+
+    #[test]
+    fn parse_bool_env_rejects_invalid_value() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_TEST_BOOL_ENV", "definitely-not-bool");
+        let err = parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect_err("must reject");
+        assert!(err.contains("expected one of"), "{err}");
+        std::env::remove_var("BOTWORK_TEST_BOOL_ENV");
+    }
+
+    #[test]
+    fn from_env_honors_read_only_rootfs_and_peer_overrides() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        std::env::set_var("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS", "true");
+        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_UID", "1234");
+        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_GID", "4321");
+
+        let config = Config::from_env().expect("config");
+        assert!(config.container_read_only_rootfs);
+        assert_eq!(config.allowed_peer_uid, Some(1234));
+        assert_eq!(config.allowed_peer_gid, Some(4321));
+
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+        std::env::remove_var("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS");
+        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_UID");
+        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_GID");
+    }
+
+    #[test]
+    fn from_env_rejects_empty_memory_limit() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_MEMORY_LIMIT", " ");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        let err = Config::from_env().expect_err("empty memory limit should fail");
+        assert_eq!(
+            err,
+            "invalid BOTWORK_LAUNCHER_MEMORY_LIMIT: must not be empty"
+        );
+        std::env::remove_var("BOTWORK_LAUNCHER_MEMORY_LIMIT");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
 }

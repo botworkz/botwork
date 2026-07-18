@@ -110,3 +110,129 @@ async fn evict_tenant(
         Json(serde_json::json!({ "evicted": evicted })),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AppState, TransportState, UpstreamAuth};
+    use axum::body::{to_bytes, Body};
+    use http::Request;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+    use tower::ServiceExt;
+
+    fn bare_state() -> AppState {
+        AppState {
+            transport_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_init: Arc::new(Mutex::new(HashMap::new())),
+            launcher_socket_path: "/tmp/admin-unit-launcher.sock".to_string(),
+            auth_broker_url: "http://127.0.0.1:1".to_string(),
+            config_broker_endpoint: "http://127.0.0.1:1".to_string(),
+            control_plane_endpoint: "http://127.0.0.1:1".to_string(),
+            tombstones: Arc::new(Mutex::new(HashMap::new())),
+            liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+            stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+            disconnect_grace: Duration::from_secs(300),
+            agent_session_writer: None,
+            session_worker_writer: None,
+            db: None,
+        }
+    }
+
+    fn sample_transport(container_name: &str, tenant: &str) -> TransportState {
+        TransportState {
+            container_name: container_name.to_string(),
+            container_ip: "10.0.0.1".to_string(),
+            tenant_name: tenant.to_string(),
+            workspace: "mcp".to_string(),
+            plugin_name: "mcp-bash".to_string(),
+            staging_token: "tok-abc".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::None,
+            upstream_authorization: None,
+            agent_id: Some("agent-1".to_string()),
+            egress_policy: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_sessions_returns_container_keyed_view() {
+        let state = bare_state();
+        state.transport_sessions.lock().await.insert(
+            "sess-2".to_string(),
+            sample_transport("mcp-session-b", "tenant-b"),
+        );
+        state.transport_sessions.lock().await.insert(
+            "sess-1".to_string(),
+            sample_transport("mcp-session-a", "tenant-a"),
+        );
+
+        let Json(view) = get_sessions(State(state)).await;
+        let keys: Vec<String> = view.sessions.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            vec!["mcp-session-a".to_string(), "mcp-session-b".to_string()]
+        );
+        assert_eq!(view.sessions["mcp-session-a"].tenant, "tenant-a");
+        assert_eq!(view.sessions["mcp-session-b"].plugin, "mcp-bash");
+    }
+
+    #[tokio::test]
+    async fn evict_tenant_returns_ok_when_no_sessions() {
+        let state = bare_state();
+        let response = evict_tenant(State(state), Path("missing".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn build_router_serves_sessions_and_evict_routes() {
+        let state = bare_state();
+        state.transport_sessions.lock().await.insert(
+            "sess-1".to_string(),
+            sample_transport("mcp-session-a", "tenant-a"),
+        );
+        let app = build_router(state);
+
+        let sessions_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("sessions response");
+        assert_eq!(sessions_response.status(), StatusCode::OK);
+        let bytes = to_bytes(sessions_response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(json["sessions"]["mcp-session-a"]["tenant"], "tenant-a");
+
+        let evict_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/evict-tenant/tenant-a")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("evict response");
+        assert_eq!(evict_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn serve_admin_rejects_invalid_bind_address() {
+        let err = serve_admin(bare_state(), "definitely not a socket address")
+            .await
+            .expect_err("invalid address should fail");
+        assert!(err.contains("failed to bind admin HTTP server"), "{err}");
+    }
+}
