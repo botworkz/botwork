@@ -503,29 +503,28 @@ mod tests {
     fn fixture_registration() -> (RegistrationRequest, RegistrationUpload) {
         let mut rng = rand::thread_rng();
         let setup = ServerSetup::generate(&mut rng);
-        let password = b"hunter2";
-        let start = client::registration_start(&mut rng, password).unwrap();
+        let input = b"hunter2";
+        let start = client::registration_start(&mut rng, input).unwrap();
         let request = start.request.clone();
         let response =
             server::registration_start(&setup, request.clone(), b"phlax@example.com").unwrap();
         let finish =
-            client::registration_finish(&mut rng, start.state, password, response.response)
-                .unwrap();
+            client::registration_finish(&mut rng, start.state, input, response.response).unwrap();
         (request, finish.upload)
     }
 
     fn fixture_login() -> (LoginRequest, LoginFinalization) {
         let mut rng = rand::thread_rng();
         let setup = ServerSetup::generate(&mut rng);
-        let password = b"hunter2";
-        let registration = client::registration_start(&mut rng, password).unwrap();
+        let input = b"hunter2";
+        let registration = client::registration_start(&mut rng, input).unwrap();
         let response =
             server::registration_start(&setup, registration.request, b"phlax@example.com").unwrap();
         let finish =
-            client::registration_finish(&mut rng, registration.state, password, response.response)
+            client::registration_finish(&mut rng, registration.state, input, response.response)
                 .unwrap();
         let password_file = server::registration_finish(finish.upload);
-        let login = client::login_start(&mut rng, password).unwrap();
+        let login = client::login_start(&mut rng, input).unwrap();
         let request = login.request.clone();
         let response = server::login_start(
             &mut rng,
@@ -535,7 +534,7 @@ mod tests {
             b"phlax@example.com",
         )
         .unwrap();
-        let finish = client::login_finish(login.state, password, response.response).unwrap();
+        let finish = client::login_finish(login.state, input, response.response).unwrap();
         (request, finish.finalization)
     }
 
