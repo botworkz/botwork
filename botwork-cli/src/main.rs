@@ -172,12 +172,28 @@ fn resolve_cacert_path(cli_cacert: Option<PathBuf>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use botwork_cli::keyring_store::{KeyringEntry, KeyringStore};
+    use chrono::Utc;
     use clap::error::ErrorKind;
     use std::sync::Mutex;
+    use tempfile::TempDir;
 
     fn ssl_cert_file_env_lock() -> &'static Mutex<()> {
         static LOCK: Mutex<()> = Mutex::new(());
         &LOCK
+    }
+
+    fn keyring_env_lock() -> &'static Mutex<()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
+    }
+
+    fn run_async<F: std::future::Future<Output = T>, T>(future: F) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
     }
 
     #[test]
@@ -223,5 +239,104 @@ mod tests {
         let resolved = resolve_cacert_path(None);
         assert_eq!(resolved, None);
         std::env::remove_var(SSL_CERT_FILE_ENV);
+    }
+
+    #[test]
+    fn dispatch_requires_tenant() {
+        let err = run_async(dispatch(Cli {
+            tenant: None,
+            server: None,
+            credential_identifier: None,
+            cacert: None,
+            command: Some(Command::Status),
+        }))
+        .unwrap_err();
+        assert!(matches!(err, LoginError::Config(ref msg) if msg.contains("missing `--tenant`")));
+    }
+
+    #[test]
+    fn dispatch_routes_offline_subcommands() {
+        let _lock = keyring_env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+        KeyringStore::new()
+            .write(
+                "phlax",
+                &KeyringEntry {
+                    bearer: "ABCDEF0123456789".into(),
+                    lease_id: uuid::Uuid::nil(),
+                    expires_at: Utc::now() + chrono::Duration::hours(1),
+                    server: "https://broker.example".into(),
+                    credential_identifier: "phlax@example.com".into(),
+                    suite_version: botwork_opaque_handshake::SUITE_VERSION,
+                },
+            )
+            .unwrap();
+
+        let env_output = run_async(dispatch(Cli {
+            tenant: Some("phlax".into()),
+            server: None,
+            credential_identifier: None,
+            cacert: None,
+            command: Some(Command::Env {
+                token_env: Some("ALT_TOKEN".into()),
+            }),
+        }))
+        .unwrap();
+        assert_eq!(env_output, "export ALT_TOKEN='ABCDEF0123456789'");
+
+        let status_output = run_async(dispatch(Cli {
+            tenant: Some("phlax".into()),
+            server: None,
+            credential_identifier: None,
+            cacert: None,
+            command: Some(Command::Status),
+        }))
+        .unwrap();
+        assert!(status_output.contains("phlax: logged in."));
+
+        let logout_output = run_async(dispatch(Cli {
+            tenant: Some("phlax".into()),
+            server: None,
+            credential_identifier: None,
+            cacert: None,
+            command: Some(Command::Logout),
+        }))
+        .unwrap();
+        assert_eq!(logout_output, "✓ Removed keyring entry for phlax.");
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+    }
+
+    #[test]
+    fn dispatch_routes_login_and_register_errors_without_network() {
+        let login_err = run_async(dispatch(Cli {
+            tenant: Some("phlax".into()),
+            server: Some("https://broker.example".into()),
+            credential_identifier: None,
+            cacert: None,
+            command: Some(Command::Login {
+                lease: "not-a-duration".into(),
+                password_stdin: false,
+            }),
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(login_err, LoginError::InvalidDuration { ref value, .. } if value == "not-a-duration")
+        );
+
+        let register_err = run_async(dispatch(Cli {
+            tenant: Some("phlax".into()),
+            server: Some("127.0.0.1:9100".into()),
+            credential_identifier: None,
+            cacert: None,
+            command: Some(Command::Register {
+                password_stdin: false,
+            }),
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(register_err, LoginError::InvalidServer { ref value, .. } if value == "127.0.0.1:9100")
+        );
     }
 }

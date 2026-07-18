@@ -54,6 +54,8 @@ fn format_status(tenant: &str, entry: &KeyringEntry, now: chrono::DateTime<Utc>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
 
     #[test]
     fn format_status_includes_lease_id_and_server() {
@@ -71,5 +73,79 @@ mod tests {
         assert!(msg.contains("Lease id: 8f3e4a00-0000-0000-0000-000000000001"));
         assert!(msg.contains("Server: http://192.168.122.50:9100"));
         assert!(msg.contains("1day"));
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        crate::test_env_lock::env_lock()
+    }
+
+    fn fixture_entry(expires_at: chrono::DateTime<Utc>) -> KeyringEntry {
+        KeyringEntry {
+            bearer: "x".into(),
+            lease_id: uuid::Uuid::from_u128(0x8f3e_4a00_0000_0000_0000_0000_0000_0001),
+            expires_at,
+            server: "http://192.168.122.50:9100".into(),
+            credential_identifier: "phlax".into(),
+            suite_version: botwork_opaque_handshake::SUITE_VERSION,
+        }
+    }
+
+    fn run_async<F: std::future::Future<Output = T>, T>(future: F) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn run_returns_status_for_live_entry() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+        KeyringStore::new()
+            .write(
+                "phlax",
+                &fixture_entry(Utc::now() + chrono::Duration::days(1)),
+            )
+            .unwrap();
+
+        let output = run_async(run(StatusArgs {
+            tenant: "phlax".into(),
+        }))
+        .unwrap();
+        assert!(output.contains("phlax: logged in."));
+        assert!(output.contains("Server: http://192.168.122.50:9100"));
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+    }
+
+    #[test]
+    fn run_returns_no_lease_and_expired_errors() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+
+        let missing = run_async(run(StatusArgs {
+            tenant: "phlax".into(),
+        }))
+        .unwrap_err();
+        assert!(matches!(missing, LoginError::NoLease(ref tenant) if tenant == "phlax"));
+
+        KeyringStore::new()
+            .write(
+                "phlax",
+                &fixture_entry(Utc::now() - chrono::Duration::seconds(1)),
+            )
+            .unwrap();
+        let expired = run_async(run(StatusArgs {
+            tenant: "phlax".into(),
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(expired, LoginError::LeaseExpired { ref tenant, .. } if tenant == "phlax")
+        );
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
     }
 }

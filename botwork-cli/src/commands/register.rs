@@ -66,3 +66,23 @@ pub async fn run(args: RegisterArgs) -> Result<String, LoginError> {
         suite = outcome.suite_version
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_server_is_rejected_during_resolution() {
+        let err = run(RegisterArgs {
+            tenant: "phlax".into(),
+            server: Some("127.0.0.1:9100".into()),
+            password: Some(Zeroizing::new(b"hunter2".to_vec())),
+            ..RegisterArgs::default()
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, LoginError::InvalidServer { ref value, .. } if value == "127.0.0.1:9100")
+        );
+    }
+}
