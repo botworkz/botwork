@@ -17,6 +17,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::LazyLock;
 
 use clap::{Parser, Subcommand};
 
@@ -25,13 +26,17 @@ use botwork_cli::commands::{EnvArgs, LoginArgs, LogoutArgs, RegisterArgs, Status
 use botwork_cli::error::{exit_code_for, LoginError};
 
 const SSL_CERT_FILE_ENV: &str = "SSL_CERT_FILE";
-const VERSION: &str = include_str!("../../VERSION").trim_ascii();
+
+fn clap_version() -> &'static str {
+    static VERSION: LazyLock<String> = LazyLock::new(botwork_version::version_string);
+    VERSION.as_str()
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "bw",
     about = "botwork end-user CLI",
-    version = VERSION,
+    version = clap_version(),
 )]
 struct Cli {
     /// Tenant name. Required for every subcommand; placed at the top
@@ -180,9 +185,10 @@ mod tests {
         let err = Cli::try_parse_from(["bw", "--version"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
         let msg = err.to_string();
+        let version = clap_version();
         assert!(
-            msg.contains(VERSION),
-            "expected version string {VERSION}, got: {msg:?}",
+            msg.contains(version),
+            "expected version string {version}, got: {msg:?}",
         );
     }
 

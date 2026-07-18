@@ -1,7 +1,7 @@
 # bw
 
 Client-side OPAQUE login + lease bearer keyring management for
-[`botwork-auth-broker`](../auth-broker).
+botwork-auth-broker.
 
 Round 1a of [#123][rfe-123] / closes [#139][issue-139]. The CLI is the
 thing the user runs *before* `goose session`: it drives an OPAQUE
@@ -254,22 +254,9 @@ Per [#139][issue-139]:
 ## Tests
 
 ```sh
-cargo test --locked --workspace --all-targets --features test-support
+cargo test -p botwork-cli
 ```
 
-- **Unit tests** (25): duration parsing, config resolution, keyring
-  JSON round-trip + file-fallback IO + path-traversal rejection,
-  exit-code mapping, status-code mapping, response-body truncation
-  (UTF-8 boundaries).
-- **Integration tests** (docker-gated, log-skip when docker isn't
-  reachable):
-  - `tests/login_round_trip.rs` — register → login → status → env
-    → /auth/check end-to-end against a real broker + postgres.
-  - `tests/error_mapping.rs` — `InvalidLogin` / `UnknownTenant` /
-    `AlreadyRegistered` arms against real wire 401 / 404 / 409.
-
-Docker gating mirrors the pattern already used by `auth-broker`'s
-`opaque_e2e` / `opaque_dummy` suites: the probe runs a small
-sentinel image with a 5s timeout, and the test prints `IGNORED:
-docker not reachable, skipping …` rather than failing when the
-host has no docker.
+This crate currently ships unit tests only, covering argument handling,
+duration parsing, config resolution, keyring JSON/file behavior,
+error/status mapping, and response-body truncation behavior.

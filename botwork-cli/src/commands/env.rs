@@ -3,7 +3,7 @@
 //! Designed for shell consumption:
 //!
 //! ```sh
-//! eval "$(botwork-login env --tenant phlax)"
+//! eval "$(bw env --tenant phlax)"
 //! ```
 //!
 //! On no-lease / expired-lease, prints *nothing* to stdout (so the
