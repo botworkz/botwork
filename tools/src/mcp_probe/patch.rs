@@ -117,12 +117,24 @@ fn buildx_label(
             _ => PatchError::Io(err.to_string()),
         })?;
 
-    child
+    // Write the inline Dockerfile to the child's stdin. If the child
+    // has already exited (e.g. it failed to parse args, or a stub that
+    // ignores stdin) the write races the closed read end and returns
+    // EPIPE / BrokenPipe. That is NOT the real failure signal — the
+    // authoritative outcome is the child's exit status and stderr,
+    // which we inspect below. Swallow BrokenPipe here so a
+    // fast-exiting docker doesn't masquerade as an I/O error; any
+    // genuine problem still surfaces via BuildxFailed.
+    if let Err(err) = child
         .stdin
         .as_mut()
         .expect("stdin piped")
         .write_all(dockerfile.as_bytes())
-        .map_err(|err| PatchError::Io(err.to_string()))?;
+    {
+        if err.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(PatchError::Io(err.to_string()));
+        }
+    }
 
     let output = child
         .wait_with_output()
@@ -352,8 +364,10 @@ mod tests {
             return;
         };
         // The buildx_label fn runs `docker buildx build ...` and pipes a
-        // Dockerfile via stdin. The fake docker just exits 0 regardless.
-        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\nexit 0\n");
+        // Dockerfile via stdin. The fake docker drains stdin (`cat`) then
+        // exits 0, so it consumes the piped Dockerfile before exiting and
+        // doesn't race the write into an EPIPE.
+        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\ncat >/dev/null\nexit 0\n");
         let _guard = lock_path();
         std::env::set_var("PATH", tmp.path());
 
@@ -370,7 +384,7 @@ mod tests {
         write_fake_bin(
             tmp.path(),
             "docker",
-            "#!/bin/sh\necho 'buildx daemon not running' >&2\nexit 1\n",
+            "#!/bin/sh\ncat >/dev/null\necho 'buildx daemon not running' >&2\nexit 1\n",
         );
         let _guard = lock_path();
         std::env::set_var("PATH", tmp.path());
@@ -426,8 +440,8 @@ mod tests {
         let Ok(tmp) = tempfile::TempDir::new() else {
             return;
         };
-        // No crane; docker buildx exits 0
-        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\nexit 0\n");
+        // No crane; docker buildx drains stdin then exits 0
+        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\ncat >/dev/null\nexit 0\n");
         let _guard = lock_path();
         std::env::set_var("PATH", tmp.path());
 
@@ -451,7 +465,7 @@ mod tests {
             "crane",
             "#!/bin/sh\necho 'push failed' >&2\nexit 1\n",
         );
-        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\nexit 0\n");
+        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\ncat >/dev/null\nexit 0\n");
         let _guard = lock_path();
         std::env::set_var("PATH", tmp.path());
 
@@ -472,7 +486,7 @@ mod tests {
         write_fake_bin(
             tmp.path(),
             "docker",
-            "#!/bin/sh\necho 'daemon error' >&2\nexit 1\n",
+            "#!/bin/sh\ncat >/dev/null\necho 'daemon error' >&2\nexit 1\n",
         );
         let _guard = lock_path();
         std::env::set_var("PATH", tmp.path());
