@@ -224,6 +224,8 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
     let store = worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![plugin_row(plugin_id, "mcp-fetch")]])
+            // Spawn-time rows start with an empty mcp_session_id until the
+            // upstream initialize response returns one.
             .append_query_results([vec![worker_row(
                 worker_id,
                 plugin_id,
@@ -240,6 +242,8 @@ async fn sea_orm_session_worker_store_methods_cover_success_none_and_error() {
 
     let store = worker_store(
         MockDatabase::new(DatabaseBackend::Postgres)
+            // Before record_mcp_session_id runs, the persisted row still carries
+            // the spawn-time empty sentinel.
             .append_query_results([vec![worker_row(
                 worker_id,
                 plugin_id,

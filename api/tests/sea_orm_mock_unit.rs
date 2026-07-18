@@ -730,7 +730,6 @@ async fn workspace_and_plugin_name_count_queries_cover_free_taken_and_error_via_
 
 #[tokio::test]
 async fn resolve_triple_query_body_covers_missing_and_error_paths_via_binding_create() {
-    let _tenant_id = Uuid::new_v4();
     let workspace_id = Uuid::new_v4();
     let plugin_id = Uuid::new_v4();
 
