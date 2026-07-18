@@ -268,3 +268,57 @@ async fn upsert_binding(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
+
+    use super::*;
+    use crate::BootstrapConfigRaw;
+
+    fn sample_config() -> BootstrapConfig {
+        let raw: BootstrapConfigRaw = serde_yaml::from_str(
+            r#"
+tenants:
+- name: phlax
+  workspaces:
+  - name: mcp
+    plugins:
+    - name: mcp-bash
+
+plugins:
+- name: mcp-bash
+  image: ghcr.io/example/mcp-bash:1.0
+  egress: none
+"#,
+        )
+        .expect("parse");
+        BootstrapConfig::from_raw(raw).expect("validate")
+    }
+
+    #[tokio::test]
+    async fn apply_works_with_mock_database() {
+        let db =
+            crate::test_support::mock_db_connection(MockDatabase::new(DatabaseBackend::Postgres));
+        let empty = BootstrapConfig::from_raw(BootstrapConfigRaw {
+            tenants: Vec::new(),
+            plugins: Vec::new(),
+        })
+        .expect("empty config should validate");
+
+        let stats = apply(&db, &empty).await.expect("mock apply should succeed");
+
+        assert_eq!(stats, ApplyStats::default());
+    }
+
+    #[tokio::test]
+    async fn apply_maps_query_error() {
+        let db = crate::test_support::mock_db_connection(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([DbErr::Custom("boom".to_string())]),
+        );
+
+        let err = apply(&db, &sample_config()).await.expect_err("should fail");
+        assert!(matches!(err, BootstrapError::Db(_)));
+    }
+}

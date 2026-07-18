@@ -313,3 +313,98 @@ pub fn build_router(state: AppState) -> Router {
         .route("/resolve", post(resolve))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{to_bytes, Body};
+    use http::{Request, StatusCode};
+    use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn resolve_request(tenant: &str, workspace: &str, plugin: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "tenant": tenant,
+                    "workspace": workspace,
+                    "plugin": plugin,
+                }))
+                .expect("json body"),
+            ))
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn resolve_uses_mock_database_results() {
+        let now = chrono::Utc::now();
+        let plugin_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let binding = workspace_plugin::Model {
+            workspace_id,
+            plugin_id,
+            config: Some(serde_json::json!({ "url": "https://example.com" })),
+            created_at: now,
+            updated_at: now,
+        };
+        let plugin = plugin::Model {
+            id: plugin_id,
+            name: "mcp-fetch".to_string(),
+            image: "ghcr.io/example/mcp-fetch:1.0".to_string(),
+            port: 8001,
+            path: "/mcp".to_string(),
+            upstream_auth: "none".to_string(),
+            env: serde_json::json!([{ "name": "LOG_LEVEL", "value": "info" }]),
+            resources: Some(serde_json::json!({ "memory": "4g" })),
+            egress: serde_json::json!({ "mode": "none" }),
+            created_at: now,
+            updated_at: now,
+            current_facet_id: None,
+        };
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![(binding, Some(plugin))]]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["image"], "ghcr.io/example/mcp-fetch:1.0");
+        assert_eq!(json["port"], 8001);
+        assert_eq!(json["env"][0]["name"], "LOG_LEVEL");
+    }
+
+    #[tokio::test]
+    async fn resolve_maps_db_error_to_internal_response() {
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([DbErr::Custom("boom".to_string())]),
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(resolve_request("phlax", "mcp", "mcp-fetch"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(json["error"], "internal");
+    }
+}

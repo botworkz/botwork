@@ -76,6 +76,8 @@ pub fn redact_token(value: &str) -> String {
 /// compile against the crate's public surface and cannot see `cfg(test)` items.
 #[doc(hidden)]
 pub mod test_support {
+    #[cfg(test)]
+    use std::sync::Arc;
     use std::sync::{Mutex as StdMutex, OnceLock};
 
     static LOG_CAPTURE: OnceLock<StdMutex<Option<Vec<String>>>> = OnceLock::new();
@@ -94,6 +96,20 @@ pub mod test_support {
             .expect("lock log capture")
             .take()
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mock_agent_session_writer(
+        mock: sea_orm::MockDatabase,
+    ) -> crate::agent_session::AgentSessionWriter {
+        crate::agent_session::AgentSessionWriter::new(Arc::new(mock.into_connection()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mock_session_worker_writer(
+        mock: sea_orm::MockDatabase,
+    ) -> crate::session_worker::SessionWorkerWriter {
+        crate::session_worker::SessionWorkerWriter::new(Arc::new(mock.into_connection()))
     }
 
     /// Re-exported for integration tests so concurrent bump/drop tests can
