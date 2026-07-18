@@ -1,4 +1,4 @@
-//! `botwork-tools mcp-probe` — start an MCP image, drive a handshake,
+//! `botctl mcp-probe` — start an MCP image, drive a handshake,
 //! emit a labeled image.
 //!
 //! ## Operating model
@@ -107,11 +107,11 @@ impl Mode {
 }
 
 impl Args {
-    /// Parse `argv[2..]` (everything after `botwork-tools mcp-probe`).
+    /// Parse `argv[2..]` (everything after `botctl mcp-probe`).
     pub fn from_argv(argv: &[String]) -> Result<Self, McpProbeError> {
         // First positional is the sub-mode; everything else is flag
         // parsing. The shape is intentionally hand-rolled rather
-        // than clap-driven because the rest of `botwork-tools` is
+        // than clap-driven because the rest of `botctl` is
         // (see `bootstrap/mod.rs`) and a single clap drop-in for
         // one subcommand would be a needless step-change.
         let mode = match argv.first().map(String::as_str) {
@@ -210,7 +210,7 @@ where
 }
 
 pub fn help_text() -> &'static str {
-    "Usage: botwork-tools mcp-probe <generate|verify|describe> [OPTIONS]\n\
+    "Usage: botctl mcp-probe <generate|verify|describe> [OPTIONS]\n\
      \n\
      Modes:\n\
        generate   Probe an unlabeled image, emit a labeled image (requires --out)\n\

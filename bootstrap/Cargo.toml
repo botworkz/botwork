@@ -9,7 +9,7 @@ edition = "2021"
 # + a `botwork/bootstrap:local` container that ran as a systemd
 # oneshot at boot. That production codepath was retired in RFE #106
 # PR4 (botwork#118 + the vm-side cutover) in favour of
-# `botwork-tools bootstrap` calling api. The container,
+# `botctl bootstrap` calling api. The container,
 # Earthfile target, and CI plumbing are gone; this crate now only
 # survives as a fast in-process seed helper for the three integration
 # tests under `api/`, `config-broker/`, and `session-broker/`

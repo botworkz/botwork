@@ -18,7 +18,7 @@
 //!    workspace.
 //!
 //! The HTTP client is `reqwest::blocking` to match the rest of
-//! `botwork-tools` — the binary stays a single-threaded blocking
+//! `botctl` — the binary stays a single-threaded blocking
 //! CLI so the operational story doesn't fork between subcommands.
 
 use std::collections::BTreeMap;
@@ -236,7 +236,7 @@ pub fn handshake(url: &str, deadline: Instant) -> Result<ProbeResult, ProbeError
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
-                    "name": "botwork-tools-mcp-probe",
+                    "name": "botctl-mcp-probe",
                     "version": crate::VERSION,
                 }
             }

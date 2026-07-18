@@ -8,8 +8,8 @@ fn main() {
     ) {
         writeln!(
             std::io::stdout(),
-            "botwork-tools {}",
-            botwork_tools::version_string()
+            "botctl {}",
+            botwork_ctl::version_string()
         )
         .expect("failed to write version output");
         std::process::exit(0);
@@ -23,5 +23,5 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    std::process::exit(botwork_tools::run_with_args(args));
+    std::process::exit(botwork_ctl::run_with_args(args));
 }

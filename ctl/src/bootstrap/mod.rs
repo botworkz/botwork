@@ -1,4 +1,4 @@
-//! `botwork-tools bootstrap` — operator-facing replacement for the
+//! `botctl bootstrap` — operator-facing replacement for the
 //! `botwork-bootstrap` boot-time binary.
 //!
 //! Parses the same `bootstrap.yaml` shape via
@@ -13,7 +13,7 @@
 //! Round 1 (this commit): adds the subcommand, leaves the old
 //! `botwork-bootstrap` crate + systemd unit in place. Round 2 (vm
 //! follow-up PR) drops the `botwork-bootstrap.service` unit and
-//! replaces it with a oneshot calling `botwork-tools bootstrap`.
+//! replaces it with a oneshot calling `botctl bootstrap`.
 //! Round 3 (botwork follow-up PR) deletes the `botwork-bootstrap`
 //! crate, container, and CI entries.
 //!
@@ -31,7 +31,7 @@
 //! # CLI shape
 //!
 //! ```text
-//! botwork-tools bootstrap [--config <path>] [--endpoint <url>]
+//! botctl bootstrap [--config <path>] [--endpoint <url>]
 //!                         [--operator <name>] [--dry-run]
 //! ```
 //!
@@ -92,7 +92,7 @@ pub struct Args {
 }
 
 impl Args {
-    /// Parse `argv[2..]` (everything after `botwork-tools bootstrap`).
+    /// Parse `argv[2..]` (everything after `botctl bootstrap`).
     pub fn from_argv(argv: &[String]) -> Result<Self, BootstrapError> {
         let mut config_path: Option<PathBuf> = None;
         let mut endpoint: Option<String> = None;
@@ -146,7 +146,7 @@ impl Args {
 }
 
 pub fn help_text() -> &'static str {
-    "Usage: botwork-tools bootstrap [--config <path>] [--endpoint <url>]\n\
+    "Usage: botctl bootstrap [--config <path>] [--endpoint <url>]\n\
      \x20                              [--operator <name>] [--dry-run]\n\
      \n\
      Apply a bootstrap.yaml through api. Idempotent: every operation\n\

@@ -1,4 +1,4 @@
-//! Thin api client used by `botwork-tools bootstrap`.
+//! Thin api client used by `botctl bootstrap`.
 //!
 //! Why a separate client (vs reusing the `reqwest` dance inline in
 //! `apply.rs`): the bootstrap subcommand needs to:
