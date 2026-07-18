@@ -452,3 +452,98 @@ pub fn migrate_legacy_sessions_json(path: &str) {
 // even when the cfg gates don't end up using them.
 #[allow(dead_code)]
 fn _imports_keepalive(_: Arc<SessionWorkerWriter>, _: LiveWorker) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_worker::SessionWorkerWriter;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    fn app_state_with_writer(
+        writer: Option<Arc<SessionWorkerWriter>>,
+        db: Option<Arc<sea_orm::DatabaseConnection>>,
+    ) -> AppState {
+        AppState {
+            transport_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_init: Arc::new(Mutex::new(HashMap::new())),
+            launcher_socket_path: "/tmp/missing.sock".to_string(),
+            auth_broker_url: "http://127.0.0.1:1".to_string(),
+            config_broker_endpoint: "http://127.0.0.1:1".to_string(),
+            control_plane_endpoint: "http://127.0.0.1:1".to_string(),
+            tombstones: Arc::new(Mutex::new(HashMap::new())),
+            liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+            stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+            disconnect_grace: std::time::Duration::from_secs(30),
+            agent_session_writer: None,
+            session_worker_writer: writer,
+            db,
+        }
+    }
+
+    #[test]
+    fn migrate_legacy_sessions_json_removes_file() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("sessions.json");
+        std::fs::write(&path, r#"{"sess":"value"}"#).expect("write");
+
+        migrate_legacy_sessions_json(path.to_str().expect("utf8 path"));
+
+        assert!(!path.exists(), "legacy file should be removed");
+    }
+
+    #[test]
+    fn migrate_legacy_sessions_json_missing_file_is_noop() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.json");
+        migrate_legacy_sessions_json(path.to_str().expect("utf8 path"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn list_running_session_containers_is_total_function() {
+        if let Some(names) = list_running_session_containers() {
+            assert!(
+                names.iter().all(|name| name.starts_with("mcp_session_")),
+                "docker filter should only return mcp_session_* containers"
+            );
+        }
+    }
+
+    #[test]
+    fn inspect_container_for_recovery_missing_container_returns_none() {
+        assert!(
+            inspect_container_for_recovery("mcp_session_definitely_missing_for_test").is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_live_workers_noops_when_writer_or_db_missing() {
+        let state = app_state_with_writer(None, None);
+        recover_live_workers(&state).await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[test]
+    fn force_remove_container_total_function() {
+        let before = list_running_session_containers();
+        force_remove_container("mcp_session_definitely_missing_for_test");
+        let after = list_running_session_containers();
+        assert_eq!(before.is_some(), after.is_some());
+    }
+
+    #[tokio::test]
+    async fn recover_live_workers_noops_when_docker_unavailable() {
+        let writer = Arc::new(SessionWorkerWriter::new(Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres).into_connection(),
+        )));
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let state = app_state_with_writer(Some(writer), Some(db));
+
+        recover_live_workers(&state).await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+}

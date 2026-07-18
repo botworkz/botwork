@@ -2407,4 +2407,96 @@ mod tests {
             "missing bearer configured stripped log: {logs_bearer_no_token}"
         );
     }
+
+    #[test]
+    fn secret_services_are_sorted_and_deduplicated() {
+        let services = secret_services(&[
+            test_secret("github.com", "pat-a", b"ghp_one"),
+            test_secret("shared", "token", b"shh"),
+            test_secret("github.com", "pat-b", b"ghp_two"),
+        ]);
+        assert_eq!(
+            services,
+            vec!["github.com".to_string(), "shared".to_string()]
+        );
+    }
+
+    #[test]
+    fn immediate_response_sets_status_and_body() {
+        let response = immediate_response(403, "forbidden");
+        let processing_response::Response::ImmediateResponse(inner) =
+            response.response.expect("immediate response")
+        else {
+            panic!("expected immediate response");
+        };
+        assert_eq!(inner.status.expect("status").code, 403);
+        assert_eq!(inner.body, b"forbidden");
+    }
+
+    #[test]
+    fn request_headers_route_applies_path_and_authorization_mutation() {
+        let response =
+            request_headers_route("mcp_session_abc:8000", Some("/mcp"), Some("token"), false);
+        let processing_response::Response::RequestHeaders(headers) =
+            response.response.expect("request headers response")
+        else {
+            panic!("expected request headers response");
+        };
+        let common = headers.response.expect("common response");
+        assert!(common.clear_route_cache);
+        let mutation = common.header_mutation.expect("header mutation");
+        assert!(mutation
+            .set_headers
+            .iter()
+            .filter_map(|h| h.header.as_ref())
+            .any(|h| h.key == ":path"));
+        assert!(mutation
+            .set_headers
+            .iter()
+            .filter_map(|h| h.header.as_ref())
+            .any(|h| h.key == "authorization"));
+        assert!(!mutation.remove_headers.iter().any(|h| h == "authorization"));
+    }
+
+    #[test]
+    fn logged_immediate_response_logs_phase_decision() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let state = PerStreamState {
+            method: "POST".to_string(),
+            mcp_session_id: Some("sid-1".to_string()),
+            ..PerStreamState::default()
+        };
+        let _ = logged_immediate_response(&state, "request_headers", 404, "not found");
+        let logs = take_log_capture().join("\n");
+        assert!(logs.contains("phase=immediate_response"));
+        assert!(logs.contains("decision=request_headers:404"));
+    }
+
+    #[test]
+    fn route_authorization_with_missing_session_id_uses_empty_value() {
+        let _guard = log_capture_guard();
+        start_log_capture();
+        let transport = TransportState {
+            container_name: "mcp_session_123".to_string(),
+            container_ip: "172.20.0.5".to_string(),
+            staging_token: "stage".to_string(),
+            tenant_name: "tenant1".to_string(),
+            workspace: "mcp".to_string(),
+            plugin_name: "plugin-a".to_string(),
+            port: 8000,
+            path: "/mcp".to_string(),
+            upstream_auth: UpstreamAuth::None,
+            upstream_authorization: Some("ghp_SECRET".to_string()),
+            agent_id: None,
+            egress_policy: None,
+        };
+        let state = test_app_state("plugin-a", UpstreamAuth::None);
+        let (auth, strip) = route_authorization_for_transport(&state, None, &transport);
+        assert_eq!(auth, None);
+        assert!(strip);
+        let logs = take_log_capture().join("\n");
+        assert!(logs.contains("session="));
+        assert!(logs.contains("upstream_auth=none stripped"));
+    }
 }
