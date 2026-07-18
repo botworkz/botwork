@@ -265,6 +265,7 @@ impl BootstrapConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn parse(yaml: &str) -> Result<BootstrapConfig, ValidationError> {
         let raw: BootstrapConfigRaw = serde_yaml::from_str(yaml).expect("yaml parse");
@@ -462,5 +463,51 @@ plugins:
         )
         .unwrap_err();
         assert!(matches!(err, ValidationError::DuplicateBinding { .. }));
+    }
+
+    #[test]
+    fn fails_on_empty_names_across_tree_levels() {
+        for yaml in [
+            "tenants:\n- name: \" \"\nplugins: []\n",
+            "tenants:\n- name: t\n  workspaces:\n  - name: \"\"\nplugins: []\n",
+            "tenants:\n- name: t\n  workspaces:\n  - name: w\n    plugins:\n    - name: \"\"\nplugins:\n- name: p\n  image: ghcr.io/example/p:1.0\n  egress: none\n",
+        ] {
+            let err = parse(yaml).unwrap_err();
+            assert!(matches!(err, ValidationError::EmptyName(_)), "{yaml}");
+        }
+    }
+
+    #[test]
+    fn load_reports_not_found_parse_read_and_validation_failures() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("epoch")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("botwork-api-core-config-tests-{unique}"));
+        std::fs::create_dir_all(&base).expect("create temp base");
+        let missing = base.join("missing.yaml");
+        let err = BootstrapConfig::load(&missing).unwrap_err();
+        assert!(matches!(err, LoadError::NotFound(_)));
+
+        let parse_path = base.join("parse.yaml");
+        std::fs::write(&parse_path, "tenants: [").expect("write parse fixture");
+        let err = BootstrapConfig::load(&parse_path).unwrap_err();
+        assert!(matches!(err, LoadError::Parse(_)));
+
+        let invalid_path = base.join("invalid.yaml");
+        std::fs::write(
+            &invalid_path,
+            "tenants: []\nplugins:\n- name: p\n  image: ghcr.io/example/p:1.0\n",
+        )
+        .expect("write invalid fixture");
+        let err = BootstrapConfig::load(&invalid_path).unwrap_err();
+        assert!(matches!(err, LoadError::Validation(_)));
+
+        let dir_path = base.join("dir-as-file");
+        std::fs::create_dir_all(&dir_path).expect("make dir");
+        let err = BootstrapConfig::load(&dir_path).unwrap_err();
+        assert!(matches!(err, LoadError::Read { .. }));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

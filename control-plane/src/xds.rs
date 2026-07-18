@@ -406,3 +406,15 @@ fn cluster_response(
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructor_and_service_wrapper_are_usable() {
+        let sessions = Arc::new(SessionStore::new());
+        let server = AdsServer::new(sessions);
+        let _grpc = server.into_grpc_service();
+    }
+}

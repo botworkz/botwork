@@ -1012,7 +1012,7 @@ async fn spawn_new_container(
     let remaining = COLD_START_TIMEOUT.saturating_sub(elapsed);
     if remaining.is_zero()
         || !probe_ready(
-            &container_name,
+            &container_ip,
             descriptor.port,
             std::time::Duration::from_millis(200),
             remaining,

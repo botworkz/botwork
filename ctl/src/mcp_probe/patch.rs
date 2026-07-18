@@ -534,4 +534,23 @@ mod tests {
         );
         assert!(written.contains("--tag"), "args must include --tag out:tag");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn buildx_label_swallow_broken_pipe_and_reports_child_failure() {
+        let Ok(tmp) = tempfile::TempDir::new() else {
+            return;
+        };
+        write_fake_bin(
+            tmp.path(),
+            "docker",
+            "#!/bin/sh\necho 'fast fail' >&2\nexit 1\n",
+        );
+        let _guard = lock_path();
+        std::env::set_var("PATH", tmp.path());
+
+        let err = buildx_label("in:tag", "out:tag", &minimal_labels()).unwrap_err();
+        assert!(matches!(err, PatchError::BuildxFailed { .. }), "{err:?}");
+        assert!(format!("{err}").contains("fast fail"));
+    }
 }

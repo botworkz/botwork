@@ -162,6 +162,8 @@ pub enum VerifyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     // ── compare_labels_in_namespace ─────────────────────────────────────────
 
@@ -451,5 +453,35 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("missing"), "{msg}");
         assert!(msg.contains("extra"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_reads_runtime_output_and_matches_expected_namespace() {
+        let script = "#!/bin/sh\nprintf '%s' '[{\"Config\":{\"Labels\":{\"org.botwork.mcp.name\":\"echo\",\"org.botwork.mcp.port\":\"8000\",\"org.opencontainers.image.version\":\"1.0\"}}}]'\n";
+        let runtime_dir = tempfile::TempDir::new().expect("tempdir");
+        let runtime = runtime_dir.path().join("runtime");
+        std::fs::write(&runtime, script).expect("write runtime");
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut expected = BTreeMap::new();
+        expected.insert("org.botwork.mcp.name".into(), "echo".into());
+        expected.insert("org.botwork.mcp.port".into(), "8000".into());
+        verify("example:latest", runtime.to_str().unwrap(), &expected).expect("verify");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_surfaces_runtime_and_inspect_failures() {
+        let expected = BTreeMap::new();
+        let err = verify("example:latest", "/definitely/missing/runtime", &expected).unwrap_err();
+        assert!(matches!(err, VerifyError::RuntimeMissing(_)), "{err:?}");
+
+        let runtime_dir = tempfile::TempDir::new().expect("tempdir");
+        let runtime = runtime_dir.path().join("runtime");
+        std::fs::write(&runtime, "#!/bin/sh\necho 'no such image' >&2\nexit 1\n")
+            .expect("write runtime");
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let err = verify("example:latest", runtime.to_str().unwrap(), &expected).unwrap_err();
+        assert!(matches!(err, VerifyError::InspectFailed { .. }), "{err:?}");
     }
 }

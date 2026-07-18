@@ -220,6 +220,19 @@ mod tests {
         assert!(disabled_client.is_disabled());
     }
 
+    #[test]
+    fn from_env_honors_endpoint_override_and_true_spellings() {
+        let _guard = EnvGuard::capture();
+        std::env::set_var(ENDPOINT_ENV, "http://broker.example:9002");
+        std::env::set_var(DISABLE_ENV, "TRUE");
+        let client = SessionBrokerClient::from_env();
+        assert_eq!(client.endpoint, "http://broker.example:9002");
+        assert!(client.is_disabled());
+
+        std::env::set_var(DISABLE_ENV, "true");
+        assert!(SessionBrokerClient::from_env().is_disabled());
+    }
+
     #[tokio::test]
     async fn disabled_client_treats_evict_as_noop() {
         let client = SessionBrokerClient::disabled();
@@ -261,5 +274,11 @@ mod tests {
     async fn signal_evict_handles_failure_non_fatally() {
         let client = SessionBrokerClient::with_endpoint("http://127.0.0.1:1");
         signal_evict(&client, "phlax").await;
+    }
+
+    #[test]
+    fn evict_error_display_is_prefixed_for_logs() {
+        let err = EvictError("POST http://x returned 503: down".into());
+        assert!(format!("{err}").starts_with("session-broker evict failed: "));
     }
 }

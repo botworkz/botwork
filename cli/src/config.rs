@@ -549,4 +549,58 @@ mod tests {
             "expected InvalidServer from config file value, got {err:?}"
         );
     }
+
+    #[test]
+    fn resolve_config_path_prefers_explicit_env_over_xdg_and_home() {
+        let _lock = lock_env();
+        std::env::set_var(ENV_CONFIG_PATH, "/tmp/explicit-config.toml");
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-home");
+        std::env::set_var("HOME", "/tmp/home-dir");
+
+        assert_eq!(
+            resolve_config_path().as_deref(),
+            Some(std::path::Path::new("/tmp/explicit-config.toml"))
+        );
+
+        std::env::remove_var(ENV_CONFIG_PATH);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_xdg_then_home() {
+        let _lock = lock_env();
+        std::env::remove_var(ENV_CONFIG_PATH);
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-home");
+        std::env::set_var("HOME", "/tmp/home-dir");
+        assert_eq!(
+            resolve_config_path().as_deref(),
+            Some(std::path::Path::new("/tmp/xdg-home/botspace/config.toml"))
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(
+            resolve_config_path().as_deref(),
+            Some(std::path::Path::new(
+                "/tmp/home-dir/.config/botspace/config.toml"
+            ))
+        );
+
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn malformed_absolute_url_surfaces_parse_error() {
+        let _lock = lock_env();
+        std::env::remove_var(ENV_SERVER);
+        let cfg = Config::default();
+        let err = cfg
+            .resolve_server(Some("http://example.com::9100"))
+            .unwrap_err();
+        assert!(
+            matches!(err, LoginError::InvalidServer { ref value, .. } if value == "http://example.com::9100"),
+            "expected InvalidServer, got {err:?}"
+        );
+        assert!(err.to_string().contains("could not be parsed"), "{err}");
+    }
 }
