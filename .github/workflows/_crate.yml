@@ -1,8 +1,16 @@
 # Reusable per-crate CI workflow.
 #
-# Called from .github/workflows/ci.yml as a matrix fan-out so each
-# botwork container crate (session-broker, config-broker, control-plane,
-# db/migration, api, ui) gets its own runner.
+# Called from .github/workflows/ci.yml as a matrix fan-out so each crate
+# gets its own runner. Shared gates are always:
+#
+#   cargo fmt -p <package> -- --check
+#   cargo clippy -p <package> --all-targets --locked -- -D warnings
+#   cargo test -p <package> --locked
+#
+# Artifact behavior is controlled by one input:
+#   - `artifact: none`      -> gates only, publish nothing
+#   - `artifact: binary`    -> gates + release build + binary artifact upload
+#   - `artifact: container` -> existing container/image/smoke/artifact path
 #
 # Modelled after botworkz/mcp-extra's `_crate.yml`:
 #
@@ -50,6 +58,10 @@
 #                 `target/release/`. Usually identical to `package`
 #                 (single-bin crates); declared explicitly anyway so
 #                 the staging step is unambiguous.
+#   * artifact  — one of:
+#                   - none: gates only
+#                   - binary: release binary artifact
+#                   - container: existing image path
 #   * needs-db-migrate
 #               — whether the smoke test wants `botwork/db-migrate:local`
 #                 present locally as a fixture. Today only `api`
@@ -83,7 +95,14 @@ on:
       binary:
         description: >-
           Name of the binary cargo produces under `target/release/`.
-          Usually identical to `package`.
+          Usually identical to `package`. Required for artifact=binary
+          and artifact=container.
+        required: false
+        type: string
+        default: ''
+      artifact:
+        description: >-
+          Artifact tail for this crate: none, binary, or container.
         required: true
         type: string
       needs-db-migrate:
@@ -117,8 +136,24 @@ jobs:
       CRATE: ${{ inputs.crate }}
       PACKAGE: ${{ inputs.package }}
       BINARY: ${{ inputs.binary }}
+      ARTIFACT: ${{ inputs.artifact }}
     steps:
     - uses: actions/checkout@v4
+
+    - name: Validate artifact inputs
+      run: |
+        set -euo pipefail
+        case "${ARTIFACT}" in
+          none|binary|container) ;;
+          *)
+            echo "::error::artifact must be one of: none, binary, container"
+            exit 1
+            ;;
+        esac
+        if [ "${ARTIFACT}" != "none" ] && [ -z "${BINARY}" ]; then
+          echo "::error::binary input is required when artifact=${ARTIFACT}"
+          exit 1
+        fi
 
     # ── Cross-run cargo cache ───────────────────────────────────────────────
     # `Swatinem/rust-cache@v2` keys on `Cargo.lock` + the host rust
@@ -129,7 +164,40 @@ jobs:
       with:
         workspaces: . -> target
 
+    - name: Install Rust toolchain (non-container)
+      if: inputs.artifact != 'container'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: cargo fmt, clippy, test (host)
+      if: inputs.artifact != 'container'
+      env:
+        BOTWORK_GIT_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        cargo fmt -p "${PACKAGE}" -- --check
+        cargo clippy -p "${PACKAGE}" --all-targets --locked -- -D warnings
+        cargo test -p "${PACKAGE}" --locked
+
+    - name: cargo build (release)
+      if: inputs.artifact == 'binary'
+      env:
+        BOTWORK_GIT_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        cargo build -p "${PACKAGE}" --release --locked
+
+    - name: Upload release binary artifact
+      if: inputs.artifact == 'binary'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.package }}-binary
+        path: target/release/${{ inputs.binary }}
+        if-no-files-found: error
+
     - uses: docker/setup-buildx-action@v3
+      if: inputs.artifact == 'container'
 
     # ── Build the per-crate ci-tools image ──────────────────────────────────
     # `--target ci-tools` plucks the toolchain stage out of the same
@@ -137,6 +205,7 @@ jobs:
     # dep or an extra rustup component is therefore a one-place change
     # in the crate's Dockerfile, not a workflow edit here.
     - name: Build containerized CI toolchain
+      if: inputs.artifact == 'container'
       run: |
         set -euo pipefail
         docker buildx build \
@@ -159,6 +228,7 @@ jobs:
     # runs inside the same container so the wasm32 target and the
     # trunk binary are guaranteed present.
     - name: cargo fmt, clippy, test, build (in container)
+      if: inputs.artifact == 'container'
       env:
         NEEDS_DOCKER: ${{ inputs.needs-docker }}
       run: |
@@ -212,6 +282,7 @@ jobs:
     # here surfaces on the same runner that was about to publish the
     # image artifact, not on some separate `lint` job.
     - name: Install hadolint
+      if: inputs.artifact == 'container'
       run: |
         set -euo pipefail
         HADOLINT_VERSION=v2.12.0
@@ -221,6 +292,7 @@ jobs:
         hadolint --version
 
     - name: Lint Dockerfile
+      if: inputs.artifact == 'container'
       run: |
         set -euo pipefail
         hadolint --failure-threshold error "${CRATE}/Dockerfile"
@@ -232,6 +304,7 @@ jobs:
     # `.ci-prebuilt/db/migration/botwork-migration` and the simple cases
     # at `.ci-prebuilt/session-broker/botwork-session-broker` etc.
     - name: Stage prebuilt binary for Docker image
+      if: inputs.artifact == 'container'
       run: |
         set -euo pipefail
         mkdir -p ".ci-prebuilt/${CRATE}"
@@ -244,6 +317,7 @@ jobs:
     # it; CI uses prebuilt because the binary was already built (and
     # tested) on the host.
     - name: Build ${{ inputs.service }} image
+      if: inputs.artifact == 'container'
       run: |
         set -euo pipefail
         docker buildx build \
@@ -267,7 +341,7 @@ jobs:
     # db-migrate image artifact comes from the dedicated db-migrate
     # runner, not this fixture build.
     - name: Build db-migrate fixture image
-      if: inputs.needs-db-migrate
+      if: inputs.artifact == 'container' && inputs.needs-db-migrate
       run: |
         set -euo pipefail
         docker buildx build \
@@ -286,6 +360,7 @@ jobs:
     # this workflow; if a smoke needs a sidecar postgres / a curl client
     # / a network alias, the script owns it.
     - name: Smoke test ${{ inputs.service }}
+      if: inputs.artifact == 'container'
       run: |
         set -euo pipefail
         bash "${CRATE}/smoke.sh"
@@ -298,6 +373,7 @@ jobs:
     # All three are inspectable via `docker image inspect` without booting
     # the container — that's the point.
     - name: Verify OCI labels
+      if: inputs.artifact == 'container'
       run: |
         set -euo pipefail
         image="botwork/${SERVICE}:local"
@@ -341,6 +417,7 @@ jobs:
     # Without gzip the upload + same-run download for publish would
     # serialise ~7 × ~50 MiB.
     - name: Save runtime image as artifact
+      if: inputs.artifact == 'container'
       run: |
         set -euo pipefail
         mkdir -p .ci-images
@@ -349,6 +426,7 @@ jobs:
         ls -l ".ci-images/${SERVICE}.tar.gz"
 
     - name: Upload runtime image artifact
+      if: inputs.artifact == 'container'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.service }}-image
@@ -359,7 +437,8 @@ jobs:
     # Kept for downstream tooling that wants a bare binary (e.g. vm-side
     # integration tests that don't want to docker-load a whole image).
     # The publish path uses the image artifact above instead.
-    - name: Upload release binary
+    - name: Upload container binary artifact
+      if: inputs.artifact == 'container'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.crate == 'db/migration' && 'db-migration' || inputs.crate }}-binary
@@ -382,5 +461,8 @@ jobs:
           echo "| service | \`${SERVICE}\` |"
           echo "| package | \`${PACKAGE}\` |"
           echo "| binary  | \`${BINARY}\` |"
-          echo "| image   | \`botwork/${SERVICE}:local\` |"
+          echo "| artifact | \`${ARTIFACT}\` |"
+          if [ "${ARTIFACT}" = "container" ]; then
+            echo "| image   | \`botwork/${SERVICE}:local\` |"
+          fi
         } >> "${GITHUB_STEP_SUMMARY}"
