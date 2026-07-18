@@ -226,8 +226,56 @@ impl BootstrapError {
 
 #[cfg(test)]
 mod tests {
-    use super::summary_message;
+    use std::sync::Mutex;
+
+    use super::{
+        help_text, summary_message, Args, BootstrapError, CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH,
+        DEFAULT_ENDPOINT, DEFAULT_OPERATOR, ENDPOINT_ENV,
+    };
     use crate::bootstrap::apply::ApplyOutcome;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Serialise all env-var-touching tests within this module and
+    /// restore each variable on drop (handles assertion failures too).
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        /// Snapshot the current values of `vars`, then apply `ops`
+        /// (key, Some(value) = set, None = remove).
+        fn apply(ops: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = ops
+                .iter()
+                .map(|(k, _)| (*k, std::env::var(k).ok()))
+                .collect();
+            for (k, v) in ops {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
 
     #[test]
     fn summary_message_preserves_operator_facing_text() {
@@ -252,5 +300,170 @@ mod tests {
             summary_message(&outcome, true),
             "[bootstrap] would apply: tenants=1/2 workspaces=2/3 plugins=1/4 bindings=2/5"
         );
+    }
+
+    // --- Args::from_argv: flag parsing ---
+
+    #[test]
+    fn empty_argv_uses_all_defaults() {
+        // Remove env vars that would override the defaults so the
+        // test is hermetic regardless of what the runner's env has set.
+        let _g = EnvGuard::apply(&[(CONFIG_PATH_ENV, None), (ENDPOINT_ENV, None)]);
+
+        let args = Args::from_argv(&argv(&[])).expect("parse");
+        assert_eq!(
+            args.config_path.to_str().unwrap(),
+            DEFAULT_CONFIG_PATH,
+            "default config path"
+        );
+        assert_eq!(args.endpoint, DEFAULT_ENDPOINT, "default endpoint");
+        assert_eq!(args.operator, DEFAULT_OPERATOR, "default operator");
+        assert!(!args.dry_run, "dry_run defaults to false");
+    }
+
+    #[test]
+    fn config_flag_overrides_default() {
+        let args = Args::from_argv(&argv(&["--config", "/tmp/my-bootstrap.yaml"])).expect("parse");
+        assert_eq!(args.config_path.to_str().unwrap(), "/tmp/my-bootstrap.yaml");
+    }
+
+    #[test]
+    fn endpoint_flag_overrides_default() {
+        let args = Args::from_argv(&argv(&["--endpoint", "http://localhost:9400"])).expect("parse");
+        assert_eq!(args.endpoint, "http://localhost:9400");
+    }
+
+    #[test]
+    fn operator_flag_sets_operator() {
+        let args = Args::from_argv(&argv(&["--operator", "test-operator"])).expect("parse");
+        assert_eq!(args.operator, "test-operator");
+    }
+
+    #[test]
+    fn dry_run_flag_sets_dry_run() {
+        let args = Args::from_argv(&argv(&["--dry-run"])).expect("parse");
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn all_flags_together() {
+        let args = Args::from_argv(&argv(&[
+            "--config",
+            "/etc/bootstrap.yaml",
+            "--endpoint",
+            "http://api:9400",
+            "--operator",
+            "ci-bot",
+            "--dry-run",
+        ]))
+        .expect("parse");
+        assert_eq!(args.config_path.to_str().unwrap(), "/etc/bootstrap.yaml");
+        assert_eq!(args.endpoint, "http://api:9400");
+        assert_eq!(args.operator, "ci-bot");
+        assert!(args.dry_run);
+    }
+
+    // --- Args::from_argv: help / usage branches ---
+
+    #[test]
+    fn dash_h_returns_usage_error_with_exit_code_zero() {
+        let err = Args::from_argv(&argv(&["-h"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::Usage(_)));
+        assert_eq!(err.exit_code(), 0);
+    }
+
+    #[test]
+    fn dash_dash_help_returns_usage_error_with_exit_code_zero() {
+        let err = Args::from_argv(&argv(&["--help"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::Usage(_)));
+        assert_eq!(err.exit_code(), 0);
+    }
+
+    // --- Args::from_argv: error cases ---
+
+    #[test]
+    fn unknown_flag_returns_invalid_usage() {
+        let err = Args::from_argv(&argv(&["--frobnicate"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::InvalidUsage(_)));
+        assert_eq!(err.exit_code(), 2);
+        let msg = format!("{err}");
+        assert!(msg.contains("frobnicate"), "{msg}");
+    }
+
+    #[test]
+    fn missing_value_for_config_flag_returns_invalid_usage() {
+        let err = Args::from_argv(&argv(&["--config"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::InvalidUsage(_)));
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn missing_value_for_endpoint_flag_returns_invalid_usage() {
+        let err = Args::from_argv(&argv(&["--endpoint"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::InvalidUsage(_)));
+    }
+
+    #[test]
+    fn missing_value_for_operator_flag_returns_invalid_usage() {
+        let err = Args::from_argv(&argv(&["--operator"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::InvalidUsage(_)));
+    }
+
+    // --- Env-var fallbacks ---
+
+    #[test]
+    fn config_path_env_var_used_when_no_flag() {
+        let _g = EnvGuard::apply(&[
+            (CONFIG_PATH_ENV, Some("/env/bootstrap.yaml")),
+            (ENDPOINT_ENV, None),
+        ]);
+        let args = Args::from_argv(&argv(&[])).expect("parse");
+        assert_eq!(args.config_path.to_str().unwrap(), "/env/bootstrap.yaml");
+    }
+
+    #[test]
+    fn endpoint_env_var_used_when_no_flag() {
+        let _g = EnvGuard::apply(&[
+            (CONFIG_PATH_ENV, None),
+            (ENDPOINT_ENV, Some("http://env-api:9400")),
+        ]);
+        let args = Args::from_argv(&argv(&[])).expect("parse");
+        assert_eq!(args.endpoint, "http://env-api:9400");
+    }
+
+    #[test]
+    fn explicit_flag_takes_priority_over_env_var() {
+        let _g = EnvGuard::apply(&[(CONFIG_PATH_ENV, Some("/env/bootstrap.yaml"))]);
+        let args = Args::from_argv(&argv(&["--config", "/flag/override.yaml"])).expect("parse");
+        assert_eq!(args.config_path.to_str().unwrap(), "/flag/override.yaml");
+    }
+
+    // --- help_text ---
+
+    #[test]
+    fn help_text_mentions_all_flags() {
+        let text = help_text();
+        assert!(text.contains("--config"), "{text}");
+        assert!(text.contains("--endpoint"), "{text}");
+        assert!(text.contains("--operator"), "{text}");
+        assert!(text.contains("--dry-run"), "{text}");
+    }
+
+    #[test]
+    fn help_text_mentions_exit_codes() {
+        let text = help_text();
+        assert!(text.contains("Exit codes"), "{text}");
+    }
+
+    // --- BootstrapError::exit_code ---
+
+    #[test]
+    fn usage_exit_code_is_zero() {
+        assert_eq!(BootstrapError::Usage("help").exit_code(), 0);
+    }
+
+    #[test]
+    fn invalid_usage_exit_code_is_2() {
+        assert_eq!(BootstrapError::InvalidUsage("bad flag").exit_code(), 2);
     }
 }

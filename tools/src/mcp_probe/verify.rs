@@ -157,6 +157,20 @@ mod tests {
     }
 
     #[test]
+    fn filter_namespace_with_empty_map_returns_empty() {
+        let empty: BTreeMap<String, String> = BTreeMap::new();
+        assert!(filter_namespace(&empty).is_empty());
+    }
+
+    #[test]
+    fn filter_namespace_with_no_matching_keys_returns_empty() {
+        let mut all = BTreeMap::new();
+        all.insert("com.example.other".into(), "v1".into());
+        all.insert("org.opencontainers.image.title".into(), "my-image".into());
+        assert!(filter_namespace(&all).is_empty());
+    }
+
+    #[test]
     fn diff_reports_missing_changed_and_extra() {
         let mut actual = BTreeMap::new();
         actual.insert("org.botwork.mcp.name".into(), "echo".into());
@@ -190,6 +204,30 @@ mod tests {
     }
 
     #[test]
+    fn diff_all_missing_when_actual_is_empty() {
+        let actual: BTreeMap<String, String> = BTreeMap::new();
+        let mut expected = BTreeMap::new();
+        expected.insert("org.botwork.mcp.name".into(), "echo".into());
+        expected.insert("org.botwork.mcp.tools.count".into(), "1".into());
+
+        let drift = diff(&actual, &expected);
+        assert_eq!(drift.len(), 2);
+        assert!(drift.iter().all(|d| d.starts_with("missing:")), "{drift:?}");
+    }
+
+    #[test]
+    fn diff_all_extra_when_expected_is_empty() {
+        let mut actual = BTreeMap::new();
+        actual.insert("org.botwork.mcp.name".into(), "echo".into());
+        actual.insert("org.botwork.mcp.tools.count".into(), "1".into());
+        let expected: BTreeMap<String, String> = BTreeMap::new();
+
+        let drift = diff(&actual, &expected);
+        assert_eq!(drift.len(), 2);
+        assert!(drift.iter().all(|d| d.starts_with("extra:")), "{drift:?}");
+    }
+
+    #[test]
     fn drift_error_renders_diff_lines() {
         let err = VerifyError::Drift {
             drift: vec!["missing: org.botwork.mcp.name=echo".into()],
@@ -197,5 +235,52 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("missing"), "{msg}");
         assert!(msg.contains("org.botwork.mcp.name"), "{msg}");
+    }
+
+    // --- VerifyError display for all variants ---
+
+    #[test]
+    fn verify_error_runtime_missing_display() {
+        let err = VerifyError::RuntimeMissing("podman".into());
+        let msg = format!("{err}");
+        assert!(msg.contains("podman"), "{msg}");
+    }
+
+    #[test]
+    fn verify_error_io_display() {
+        let err = VerifyError::Io("connection refused".into());
+        let msg = format!("{err}");
+        assert!(msg.contains("connection refused"), "{msg}");
+    }
+
+    #[test]
+    fn verify_error_inspect_failed_display() {
+        let err = VerifyError::InspectFailed {
+            image: "my-image:latest".into(),
+            stderr: "no such image".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("my-image:latest"), "{msg}");
+        assert!(msg.contains("no such image"), "{msg}");
+    }
+
+    #[test]
+    fn verify_error_inspect_shape_display() {
+        let err = VerifyError::InspectShape("Config.Labels is not an object".into());
+        let msg = format!("{err}");
+        assert!(msg.contains("Config.Labels"), "{msg}");
+    }
+
+    #[test]
+    fn verify_error_drift_with_multiple_lines() {
+        let err = VerifyError::Drift {
+            drift: vec![
+                "missing: org.botwork.mcp.name=echo".into(),
+                "extra:   org.botwork.mcp.stale (not in re-probed label set)".into(),
+            ],
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("missing"), "{msg}");
+        assert!(msg.contains("extra"), "{msg}");
     }
 }
