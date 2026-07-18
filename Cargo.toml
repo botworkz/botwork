@@ -14,7 +14,7 @@ members = [
     "launcher",
     "opaque-handshake",
     "session-broker",
-    "botctl",
+    "ctl",
     "version",
 ]
 
@@ -36,7 +36,7 @@ default-members = [
     "db/migration",
     "launcher",
     "session-broker",
-    "botctl",
+    "ctl",
     "version",
 ]
 

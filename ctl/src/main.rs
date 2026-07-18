@@ -6,7 +6,7 @@ fn main() {
         args.get(1).map(String::as_str),
         Some("--version") | Some("-V")
     ) {
-        writeln!(std::io::stdout(), "botctl {}", botctl::version_string())
+        writeln!(std::io::stdout(), "botctl {}", botwork_ctl::version_string())
             .expect("failed to write version output");
         std::process::exit(0);
     }
@@ -19,5 +19,5 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    std::process::exit(botctl::run_with_args(args));
+    std::process::exit(botwork_ctl::run_with_args(args));
 }

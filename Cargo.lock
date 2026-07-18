@@ -482,30 +482,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "botctl"
-version = "0.0.0"
-dependencies = [
- "botwork-api-core",
- "botwork-version",
- "chrono",
- "http-body-util",
- "hyper",
- "hyper-util",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wiremock",
-]
-
-[[package]]
 name = "botwork-api"
 version = "0.0.0"
 dependencies = [
@@ -663,6 +639,30 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "botwork-ctl"
+version = "0.0.0"
+dependencies = [
+ "botwork-api-core",
+ "botwork-version",
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]

@@ -6,10 +6,10 @@
 //! a known shape).
 //!
 //! The headline scenario is `compose_pipeline_against_in_process_server`:
-//! exercises [`botctl::mcp_probe::probe::handshake`] against a
+//! exercises [`botwork_ctl::mcp_probe::probe::handshake`] against a
 //! hyper server that answers `initialize`, `notifications/initialized`,
 //! and `tools/list`, then runs the captured catalog through
-//! [`botctl::mcp_probe::compose::compose`] and asserts the
+//! [`botwork_ctl::mcp_probe::compose::compose`] and asserts the
 //! full label set matches the v1 schema. No docker, no patch, no
 //! verify — proves the probe→compose pipe end-to-end without a
 //! container runtime in CI.
@@ -38,9 +38,9 @@ use serde_json::{json, Value as JsonValue};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-use botctl::mcp_probe::compose::compose;
-use botctl::mcp_probe::probe::handshake;
-use botctl::VERSION;
+use botwork_ctl::mcp_probe::compose::compose;
+use botwork_ctl::mcp_probe::probe::handshake;
+use botwork_ctl::VERSION;
 use botwork_api_core::package::{Isolation, PackageFileEntry, SpillEntry, SpillMode};
 
 /// Spin a fake MCP server on a random local port. Returns the URL
