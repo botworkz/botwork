@@ -226,6 +226,8 @@ impl BootstrapError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::{
         help_text, summary_message, Args, BootstrapError, CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH,
         DEFAULT_ENDPOINT, DEFAULT_OPERATOR, ENDPOINT_ENV,
@@ -234,6 +236,45 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Serialise all env-var-touching tests within this module and
+    /// restore each variable on drop (handles assertion failures too).
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        /// Snapshot the current values of `vars`, then apply `ops`
+        /// (key, Some(value) = set, None = remove).
+        fn apply(ops: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = ops
+                .iter()
+                .map(|(k, _)| (*k, std::env::var(k).ok()))
+                .collect();
+            for (k, v) in ops {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]
@@ -267,8 +308,7 @@ mod tests {
     fn empty_argv_uses_all_defaults() {
         // Remove env vars that would override the defaults so the
         // test is hermetic regardless of what the runner's env has set.
-        std::env::remove_var(CONFIG_PATH_ENV);
-        std::env::remove_var(ENDPOINT_ENV);
+        let _g = EnvGuard::apply(&[(CONFIG_PATH_ENV, None), (ENDPOINT_ENV, None)]);
 
         let args = Args::from_argv(&argv(&[])).expect("parse");
         assert_eq!(
@@ -373,27 +413,28 @@ mod tests {
 
     #[test]
     fn config_path_env_var_used_when_no_flag() {
-        std::env::set_var(CONFIG_PATH_ENV, "/env/bootstrap.yaml");
-        std::env::remove_var(ENDPOINT_ENV);
+        let _g = EnvGuard::apply(&[
+            (CONFIG_PATH_ENV, Some("/env/bootstrap.yaml")),
+            (ENDPOINT_ENV, None),
+        ]);
         let args = Args::from_argv(&argv(&[])).expect("parse");
-        std::env::remove_var(CONFIG_PATH_ENV);
         assert_eq!(args.config_path.to_str().unwrap(), "/env/bootstrap.yaml");
     }
 
     #[test]
     fn endpoint_env_var_used_when_no_flag() {
-        std::env::remove_var(CONFIG_PATH_ENV);
-        std::env::set_var(ENDPOINT_ENV, "http://env-api:9400");
+        let _g = EnvGuard::apply(&[
+            (CONFIG_PATH_ENV, None),
+            (ENDPOINT_ENV, Some("http://env-api:9400")),
+        ]);
         let args = Args::from_argv(&argv(&[])).expect("parse");
-        std::env::remove_var(ENDPOINT_ENV);
         assert_eq!(args.endpoint, "http://env-api:9400");
     }
 
     #[test]
     fn explicit_flag_takes_priority_over_env_var() {
-        std::env::set_var(CONFIG_PATH_ENV, "/env/bootstrap.yaml");
+        let _g = EnvGuard::apply(&[(CONFIG_PATH_ENV, Some("/env/bootstrap.yaml"))]);
         let args = Args::from_argv(&argv(&["--config", "/flag/override.yaml"])).expect("parse");
-        std::env::remove_var(CONFIG_PATH_ENV);
         assert_eq!(args.config_path.to_str().unwrap(), "/flag/override.yaml");
     }
 
