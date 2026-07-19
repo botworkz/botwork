@@ -166,6 +166,7 @@ pub(crate) fn is_not_found(e: &BollardError) -> bool {
 pub(crate) mod test_support {
     use super::*;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     type Queue<T> = Arc<Mutex<VecDeque<Result<T, BollardError>>>>;
@@ -248,6 +249,99 @@ pub(crate) mod test_support {
             _labels: HashMap<String, String>,
         ) -> BoxFuture<'a, Result<String, BollardError>> {
             async move { dequeue(&self.commit_container_q, "commit_container") }.boxed()
+        }
+    }
+
+    // ── SpyDocker ────────────────────────────────────────────────────────────
+
+    /// Configurable spy for `DockerApi` that records calls and captures
+    /// committed labels.
+    ///
+    /// - `inspect_image` returns the provided `ImageInspect` (cloned each call).
+    /// - `create_container` returns a canned container ID without starting.
+    /// - `start_container` panics — `patch_image_impl` must never start.
+    /// - `remove_container` records that it was called via an `AtomicBool`.
+    /// - `commit_container` captures the label map and returns `Ok` or an
+    ///   error depending on whether `.with_commit_failure()` was called.
+    pub(crate) struct SpyDocker {
+        inspect_result: ImageInspect,
+        committed_labels: Arc<Mutex<Option<HashMap<String, String>>>>,
+        removed: Arc<AtomicBool>,
+        commit_fail: bool,
+    }
+
+    impl SpyDocker {
+        pub fn new(inspect_result: ImageInspect) -> Self {
+            Self {
+                inspect_result,
+                committed_labels: Arc::new(Mutex::new(None)),
+                removed: Arc::new(AtomicBool::new(false)),
+                commit_fail: false,
+            }
+        }
+
+        /// Make `commit_container` return a 500 server error.
+        pub fn with_commit_failure(mut self) -> Self {
+            self.commit_fail = true;
+            self
+        }
+
+        /// Returns an `Arc` to the captured label map so callers can read it
+        /// after the call.
+        pub fn committed_labels(&self) -> Arc<Mutex<Option<HashMap<String, String>>>> {
+            Arc::clone(&self.committed_labels)
+        }
+
+        /// Returns `true` if `remove_container` was called at least once.
+        pub fn was_removed(&self) -> bool {
+            self.removed.load(Ordering::SeqCst)
+        }
+    }
+
+    impl DockerApi for SpyDocker {
+        fn inspect_image<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> BoxFuture<'a, Result<ImageInspect, BollardError>> {
+            let result = self.inspect_result.clone();
+            async move { Ok(result) }.boxed()
+        }
+
+        fn create_container<'a>(
+            &'a self,
+            _config: ContainerCreateBody,
+        ) -> BoxFuture<'a, Result<String, BollardError>> {
+            async { Ok("spy-container".to_string()) }.boxed()
+        }
+
+        fn start_container<'a>(&'a self, _id: &'a str) -> BoxFuture<'a, Result<(), BollardError>> {
+            async { unreachable!("patch_image_impl never starts the container") }.boxed()
+        }
+
+        fn remove_container<'a>(&'a self, _id: &'a str) -> BoxFuture<'a, Result<(), BollardError>> {
+            self.removed.store(true, Ordering::SeqCst);
+            async { Ok(()) }.boxed()
+        }
+
+        fn commit_container<'a>(
+            &'a self,
+            _container_id: &'a str,
+            _repo: &'a str,
+            _tag: &'a str,
+            labels: HashMap<String, String>,
+        ) -> BoxFuture<'a, Result<String, BollardError>> {
+            *self.committed_labels.lock().unwrap() = Some(labels);
+            if self.commit_fail {
+                async {
+                    Err(BollardError::DockerResponseServerError {
+                        status_code: 500,
+                        message: "commit error".into(),
+                    })
+                }
+                .boxed()
+            } else {
+                async { Ok("sha256:spy".to_string()) }.boxed()
+            }
         }
     }
 }

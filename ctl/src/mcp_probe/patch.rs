@@ -75,7 +75,11 @@ async fn patch_image_impl<D: DockerApi + ?Sized>(
             .map(|(key, value)| (key.clone(), value.clone())),
     );
 
-    // 1. Create a stopped container from image_in (don't start it).
+    // 1. Create a stopped container from image_in.  We deliberately do not
+    //    start it: a label-only commit snapshots the container's config, which
+    //    is seeded from the source image (entrypoint, env, and — after the
+    //    merge step above — the merged label set).  No running process is
+    //    required; the commit captures the image config as-is.
     let body = ContainerCreateBody {
         image: Some(image_in.to_string()),
         ..Default::default()
@@ -231,68 +235,9 @@ mod tests {
 
     #[tokio::test]
     async fn patch_fails_when_commit_fails_and_still_removes_container() {
-        use bollard::errors::Error as BollardError;
-        use bollard::models::{ContainerCreateBody, ImageInspect};
-        use futures_util::future::BoxFuture;
-        use futures_util::FutureExt;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
+        use crate::mcp_probe::docker::test_support::SpyDocker;
 
-        struct SpyDocker {
-            removed: Arc<AtomicBool>,
-        }
-
-        impl DockerApi for SpyDocker {
-            fn inspect_image<'a>(
-                &'a self,
-                _name: &'a str,
-            ) -> BoxFuture<'a, Result<ImageInspect, BollardError>> {
-                async { Ok(inspect_with_labels(Some(HashMap::new()))) }.boxed()
-            }
-
-            fn create_container<'a>(
-                &'a self,
-                _config: ContainerCreateBody,
-            ) -> BoxFuture<'a, Result<String, BollardError>> {
-                async { Ok("tmp-id".to_string()) }.boxed()
-            }
-
-            fn start_container<'a>(
-                &'a self,
-                _id: &'a str,
-            ) -> BoxFuture<'a, Result<(), BollardError>> {
-                async { panic!("unexpected") }.boxed()
-            }
-
-            fn remove_container<'a>(
-                &'a self,
-                _id: &'a str,
-            ) -> BoxFuture<'a, Result<(), BollardError>> {
-                self.removed.store(true, Ordering::SeqCst);
-                async { Ok(()) }.boxed()
-            }
-
-            fn commit_container<'a>(
-                &'a self,
-                _container_id: &'a str,
-                _repo: &'a str,
-                _tag: &'a str,
-                _labels: HashMap<String, String>,
-            ) -> BoxFuture<'a, Result<String, BollardError>> {
-                async {
-                    Err(BollardError::DockerResponseServerError {
-                        status_code: 500,
-                        message: "commit error".into(),
-                    })
-                }
-                .boxed()
-            }
-        }
-
-        let removed = Arc::new(AtomicBool::new(false));
-        let spy = SpyDocker {
-            removed: Arc::clone(&removed),
-        };
+        let spy = SpyDocker::new(inspect_with_labels(Some(HashMap::new()))).with_commit_failure();
 
         let err = patch_image_impl("in:latest", "out:labeled", &two_labels(), &spy)
             .await
@@ -301,8 +246,8 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("commit"), "{msg}");
         assert!(
-            removed.load(Ordering::SeqCst),
-            "remove_container should run"
+            spy.was_removed(),
+            "remove_container should run even when commit fails"
         );
     }
 
@@ -310,59 +255,10 @@ mod tests {
     /// `commit_container` as a label on the new image config.
     #[tokio::test]
     async fn patch_passes_all_labels_to_commit() {
-        use crate::mcp_probe::docker::DockerApi;
-        use bollard::errors::Error as BollardError;
-        use bollard::models::{ContainerCreateBody, ImageInspect};
-        use futures_util::future::BoxFuture;
-        use futures_util::FutureExt;
-        use std::collections::HashMap;
-        use std::sync::{Arc, Mutex};
+        use crate::mcp_probe::docker::test_support::SpyDocker;
 
-        // Spy docker that captures the labels passed to commit_container.
-        #[derive(Default)]
-        struct SpyDocker {
-            committed_labels: Arc<Mutex<Option<HashMap<String, String>>>>,
-        }
-
-        impl DockerApi for SpyDocker {
-            fn inspect_image<'a>(
-                &'a self,
-                _name: &'a str,
-            ) -> BoxFuture<'a, Result<ImageInspect, BollardError>> {
-                async { Ok(inspect_with_labels(Some(HashMap::new()))) }.boxed()
-            }
-            fn create_container<'a>(
-                &'a self,
-                _config: ContainerCreateBody,
-            ) -> BoxFuture<'a, Result<String, BollardError>> {
-                async { Ok("spy-container".to_string()) }.boxed()
-            }
-            fn start_container<'a>(
-                &'a self,
-                _id: &'a str,
-            ) -> BoxFuture<'a, Result<(), BollardError>> {
-                async { panic!("unexpected") }.boxed()
-            }
-            fn remove_container<'a>(
-                &'a self,
-                _id: &'a str,
-            ) -> BoxFuture<'a, Result<(), BollardError>> {
-                async { Ok(()) }.boxed()
-            }
-            fn commit_container<'a>(
-                &'a self,
-                _container_id: &'a str,
-                _repo: &'a str,
-                _tag: &'a str,
-                labels: HashMap<String, String>,
-            ) -> BoxFuture<'a, Result<String, BollardError>> {
-                *self.committed_labels.lock().unwrap() = Some(labels);
-                async { Ok("sha256:spy".to_string()) }.boxed()
-            }
-        }
-
-        let spy = SpyDocker::default();
-        let captured = Arc::clone(&spy.committed_labels);
+        let spy = SpyDocker::new(inspect_with_labels(Some(HashMap::new())));
+        let captured = spy.committed_labels();
         let labels = two_labels();
         patch_image_impl("in:latest", "out:tag", &labels, &spy)
             .await
@@ -382,71 +278,17 @@ mod tests {
 
     #[tokio::test]
     async fn patch_merges_source_image_labels_before_commit() {
-        use crate::mcp_probe::docker::DockerApi;
-        use bollard::errors::Error as BollardError;
-        use bollard::models::{ContainerCreateBody, ImageInspect};
-        use futures_util::future::BoxFuture;
-        use futures_util::FutureExt;
-        use std::sync::{Arc, Mutex};
+        use crate::mcp_probe::docker::test_support::SpyDocker;
 
-        #[derive(Default)]
-        struct SpyDocker {
-            committed_labels: Arc<Mutex<Option<HashMap<String, String>>>>,
-        }
-
-        impl DockerApi for SpyDocker {
-            fn inspect_image<'a>(
-                &'a self,
-                _name: &'a str,
-            ) -> BoxFuture<'a, Result<ImageInspect, BollardError>> {
-                async {
-                    Ok(inspect_with_labels(Some(HashMap::from([
-                        (
-                            "org.opencontainers.image.title".to_string(),
-                            "base".to_string(),
-                        ),
-                        ("keep.me".to_string(), "1".to_string()),
-                        ("overlap".to_string(), "base-value".to_string()),
-                    ]))))
-                }
-                .boxed()
-            }
-
-            fn create_container<'a>(
-                &'a self,
-                _config: ContainerCreateBody,
-            ) -> BoxFuture<'a, Result<String, BollardError>> {
-                async { Ok("spy-container".to_string()) }.boxed()
-            }
-
-            fn start_container<'a>(
-                &'a self,
-                _id: &'a str,
-            ) -> BoxFuture<'a, Result<(), BollardError>> {
-                async { panic!("unexpected") }.boxed()
-            }
-
-            fn remove_container<'a>(
-                &'a self,
-                _id: &'a str,
-            ) -> BoxFuture<'a, Result<(), BollardError>> {
-                async { Ok(()) }.boxed()
-            }
-
-            fn commit_container<'a>(
-                &'a self,
-                _container_id: &'a str,
-                _repo: &'a str,
-                _tag: &'a str,
-                labels: HashMap<String, String>,
-            ) -> BoxFuture<'a, Result<String, BollardError>> {
-                *self.committed_labels.lock().unwrap() = Some(labels);
-                async { Ok("sha256:spy".to_string()) }.boxed()
-            }
-        }
-
-        let spy = SpyDocker::default();
-        let captured = Arc::clone(&spy.committed_labels);
+        let spy = SpyDocker::new(inspect_with_labels(Some(HashMap::from([
+            (
+                "org.opencontainers.image.title".to_string(),
+                "base".to_string(),
+            ),
+            ("keep.me".to_string(), "1".to_string()),
+            ("overlap".to_string(), "base-value".to_string()),
+        ]))));
+        let captured = spy.committed_labels();
         let mut labels = two_labels();
         labels.insert("overlap".to_string(), "new-value".to_string());
 
