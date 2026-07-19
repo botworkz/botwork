@@ -4,7 +4,8 @@
 #
 # Local reproduction:
 #
-#   earthly +db-migrate-image
+#   docker buildx build --platform linux/amd64 --load \
+#     -t botwork/db-migrate:local -f db/migration/Dockerfile .
 #   bash db/migration/smoke.sh
 
 set -euo pipefail

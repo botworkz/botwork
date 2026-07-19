@@ -1328,6 +1328,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_workspace_invalid_uuid_is_bad_request() {
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_tenant(tenant_row(Uuid::new_v4(), "phlax")),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get(
+                "/api/tenant/phlax/workspaces/not-a-valid-uuid",
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn get_workspace_plugin_invalid_plugin_id_uuid_is_bad_request() {
+        // workspace_id is a valid UUID but plugin_id is garbage — hits the
+        // second Uuid::from_str at line 277.
+        let tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_workspace(workspace_row(workspace_id, tenant_id, "mcp")),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/not-a-uuid"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn get_workspace_plugin_cross_tenant_workspace_returns_not_found() {
+        // workspace exists but belongs to a different tenant — ownership
+        // check at line 286-290 fires.
+        let path_tenant_id = Uuid::new_v4();
+        let other_tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(path_tenant_id, "phlax"))
+                // workspace belongs to *other* tenant
+                .with_workspace(workspace_row(workspace_id, other_tenant_id, "mcp")),
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(response).await["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn list_session_workers_invalid_agent_session_id_is_bad_request() {
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get(
+                "/api/tenant/phlax/session_workers?agent_session_id=garbage",
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn get_session_worker_returns_not_found_when_session_missing() {
+        // Worker has a non-null agent_session_id but that session does not
+        // exist in the store — or_not_found at line 454 fires.
+        let tenant_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4(); // a real UUID but NOT seeded
+        let plugin_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                .with_session_worker(session_worker_row(worker_id, Some(session_id), plugin_id)),
+            // Note: session_id is NOT seeded, so get_agent_session → None
+        );
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/session_workers/{worker_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(response).await["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
     async fn get_session_worker_invalid_uuid_and_unbound_worker() {
         let tenant_id = Uuid::new_v4();
         let worker_id = Uuid::new_v4();

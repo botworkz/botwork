@@ -9,7 +9,7 @@
 #
 #   * `ci.yml` stays event-clean (`push`, `pull_request`,
 #     `workflow_dispatch` only). Adding `release: [published]` there
-#     would fire every container matrix job + release-binaries job on a
+#     would fire every container matrix job on a
 #     release event too, only to be skipped — noisy in the dashboard.
 #
 #   * The bump logic is tiny and unrelated to the publish path. Two
@@ -18,7 +18,7 @@
 #
 # Loop: `bump` pushes a new `-dev` VERSION to main → that push triggers
 # `ci.yml` → `ci.yml`'s `publish` job's VERSION gate sees the `-dev`
-# suffix → publish is a no-op. The matrix + release-binaries still run
+# suffix → publish is a no-op. The matrix still runs
 # (preserves CI surface on -dev pushes).
 
 name: VERSION bump

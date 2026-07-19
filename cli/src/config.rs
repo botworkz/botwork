@@ -625,4 +625,59 @@ mod tests {
         );
         assert!(err.to_string().contains("could not be parsed"), "{err}");
     }
+
+    // ── additional coverage for uncovered branches ──────────────────
+
+    #[test]
+    fn config_load_returns_default_when_no_path_available() {
+        // When ENV_CONFIG_PATH, XDG_CONFIG_HOME, and HOME are all unset,
+        // resolve_config_path() returns None and Config::load() returns the
+        // default (line 93).
+        let _lock = lock_env();
+        std::env::remove_var(ENV_CONFIG_PATH);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
+
+        let cfg = Config::load().expect("load with no config path should succeed");
+        assert!(cfg.server.is_none(), "default config has no server");
+        assert!(cfg.tenants.is_empty(), "default config has no tenants");
+    }
+
+    #[test]
+    fn config_load_reads_file_when_env_path_is_set() {
+        // When ENV_CONFIG_PATH points to a real file, Config::load()
+        // falls into the Some(path) arm (line 94-95) and calls load_from.
+        let _lock = lock_env();
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("login_config.toml");
+        std::fs::write(&config_path, "server = \"http://from-load:9100\"\n").unwrap();
+        std::env::set_var(ENV_CONFIG_PATH, config_path.as_os_str());
+
+        let cfg = Config::load().expect("load with valid config file should succeed");
+        assert_eq!(
+            cfg.server.as_deref(),
+            Some("http://from-load:9100"),
+            "server should come from the file"
+        );
+
+        std::env::remove_var(ENV_CONFIG_PATH);
+    }
+
+    #[test]
+    fn load_from_non_not_found_io_error_surfaces_as_config_error() {
+        // Passing a directory path to load_from returns EISDIR (not NotFound),
+        // so the generic Err arm at lines 106-108 fires.
+        let dir = TempDir::new().unwrap();
+        // dir.path() is a directory — read_to_string on a directory fails
+        // with an OS error that is not ErrorKind::NotFound.
+        let err = Config::load_from(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, LoginError::Config(_)),
+            "expected Config error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("failed to read"),
+            "error should mention the path: {err}"
+        );
+    }
 }

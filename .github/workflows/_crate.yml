@@ -6,6 +6,7 @@
 #   cargo fmt -p <package> -- --check
 #   cargo clippy -p <package> --all-targets --locked -- -D warnings
 #   cargo test -p <package> --locked
+#   per-crate coverage (llvm profraw + lcov)
 #
 # Artifact behavior is controlled by one input:
 #   - `artifact: none`      -> gates only, publish nothing
@@ -48,9 +49,9 @@
 #                 workspace tree; for `db/migration` and `ui`
 #                 (where the image covers two crates) it's the directory
 #                 that owns the Dockerfile.
-#   * service   — image suffix (`botwork/<service>:local`) and earthly
-#                 target name. Differs from `crate` for `db/migration`
-#                 (`db-migrate`); uniform for the rest.
+#   * service   — image suffix (`botwork/<service>:local`). Differs from
+#                 `crate` for `db/migration` (`db-migrate`); uniform for
+#                 the rest.
 #   * package   — cargo workspace package the image wraps
 #                 (`botwork-session-broker`, …). Passed to `cargo fmt/
 #                 clippy/test/build -p ${package}`.
@@ -84,7 +85,7 @@ on:
         type: string
       service:
         description: >-
-          Image suffix (`botwork/<service>:local`) and earthly target name.
+          Image suffix (`botwork/<service>:local`).
         required: true
         type: string
       package:
@@ -124,6 +125,14 @@ on:
         required: false
         type: boolean
         default: false
+      wasm-target-check:
+        description: >-
+          Also run `cargo build -p <package> --target wasm32-unknown-unknown`.
+          Used by ui/wasm to validate the wasm-only target path in the
+          crate-local pipeline.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -156,6 +165,31 @@ jobs:
           exit 1
         fi
 
+    - name: Derive crate slug for artifact names
+      run: |
+        set -euo pipefail
+        crate='${{ inputs.crate }}'
+        echo "CRATE_SLUG=${crate//\//-}" >> "${GITHUB_ENV}"
+        # Derive --keep-only glob: whitelist just this crate's own source subtree
+        # so the coverage report contains only first-party source for this crate.
+        # Special cases: ui server source lives in ui/server/ (ui/wasm/ has its
+        # own separate job); db/migration and db/entity each scope to their
+        # sub-directory rather than the shared db/ parent.
+        case "${crate}" in
+          ui)           keep_only="ui/server/*" ;;
+          db/migration) keep_only="db/migration/*" ;;
+          db/entity)    keep_only="db/entity/*" ;;
+          *)            keep_only="${crate}/*" ;;
+        esac
+        echo "KEEP_ONLY=${keep_only}" >> "${GITHUB_ENV}"
+        # Sanity-check: the base directory must exist or the keep-only filter
+        # will silently produce an empty report. Fail early with a clear message.
+        keep_only_dir="${keep_only%/*}"
+        if [ ! -d "${keep_only_dir}" ]; then
+          echo "::error::keep-only dir '${keep_only_dir}' not found for crate '${crate}'"
+          exit 1
+        fi
+
     # ── Cross-run cargo cache ───────────────────────────────────────────────
     # `Swatinem/rust-cache@v2` keys on `Cargo.lock` + the host rust
     # toolchain, restores `~/.cargo/registry`, `~/.cargo/git`, and
@@ -169,7 +203,19 @@ jobs:
       if: inputs.artifact != 'container'
       uses: dtolnay/rust-toolchain@stable
       with:
-        components: rustfmt, clippy
+        components: rustfmt, clippy, llvm-tools-preview
+
+    - name: Install Rust toolchain (coverage host tools)
+      if: inputs.artifact == 'container'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+
+    - name: Install wasm32 target
+      if: inputs.artifact != 'container' && inputs.wasm-target-check
+      run: rustup target add wasm32-unknown-unknown
+
+    - uses: taiki-e/install-action@grcov
 
     - name: cargo fmt, clippy, test (host)
       if: inputs.artifact != 'container'
@@ -177,9 +223,22 @@ jobs:
         BOTWORK_GIT_SHA: ${{ github.sha }}
       run: |
         set -euo pipefail
-        cargo fmt -p "${PACKAGE}" -- --check
-        cargo clippy -p "${PACKAGE}" --all-targets --locked -- -D warnings
-        cargo test -p "${PACKAGE}" --locked
+        package='${{ inputs.package }}'
+        mkdir -p ".ci-coverage/${CRATE_SLUG}/raw"
+        # fmt and clippy run with a clean env — no coverage instrumentation needed.
+        cargo fmt -p "${package}" -- --check
+        cargo clippy -p "${package}" --all-targets --locked -- -D warnings
+        # Coverage instrumentation is scoped to cargo test ONLY via inline env.
+        # The release build below (artifact=binary) runs as a separate step with
+        # no RUSTFLAGS inherited — guaranteeing the shipped binary is never built
+        # with -Cinstrument-coverage (especially important with [profile.release]
+        # panic = "abort").
+        RUSTFLAGS="-Cinstrument-coverage" \
+          LLVM_PROFILE_FILE="${GITHUB_WORKSPACE}/.ci-coverage/${CRATE_SLUG}/raw/${package}-%p-%m.profraw" \
+          cargo test -p "${package}" --locked
+        if [ "${{ inputs.wasm-target-check }}" = "true" ]; then
+          cargo build -p "${package}" --target wasm32-unknown-unknown --locked
+        fi
 
     - name: cargo build (release)
       if: inputs.artifact == 'binary'
@@ -234,7 +293,10 @@ jobs:
         NEEDS_DOCKER: ${{ inputs.needs-docker }}
       run: |
         set -euo pipefail
+        package='${{ inputs.package }}'
+        coverage_raw_dir="/work/.ci-coverage/${CRATE_SLUG}/raw"
         mkdir -p "${HOME}/.cargo" "${RUNNER_TEMP}/container-home"
+        mkdir -p ".ci-coverage/${CRATE_SLUG}/raw"
         trunk_prefix=""
         if [ "${SERVICE}" = "ui" ]; then
           # Trunk needs to land the wasm bundle into ui/wasm/dist/
@@ -265,6 +327,9 @@ jobs:
           -e CARGO_HOME=/cargo-home \
           -e RUSTUP_HOME=/usr/local/rustup \
           -e CARGO_TARGET_DIR=/work/target \
+          -e PACKAGE="${package}" \
+          -e COVERAGE_PACKAGE="${package}" \
+          -e COVERAGE_RAW_DIR="${coverage_raw_dir}" \
           -v "${HOME}/.cargo:/cargo-home" \
           -v "${RUNNER_TEMP}/container-home:/tmp/home" \
           -v "${GITHUB_WORKSPACE}:/work" \
@@ -272,11 +337,150 @@ jobs:
           "botwork/${SERVICE}:ci-tools" \
           sh -elc "
             export PATH=/usr/local/cargo/bin:\$PATH
-            ${trunk_prefix}cargo fmt -p ${PACKAGE} -- --check
-            cargo clippy -p ${PACKAGE} --all-targets --locked -- -D warnings
-            cargo test -p ${PACKAGE} --locked
-            cargo build -p ${PACKAGE} --release --locked
+            package=\${PACKAGE}
+            ${trunk_prefix}cargo fmt -p \${package} -- --check
+            cargo clippy -p \${package} --all-targets --locked -- -D warnings
+            # Coverage instrumentation is scoped to cargo test ONLY.
+            # The release build below runs with NO RUSTFLAGS so the binary
+            # staged to .ci-prebuilt/ and baked into the shipped container
+            # image is never coverage-instrumented. Shipping an instrumented
+            # binary is wrong: it inflates binary size and combines poorly
+            # with [profile.release] panic = 'abort'.
+            mkdir -p \"\${COVERAGE_RAW_DIR}\"
+            RUSTFLAGS='-Cinstrument-coverage' \
+              LLVM_PROFILE_FILE=\"\${COVERAGE_RAW_DIR}/\${COVERAGE_PACKAGE}-%p-%m.profraw\" \
+              cargo test -p \${package} --locked
+            # Release build: clean env — no RUSTFLAGS, no LLVM_PROFILE_FILE.
+            # These are the bytes that will be staged and shipped.
+            cargo build -p \${package} --release --locked
           "
+
+    - name: Build per-crate coverage outputs
+      run: |
+        set -euo pipefail
+        binary_dir=".ci-coverage/${CRATE_SLUG}/binaries"
+        mkdir -p "${binary_dir}"
+        if [ -d target/debug ]; then
+          find target/debug -maxdepth 1 -type f -executable \
+            -exec cp {} "${binary_dir}/" \;
+        fi
+        if [ -d target/debug/deps ]; then
+          find target/debug/deps -maxdepth 1 -type f -executable \
+            -exec cp {} "${binary_dir}/" \;
+        fi
+        profraw_count="$(
+          find ".ci-coverage/${CRATE_SLUG}/raw" -type f -name '*.profraw' | wc -l
+        )"
+        if [ "${profraw_count}" -eq 0 ]; then
+          echo "::error::no .profraw files produced for ${PACKAGE}"
+          exit 1
+        fi
+        # Keep parity with tarpaulin.toml exclude-files (local coverage path).
+        # CI uses grcov --ignore; local uses tarpaulin exclude-files. Both lists
+        # must be kept in sync — see tarpaulin.toml for the canonical rationale
+        # for each exclusion. Note: tarpaulin.toml lists ui/wasm/src/api.rs and
+        # ui/wasm/src/pages/mod.rs individually because the whole botwork-ui-wasm
+        # crate is excluded via `exclude = ["botwork-ui-wasm"]` there; here we
+        # use the broader ui/wasm/src/* which subsumes those specific files.
+        ignore_args=(
+          --ignore "db/entity/src/*"
+          --ignore "db/migration/src/*"
+          --ignore "*/main.rs"
+          --ignore "ui/wasm/src/*"
+        )
+        grcov ".ci-coverage/${CRATE_SLUG}/raw" \
+          --binary-path ".ci-coverage/${CRATE_SLUG}/binaries" \
+          --source-dir . \
+          --prefix-dir "${GITHUB_WORKSPACE}" \
+          --branch \
+          --ignore-not-existing \
+          "${ignore_args[@]}" \
+          --keep-only "${KEEP_ONLY}" \
+          --output-type lcov \
+          --output-path ".ci-coverage/${CRATE_SLUG}/lcov.info"
+        if [ ! -s ".ci-coverage/${CRATE_SLUG}/lcov.info" ]; then
+          echo "::error::per-crate lcov missing or empty for ${PACKAGE}"
+          exit 1
+        fi
+
+    - name: Upload per-crate coverage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.CRATE_SLUG }}-coverage
+        path: .ci-coverage/${{ env.CRATE_SLUG }}/
+        if-no-files-found: error
+
+    # ── Per-crate coverage report ────────────────────────────────────────────
+    # Parses the lcov.info produced above and prints a human-readable
+    # summary to the step log and the job step-summary page so coverage
+    # is visible without downloading the artifact.
+    #
+    # Tuning constants:
+    #   MAX_FILES_UNCOV  - list uncovered-line numbers for up to N files.
+    #   MAX_LINES_PER_FILE - per file, print at most N uncovered line numbers.
+    # The full detail is always available in the uploaded lcov artifact.
+    - name: Report per-crate coverage
+      run: |
+        set -euo pipefail
+        MAX_FILES_UNCOV=20
+        MAX_LINES_PER_FILE=30
+        LCOV=".ci-coverage/${CRATE_SLUG}/lcov.info"
+        report="$(awk \
+          -v max_files="${MAX_FILES_UNCOV}" \
+          -v max_lines="${MAX_LINES_PER_FILE}" \
+          -v pkg="${PACKAGE}" \
+          -v slug="${CRATE_SLUG}" \
+          'BEGIN { n=0; tlf=0; tlh=0 }
+          /^SF:/ { f=substr($0,4); clf=0; clh=0; nu=0 }
+          /^DA:/ {
+            split(substr($0,4),p,",")
+            if (p[2]+0==0) { uc[nu++]=p[1] }
+          }
+          /^LF:/ { clf=substr($0,4)+0 }
+          /^LH:/ { clh=substr($0,4)+0 }
+          /^end_of_record/ {
+            if (clf>0) {
+              nm[n]=f; lf[n]=clf; lh[n]=clh
+              tlf+=clf; tlh+=clh
+              nua[n]=nu
+              for (i=0;i<nu;i++) ul[n,i]=uc[i]
+              n++; nu=0
+            }
+          }
+          END {
+            pct=(tlf>0)?(tlh*100.0/tlf):0
+            print "## Coverage: " pkg
+            print ""
+            printf "**Total: %d/%d lines (%.1f%%)**\n\n",tlh,tlf,pct
+            print "| File | Covered | Total | % |"
+            print "|------|---------|-------|---|"
+            for (i=0;i<n;i++) {
+              fp=(lf[i]>0)?(lh[i]*100.0/lf[i]):0
+              printf "| %s | %d | %d | %.1f%% |\n",nm[i],lh[i],lf[i],fp
+            }
+            print ""
+            print "### Uncovered Lines"
+            print ""
+            dc=0
+            for (i=0;i<n;i++) {
+              nc=nua[i]; if (nc==0) continue
+              if (dc>=max_files) {
+                print "_More files omitted - see the " slug "-coverage artifact._"
+                print ""; break
+              }
+              printf "**%s** (%d uncovered)\n\n",nm[i],nc
+              lim=(nc>max_lines)?max_lines:nc
+              printf "Lines: "
+              for (j=0;j<lim;j++) {
+                if (j>0) printf ", "; printf "%s",ul[i,j]
+              }
+              if (nc>max_lines) printf " ... %d more (see artifact)",nc-max_lines
+              printf "\n\n"
+              dc++
+            }
+          }' "${LCOV}")"
+        echo "${report}"
+        printf '%s\n' "${report}" >> "${GITHUB_STEP_SUMMARY}"
 
     # ── Per-crate hadolint ──────────────────────────────────────────────────
     # Lint the same Dockerfile we just built `ci-tools` from. A failure
@@ -335,8 +539,7 @@ jobs:
     # ── Build db-migrate as a fixture (api only today) ────────────────
     # The api smoke lands the schema before exercising its own
     # assertion path — the production sequence (db-migrate.service runs
-    # before api.service on the vm). The round-1 workflow built
-    # this via `earthly +db-migrate-image`; we use `docker buildx` with
+    # before api.service on the vm). We use `docker buildx` with
     # `BINARY_SOURCE=source` so the in-Dockerfile cargo cache mounts
     # kick in. Cheap enough on a single runner; the canonical
     # db-migrate image artifact comes from the dedicated db-migrate
