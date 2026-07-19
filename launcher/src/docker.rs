@@ -1,9 +1,99 @@
+use std::collections::HashMap;
 use std::fs;
+use std::pin::Pin;
 
-use crate::cmd::{log_info, run_command, run_command_with_stdin, CommandOutput};
+use bollard::errors::Error as BollardError;
+use bollard::models::{
+    ContainerCreateBody, ContainerInspectResponse, ContainerStateStatusEnum, EndpointSettings,
+    EventMessage, HostConfig, Mount, MountBindOptions, MountBindOptionsPropagationEnum,
+    MountTypeEnum, NetworkingConfig,
+};
+use bollard::query_parameters::{
+    CreateContainerOptionsBuilder, EventsOptions, InspectContainerOptionsBuilder,
+    RemoveContainerOptionsBuilder,
+};
+use bollard::Docker;
+use futures_util::future::{BoxFuture, FutureExt};
+use futures_util::Stream;
+
+use crate::cmd::{log_info, run_command, CommandOutput};
 use crate::error::LauncherError;
-use crate::mount::{fallback_message, is_not_mounted_or_einval, setup_staging_dir};
-use crate::validate::{is_sensitive_env, valid_env_name, Validators};
+use crate::mount::{is_not_mounted_or_einval, setup_staging_dir};
+use crate::validate::{valid_env_name, Validators};
+
+pub(crate) type DockerEventStream =
+    Pin<Box<dyn Stream<Item = Result<EventMessage, BollardError>> + Send>>;
+
+pub(crate) trait DockerApi {
+    fn inspect_container<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>>;
+
+    fn create_container<'a>(
+        &'a self,
+        name: &'a str,
+        config: ContainerCreateBody,
+    ) -> BoxFuture<'a, Result<(), BollardError>>;
+
+    fn start_container<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), BollardError>>;
+
+    fn remove_container_force<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<(), BollardError>>;
+
+    fn events(&self, options: Option<EventsOptions>) -> DockerEventStream;
+}
+
+impl DockerApi for Docker {
+    fn inspect_container<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>> {
+        let options = Some(InspectContainerOptionsBuilder::new().size(false).build());
+        Docker::inspect_container(self, name, options).boxed()
+    }
+
+    fn create_container<'a>(
+        &'a self,
+        name: &'a str,
+        config: ContainerCreateBody,
+    ) -> BoxFuture<'a, Result<(), BollardError>> {
+        let options = Some(
+            CreateContainerOptionsBuilder::new()
+                .name(name)
+                .platform("")
+                .build(),
+        );
+        async move {
+            Docker::create_container(self, options, config).await?;
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn start_container<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), BollardError>> {
+        Docker::start_container(self, name, None).boxed()
+    }
+
+    fn remove_container_force<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<(), BollardError>> {
+        let options = Some(RemoveContainerOptionsBuilder::new().force(true).build());
+        Docker::remove_container(self, name, options).boxed()
+    }
+
+    fn events(&self, options: Option<EventsOptions>) -> DockerEventStream {
+        Box::pin(Docker::events(self, options))
+    }
+}
+
+pub(crate) fn connect_docker() -> Result<Docker, LauncherError> {
+    Docker::connect_with_local_defaults()
+        .map_err(|e| LauncherError::Internal(format!("failed to connect docker socket: {e}")))
+}
 
 pub struct ContainerLaunch<'a> {
     pub name: &'a str,
@@ -18,100 +108,56 @@ pub struct ContainerLaunch<'a> {
     pub memory_limit: &'a str,
     pub read_only_rootfs: bool,
     pub env: &'a [(String, String)],
-    /// RFE #105 round-3: docker labels stamped onto the container via
-    /// `--label key=value`. The wire-side validator (see
-    /// `validate.rs::valid_label_name`) has already gated keys to the
-    /// `io.botworkz.*` namespace and rejected newlines / null bytes
-    /// from values, so docker.rs treats the slice as trusted.
-    ///
-    /// Empty by default; container behaviour is unchanged when no
-    /// labels are present. Order is preserved on argv so the
-    /// `docker inspect` output a future operator reads stays
-    /// predictable.
     pub labels: &'a [(String, String)],
 }
 
-/// Outcome of `ensure_container`: lifecycle status plus the container's
-/// IPv4 address on its docker network.
-///
-/// `status` is the same machine-readable shape session-broker already
-/// consumes today (`"already_running"` or `"started"`); `container_ip` is
-/// new in 0.1.5 -- session-broker forwards it to control-plane
-/// (botwork #81) as part of the per-session hard-gate POST.
-///
-/// `container_ip` is **always populated on success** by an inspect call
-/// chained after `docker run`. We treat a missing/unparseable IP as a
-/// launch failure (the launcher never returns 200 with an unknown
-/// address): every downstream that uses this shape requires it, and a
-/// silently-empty IP would surface as a confusing control-plane 400
-/// hours later instead of an immediate launcher 500.
 #[derive(Debug)]
 pub struct LaunchOutcome {
     pub status: &'static str,
     pub container_ip: String,
 }
 
-pub fn ensure_container(
+pub async fn ensure_container(
     request: &ContainerLaunch<'_>,
     validators: &Validators,
 ) -> Result<LaunchOutcome, LauncherError> {
-    ensure_container_impl(request, validators, run_command, run_command_with_stdin)
+    let docker = connect_docker()?;
+    ensure_container_impl(request, validators, &docker).await
 }
 
-fn ensure_container_impl(
+async fn ensure_container_impl<D: DockerApi + ?Sized>(
     request: &ContainerLaunch<'_>,
     validators: &Validators,
-    mut run: impl FnMut(&[String]) -> Result<CommandOutput, String>,
-    mut run_stdin: impl FnMut(&[String], &[u8]) -> Result<CommandOutput, String>,
+    docker: &D,
 ) -> Result<LaunchOutcome, LauncherError> {
-    let inspect = run(&[
-        "docker".to_string(),
-        "inspect".to_string(),
-        "--format".to_string(),
-        "{{.State.Status}}".to_string(),
-        request.name.to_string(),
-    ])
-    .map_err(LauncherError::Internal)?;
+    match docker.inspect_container(request.name).await {
+        Ok(inspect) => {
+            if is_running(&inspect) {
+                let container_ip = inspect_container_ip(&inspect, request.network, request.name)?;
+                log_info(&format!(
+                    "{} already running (ip={container_ip})",
+                    request.name
+                ));
+                return Ok(LaunchOutcome {
+                    status: "already_running",
+                    container_ip,
+                });
+            }
 
-    if inspect.returncode == 0 {
-        let status = inspect.stdout.trim();
-        if status == "running" {
-            // Reuse the existing container's address rather than tear it
-            // down and re-spawn; downstream consumers (control-plane gate)
-            // require an IP either way. An unparseable inspect here is a
-            // launch failure -- same posture as a fresh spawn.
-            let container_ip =
-                inspect_container_ip_with_run(request.network, request.name, &mut run)?;
-            log_info(&format!(
-                "{} already running (ip={container_ip})",
-                request.name
-            ));
-            return Ok(LaunchOutcome {
-                status: "already_running",
-                container_ip,
-            });
+            docker
+                .remove_container_force(request.name)
+                .await
+                .map_err(|e| {
+                    LauncherError::Internal(format!("failed to remove {}: {e}", request.name))
+                })?;
         }
-
-        let remove = run(&[
-            "docker".to_string(),
-            "rm".to_string(),
-            "-f".to_string(),
-            request.name.to_string(),
-        ])
-        .map_err(LauncherError::Internal)?;
-        if remove.returncode != 0 {
-            log_docker_failure("rm", &remove);
-            return Err(LauncherError::Internal(fallback_message(
-                &remove.stderr,
-                format!("failed to remove {}", request.name),
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => {
+            return Err(LauncherError::Internal(format!(
+                "failed to inspect {}: {e}",
+                request.name
             )));
         }
-    } else if !is_no_such_object(&inspect.stderr) {
-        log_docker_failure("inspect", &inspect);
-        return Err(LauncherError::Internal(fallback_message(
-            &inspect.stderr,
-            format!("failed to inspect {}", request.name),
-        )));
     }
 
     if request.with_workspace {
@@ -123,68 +169,65 @@ fn ensure_container_impl(
         )?;
     }
 
-    let run_cmd = docker_run_args(request);
-    let stdin_bytes = sensitive_env_stdin(request.env);
+    let config = build_container_config(request)?;
 
-    let launch = if stdin_bytes.is_empty() {
-        run(&run_cmd).map_err(LauncherError::Internal)?
-    } else {
-        run_stdin(&run_cmd, &stdin_bytes).map_err(LauncherError::Internal)?
-    };
-    if launch.returncode != 0 {
-        log_docker_failure("run", &launch);
-        return Err(LauncherError::Internal(fallback_message(
-            &launch.stderr,
-            format!("failed to start {}", request.name),
-        )));
-    }
+    docker
+        .create_container(request.name, config)
+        .await
+        .map_err(|e| LauncherError::Internal(format!("failed to start {}: {e}", request.name)))?;
 
-    // `docker run` exits as soon as the container is started; the IPAM
-    // address is assigned synchronously by docker's userland networking
-    // layer, so the immediate inspect call below is race-free in
-    // practice. If a future driver makes this async we'll need to retry
-    // -- but failing closed on missing IP is still the right posture.
-    let container_ip = inspect_container_ip_with_run(request.network, request.name, &mut run)?;
+    docker
+        .start_container(request.name)
+        .await
+        .map_err(|e| LauncherError::Internal(format!("failed to start {}: {e}", request.name)))?;
+
+    let inspect = docker
+        .inspect_container(request.name)
+        .await
+        .map_err(|e| LauncherError::Internal(format!("failed to inspect {}: {e}", request.name)))?;
+
+    let container_ip = inspect_container_ip(&inspect, request.network, request.name)?;
 
     log_info(&format!(
         "started {} with image={} network={} staging={} ip={}",
         request.name, request.image, request.network, request.staging_path, container_ip
     ));
+
     Ok(LaunchOutcome {
         status: "started",
         container_ip,
     })
 }
 
-fn inspect_container_ip_with_run(
-    network: &str,
-    name: &str,
-    run: &mut impl FnMut(&[String]) -> Result<CommandOutput, String>,
-) -> Result<String, LauncherError> {
-    let format = inspect_ip_format(network)?;
-    let inspect = run(&[
-        "docker".to_string(),
-        "inspect".to_string(),
-        "--format".to_string(),
-        format,
-        name.to_string(),
-    ])
-    .map_err(LauncherError::Internal)?;
+fn is_running(inspect: &ContainerInspectResponse) -> bool {
+    let state = match inspect.state.as_ref() {
+        Some(state) => state,
+        None => return false,
+    };
 
-    if inspect.returncode != 0 {
-        log_docker_failure("inspect-ip", &inspect);
-        return Err(LauncherError::Internal(fallback_message(
-            &inspect.stderr,
-            format!("failed to inspect IP for {name} on {network}"),
-        )));
+    if let Some(ContainerStateStatusEnum::RUNNING) = state.status {
+        return true;
     }
 
-    parse_container_ip(&inspect.stdout, name, network)
+    state.running.unwrap_or(false)
 }
 
-/// Validate and parse a raw IP string returned by `docker inspect --format`.
-/// Extracted for unit-testability: the empty/non-IPv4 checks are pure logic
-/// that should not require a running docker daemon in tests.
+fn inspect_container_ip(
+    inspect: &ContainerInspectResponse,
+    network: &str,
+    name: &str,
+) -> Result<String, LauncherError> {
+    let ip = inspect
+        .network_settings
+        .as_ref()
+        .and_then(|settings| settings.networks.as_ref())
+        .and_then(|networks| networks.get(network))
+        .and_then(|endpoint| endpoint.ip_address.as_deref())
+        .unwrap_or_default();
+
+    parse_container_ip(ip, name, network)
+}
+
 pub(crate) fn parse_container_ip(
     stdout: &str,
     name: &str,
@@ -205,81 +248,174 @@ pub(crate) fn parse_container_ip(
     Ok(ip)
 }
 
-/// Builds the `--format` string passed to `docker inspect` to read the
-/// container's IPv4 on `network`.
-///
-/// Go `text/template` parses identifiers as
-/// `[a-zA-Z_][a-zA-Z0-9_]*`, with `-` interpreted as the subtraction
-/// operator. That means the dotted shape
-/// `{{.NetworkSettings.Networks.<net>.IPAddress}}` only works for
-/// networks whose names don't contain a hyphen. The default in
-/// production is `botwork-plugin`, which trips this immediately:
-///
-/// ```text
-/// template parsing error: template: :1: bad character U+002D '-'
-/// ```
-///
-/// The fix is to look up the network via the template `index` builtin,
-/// which takes the map key as a string literal and so escapes the
-/// identifier grammar entirely:
-///
-/// ```text
-/// {{(index .NetworkSettings.Networks "botwork-plugin").IPAddress}}
-/// ```
-///
-/// `network` is still validated against a conservative character class
-/// because it is interpolated into the format string -- a `"` in the
-/// name would break out of the string literal and let an attacker
-/// inject arbitrary template actions.
-fn inspect_ip_format(network: &str) -> Result<String, LauncherError> {
-    if !network
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        // Defence in depth: validators already accept the launcher's
-        // configured default network, but ensure_container's caller could
-        // be passing a payload-supplied value too. Refuse anything that
-        // could escape the Go template grammar (in particular `"`,
-        // which would close the string literal below).
+fn build_container_config(
+    request: &ContainerLaunch<'_>,
+) -> Result<ContainerCreateBody, LauncherError> {
+    let mut labels = HashMap::new();
+    for (key, value) in request.labels {
+        labels.insert(key.clone(), value.clone());
+    }
+
+    let env = request
+        .env
+        .iter()
+        .map(|(name, value)| {
+            if !valid_env_name(name) {
+                return Err(LauncherError::Internal(format!("invalid env name: {name}")));
+            }
+            Ok(format!("{name}={value}"))
+        })
+        .collect::<Result<Vec<_>, LauncherError>>()?;
+
+    let mounts = if request.with_workspace {
+        Some(vec![Mount {
+            target: Some("/workspace".to_string()),
+            source: Some(request.staging_path.to_string()),
+            typ: Some(MountTypeEnum::BIND),
+            bind_options: Some(MountBindOptions {
+                propagation: Some(MountBindOptionsPropagationEnum::RSLAVE),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }])
+    } else {
+        None
+    };
+
+    let memory = parse_memory_limit(request.memory_limit)?;
+    let nano_cpus = parse_cpu_limit(request.cpu_limit)?;
+
+    let host_config = HostConfig {
+        auto_remove: Some(true),
+        network_mode: Some(request.network.to_string()),
+        cap_drop: Some(vec!["ALL".to_string()]),
+        security_opt: Some(vec!["no-new-privileges".to_string()]),
+        pids_limit: Some(request.pids_limit as i64),
+        memory: Some(memory),
+        nano_cpus: Some(nano_cpus),
+        readonly_rootfs: Some(request.read_only_rootfs),
+        mounts,
+        ..Default::default()
+    };
+
+    let mut endpoints = HashMap::new();
+    endpoints.insert(
+        request.network.to_string(),
+        EndpointSettings {
+            aliases: Some(vec![request.name.to_string()]),
+            ..Default::default()
+        },
+    );
+
+    Ok(ContainerCreateBody {
+        image: Some(request.image.to_string()),
+        user: Some(format!("{}:{}", request.plugin_uid, request.plugin_gid)),
+        env: Some(env),
+        labels: if labels.is_empty() {
+            None
+        } else {
+            Some(labels)
+        },
+        host_config: Some(host_config),
+        networking_config: Some(NetworkingConfig {
+            endpoints_config: Some(endpoints),
+        }),
+        ..Default::default()
+    })
+}
+
+fn parse_memory_limit(value: &str) -> Result<i64, LauncherError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(LauncherError::Internal("memory limit is empty".to_string()));
+    }
+
+    let split_at = trimmed
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(trimmed.len());
+    let (num_part, suffix_part) = trimmed.split_at(split_at);
+
+    let number = num_part
+        .parse::<f64>()
+        .map_err(|e| LauncherError::Internal(format!("invalid memory limit {value:?}: {e}")))?;
+
+    let multiplier = match suffix_part.to_ascii_lowercase().as_str() {
+        "" | "b" => 1f64,
+        "k" | "kb" => 1024f64,
+        "m" | "mb" => 1024f64.powi(2),
+        "g" | "gb" => 1024f64.powi(3),
+        "t" | "tb" => 1024f64.powi(4),
+        "p" | "pb" => 1024f64.powi(5),
+        "e" | "eb" => 1024f64.powi(6),
+        other => {
+            return Err(LauncherError::Internal(format!(
+                "invalid memory limit suffix {other:?} in {value:?}"
+            )));
+        }
+    };
+
+    let bytes = (number * multiplier).round();
+    if !bytes.is_finite() || bytes <= 0.0 || bytes > i64::MAX as f64 {
         return Err(LauncherError::Internal(format!(
-            "invalid network name '{network}' for inspect"
+            "invalid memory limit {value:?}"
         )));
     }
 
-    Ok(format!(
-        r#"{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}"#
-    ))
+    let bytes_i64 = format!("{bytes:.0}")
+        .parse::<i64>()
+        .map_err(|_| LauncherError::Internal(format!("invalid memory limit {value:?}")))?;
+    Ok(bytes_i64)
 }
 
-pub fn teardown(
+fn parse_cpu_limit(value: &str) -> Result<i64, LauncherError> {
+    let cpus = value
+        .trim()
+        .parse::<f64>()
+        .map_err(|e| LauncherError::Internal(format!("invalid cpu limit {value:?}: {e}")))?;
+
+    if !cpus.is_finite() || cpus <= 0.0 {
+        return Err(LauncherError::Internal(format!(
+            "invalid cpu limit {value:?}"
+        )));
+    }
+
+    let nano = (cpus * 1_000_000_000f64).round();
+    if nano > i64::MAX as f64 {
+        return Err(LauncherError::Internal(format!(
+            "invalid cpu limit {value:?}"
+        )));
+    }
+
+    let nano_i64 = format!("{nano:.0}")
+        .parse::<i64>()
+        .map_err(|_| LauncherError::Internal(format!("invalid cpu limit {value:?}")))?;
+    Ok(nano_i64)
+}
+
+pub async fn teardown(
     name: &str,
     staging_path: &str,
     validators: &Validators,
 ) -> Result<(), LauncherError> {
-    teardown_impl(name, staging_path, validators, run_command)
+    let docker = connect_docker()?;
+    teardown_impl(name, staging_path, validators, &docker, run_command).await
 }
 
-fn teardown_impl(
+async fn teardown_impl<D: DockerApi + ?Sized>(
     name: &str,
     staging_path: &str,
     validators: &Validators,
+    docker: &D,
     mut run: impl FnMut(&[String]) -> Result<CommandOutput, String>,
 ) -> Result<(), LauncherError> {
     let safe_staging = validators.safe_staging_path(staging_path)?;
 
-    let rm = run(&[
-        "docker".to_string(),
-        "rm".to_string(),
-        "-f".to_string(),
-        name.to_string(),
-    ])
-    .map_err(LauncherError::Internal)?;
-
-    if rm.returncode != 0 && !is_no_such_container(&rm.stderr) {
-        log_info(&format!(
-            "docker rm -f {name} failed (non-fatal): {}",
-            rm.stderr.trim()
-        ));
+    match docker.remove_container_force(name).await {
+        Ok(()) => {}
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => {
+            log_info(&format!("docker rm -f {name} failed (non-fatal): {e}"));
+        }
     }
 
     for _ in 0..2 {
@@ -306,109 +442,126 @@ fn teardown_impl(
     Ok(())
 }
 
-pub(crate) fn is_no_such_object(stderr: &str) -> bool {
-    stderr.to_lowercase().contains("no such object")
-}
-
-pub(crate) fn is_no_such_container(stderr: &str) -> bool {
-    stderr.to_lowercase().contains("no such container")
-}
-
-pub(crate) fn log_docker_failure(subcommand: &str, output: &crate::cmd::CommandOutput) {
-    log_info(&format!(
-        "docker {subcommand} failed: rc={} stderr={}",
-        output.returncode,
-        output.stderr.trim()
-    ));
-}
-
-fn docker_run_args(request: &ContainerLaunch<'_>) -> Vec<String> {
-    let mut run_cmd = vec![
-        "docker".to_string(),
-        "run".to_string(),
-        "-d".to_string(),
-        "--rm".to_string(),
-        "--name".to_string(),
-        request.name.to_string(),
-        "--network".to_string(),
-        request.network.to_string(),
-        "--network-alias".to_string(),
-        request.name.to_string(),
-        // This container runs untrusted plugin code; these flags are defence-in-depth — do not loosen.
-        "--cap-drop=ALL".to_string(),
-        "--security-opt=no-new-privileges".to_string(),
-        "--pids-limit".to_string(),
-        request.pids_limit.to_string(),
-        "--memory".to_string(),
-        request.memory_limit.to_string(),
-        "--cpus".to_string(),
-        request.cpu_limit.to_string(),
-    ];
-
-    for (name, value) in request.env {
-        debug_assert!(valid_env_name(name), "invalid env name: {}", name);
-        if is_sensitive_env(name) {
-            // Sensitive vars are routed via stdin (--env-file /dev/stdin); never on argv.
-            continue;
+fn is_not_found(error: &BollardError) -> bool {
+    matches!(
+        error,
+        BollardError::DockerResponseServerError {
+            status_code: 404,
+            ..
         }
-        run_cmd.push("-e".to_string());
-        run_cmd.push(format!("{name}={value}"));
-    }
-
-    if request.env.iter().any(|(name, _)| is_sensitive_env(name)) {
-        // Docker reads the env-file from its own stdin, which the launcher pipes.
-        run_cmd.push("--env-file".to_string());
-        run_cmd.push("/dev/stdin".to_string());
-    }
-
-    if request.read_only_rootfs {
-        // Rootfs writes are disabled only when explicitly requested because some plugins still need
-        // writable runtime paths under /tmp or similar until they are cleaned up.
-        run_cmd.push("--read-only".to_string());
-    }
-
-    if request.with_workspace {
-        run_cmd.push("-v".to_string());
-        run_cmd.push(format!("{}:/workspace:rslave", request.staging_path));
-    }
-
-    // RFE #105 round-3: stamp docker labels in declaration order.
-    // Labels are not secret-bearing (the wire validator forbids
-    // newlines/null bytes in values), so they ride on argv next to
-    // the plain env entries. Same `KEY=VALUE` argv shape `-e` uses.
-    for (key, value) in request.labels {
-        run_cmd.push("--label".to_string());
-        run_cmd.push(format!("{key}={value}"));
-    }
-
-    run_cmd.push("--user".to_string());
-    run_cmd.push(format!("{}:{}", request.plugin_uid, request.plugin_gid));
-    run_cmd.push(request.image.to_string());
-    run_cmd
-}
-
-/// Builds the `--env-file` content for sensitive env vars: one `NAME=VALUE\n`
-/// line per entry.  Returns an empty `Vec` when there are no sensitive vars,
-/// in which case the caller should use regular `run_command` (no stdin pipe).
-fn sensitive_env_stdin(env: &[(String, String)]) -> Vec<u8> {
-    let mut content = Vec::new();
-    for (name, value) in env {
-        if is_sensitive_env(name) {
-            content.extend_from_slice(name.as_bytes());
-            content.push(b'=');
-            content.extend_from_slice(value.as_bytes());
-            content.push(b'\n');
-        }
-    }
-    content
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        docker_run_args, inspect_ip_format, is_no_such_container, is_no_such_object,
-        sensitive_env_stdin, ContainerLaunch,
-    };
+    use super::*;
+    use bollard::models::{ContainerState, NetworkSettings};
+    use futures_util::stream;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default, Clone)]
+    struct FakeDocker {
+        inspect_results: Arc<Mutex<VecDeque<Result<ContainerInspectResponse, BollardError>>>>,
+        create_results: Arc<Mutex<VecDeque<Result<(), BollardError>>>>,
+        start_results: Arc<Mutex<VecDeque<Result<(), BollardError>>>>,
+        remove_results: Arc<Mutex<VecDeque<Result<(), BollardError>>>>,
+        created_configs: Arc<Mutex<Vec<ContainerCreateBody>>>,
+    }
+
+    impl FakeDocker {
+        fn with_inspect(
+            self,
+            results: Vec<Result<ContainerInspectResponse, BollardError>>,
+        ) -> Self {
+            *self.inspect_results.lock().expect("inspect lock") = VecDeque::from(results);
+            self
+        }
+
+        fn with_create(self, results: Vec<Result<(), BollardError>>) -> Self {
+            *self.create_results.lock().expect("create lock") = VecDeque::from(results);
+            self
+        }
+
+        fn with_start(self, results: Vec<Result<(), BollardError>>) -> Self {
+            *self.start_results.lock().expect("start lock") = VecDeque::from(results);
+            self
+        }
+
+        fn with_remove(self, results: Vec<Result<(), BollardError>>) -> Self {
+            *self.remove_results.lock().expect("remove lock") = VecDeque::from(results);
+            self
+        }
+    }
+
+    impl DockerApi for FakeDocker {
+        fn inspect_container<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>> {
+            async move {
+                self.inspect_results
+                    .lock()
+                    .expect("inspect lock")
+                    .pop_front()
+                    .expect("missing inspect result")
+            }
+            .boxed()
+        }
+
+        fn create_container<'a>(
+            &'a self,
+            _name: &'a str,
+            config: ContainerCreateBody,
+        ) -> BoxFuture<'a, Result<(), BollardError>> {
+            async move {
+                self.created_configs
+                    .lock()
+                    .expect("created lock")
+                    .push(config);
+                self.create_results
+                    .lock()
+                    .expect("create lock")
+                    .pop_front()
+                    .unwrap_or(Ok(()))
+            }
+            .boxed()
+        }
+
+        fn start_container<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> BoxFuture<'a, Result<(), BollardError>> {
+            async move {
+                self.start_results
+                    .lock()
+                    .expect("start lock")
+                    .pop_front()
+                    .unwrap_or(Ok(()))
+            }
+            .boxed()
+        }
+
+        fn remove_container_force<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> BoxFuture<'a, Result<(), BollardError>> {
+            async move {
+                self.remove_results
+                    .lock()
+                    .expect("remove lock")
+                    .pop_front()
+                    .unwrap_or(Ok(()))
+            }
+            .boxed()
+        }
+
+        fn events(&self, _options: Option<EventsOptions>) -> DockerEventStream {
+            Box::pin(stream::iter(
+                Vec::<Result<EventMessage, BollardError>>::new(),
+            ))
+        }
+    }
 
     fn minimal_launch<'a>(
         name: &'a str,
@@ -426,856 +579,236 @@ mod tests {
             pids_limit: 256,
             cpu_limit: "1.0",
             memory_limit: "512m",
-            read_only_rootfs: false,
+            read_only_rootfs: true,
             env,
             labels,
         }
     }
 
-    #[test]
-    fn docker_stderr_classification_matches_python_behavior() {
-        assert!(is_no_such_object(
-            "Error: No Such Object: mcp_session_aabbccddeeff"
-        ));
-        assert!(is_no_such_container(
-            "Error response from daemon: No such container: abc"
-        ));
-        assert!(!is_no_such_object("permission denied"));
-        assert!(!is_no_such_container("cannot connect to docker daemon"));
-    }
-
-    #[test]
-    fn is_no_such_object_is_case_insensitive() {
-        assert!(is_no_such_object("NO SUCH OBJECT: abc"));
-        assert!(is_no_such_object("no such object"));
-        assert!(!is_no_such_object("object not found"));
-    }
-
-    #[test]
-    fn is_no_such_container_is_case_insensitive() {
-        assert!(is_no_such_container("NO SUCH CONTAINER: abc"));
-        assert!(is_no_such_container("no such container"));
-        assert!(!is_no_such_container("container not found"));
-    }
-
-    #[test]
-    fn docker_run_args_include_sandbox_flags() {
-        let args = docker_run_args(&ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: true,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: true,
-            env: &[],
-            labels: &[],
-        });
-
-        assert!(args.contains(&"--cap-drop=ALL".to_string()));
-        assert!(args.contains(&"--security-opt=no-new-privileges".to_string()));
-        assert!(args.windows(2).any(|pair| pair == ["--pids-limit", "256"]));
-        assert!(args.windows(2).any(|pair| pair == ["--memory", "512m"]));
-        assert!(args.windows(2).any(|pair| pair == ["--cpus", "1.0"]));
-        assert!(!args.contains(&"-e".to_string()));
-        assert!(args.contains(&"--read-only".to_string()));
-        assert!(args.windows(2).any(|pair| pair == ["--user", "1000:1000"]));
-        assert!(args.contains(
-            &"/var/lib/botwork/tenants/acme/staging/aabbccddeeff:/workspace:rslave".to_string()
-        ));
-    }
-
-    #[test]
-    fn docker_run_args_includes_env_in_declaration_order() {
-        let env = vec![
-            ("FOO".to_string(), "one".to_string()),
-            ("BAR".to_string(), "two".to_string()),
-        ];
-        let args = docker_run_args(&ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &env,
-            labels: &[],
-        });
-
-        let foo = args
-            .windows(2)
-            .position(|pair| pair == ["-e", "FOO=one"])
-            .expect("FOO env");
-        let bar = args
-            .windows(2)
-            .position(|pair| pair == ["-e", "BAR=two"])
-            .expect("BAR env");
-        let user = args
-            .windows(2)
-            .position(|pair| pair == ["--user", "1000:1000"])
-            .expect("user flag");
-
-        assert!(foo < bar);
-        assert!(bar < user);
-    }
-
-    #[test]
-    fn docker_run_args_env_values_with_special_chars_pass_through() {
-        let env = vec![(
-            "FOO".to_string(),
-            "value with spaces and =equals=".to_string(),
-        )];
-        let args = docker_run_args(&ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &env,
-            labels: &[],
-        });
-
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["-e", "FOO=value with spaces and =equals="]));
-    }
-
-    #[test]
-    fn sensitive_env_not_on_argv_and_env_file_flag_added() {
-        let env = vec![
-            ("FOO".to_string(), "plain".to_string()),
-            ("BOTWORK_SECRET_TOKEN".to_string(), "s3cr3t".to_string()),
-        ];
-        let args = docker_run_args(&ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &env,
-            labels: &[],
-        });
-
-        // Secret value must never appear anywhere in argv.
-        assert!(
-            !args.iter().any(|a| a.contains("s3cr3t")),
-            "secret value leaked onto argv"
+    fn inspect_running(ip: &str, network: &str) -> ContainerInspectResponse {
+        let mut networks = HashMap::new();
+        networks.insert(
+            network.to_string(),
+            EndpointSettings {
+                ip_address: Some(ip.to_string()),
+                ..Default::default()
+            },
         );
-        // Secret name must not appear as -e NAME=VALUE.
-        assert!(
-            !args
-                .windows(2)
-                .any(|pair| pair[0] == "-e" && pair[1].starts_with("BOTWORK_SECRET_")),
-            "secret name leaked via -e onto argv"
-        );
-        // Plain env must still be on argv.
-        assert!(
-            args.windows(2).any(|pair| pair == ["-e", "FOO=plain"]),
-            "plain env missing from argv"
-        );
-        // --env-file /dev/stdin must be present.
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--env-file", "/dev/stdin"]),
-            "--env-file /dev/stdin missing"
-        );
-    }
 
-    #[test]
-    fn sensitive_env_stdin_content_is_correct() {
-        let env = vec![
-            ("FOO".to_string(), "plain".to_string()),
-            ("BOTWORK_SECRET_A".to_string(), "alpha".to_string()),
-            ("BOTWORK_SECRET_B".to_string(), "beta=value".to_string()),
-        ];
-        let content = sensitive_env_stdin(&env);
-        let text = std::str::from_utf8(&content).expect("utf8");
-
-        // Only sensitive vars should appear in the stdin content.
-        assert!(!text.contains("FOO"), "plain env leaked into stdin content");
-        assert!(text.contains("BOTWORK_SECRET_A=alpha\n"));
-        assert!(text.contains("BOTWORK_SECRET_B=beta=value\n"));
-    }
-
-    #[test]
-    fn no_env_file_flag_when_no_sensitive_env() {
-        let env = vec![("FOO".to_string(), "bar".to_string())];
-        let args = docker_run_args(&ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &env,
-            labels: &[],
-        });
-
-        assert!(
-            !args.contains(&"--env-file".to_string()),
-            "--env-file must not appear when there is no sensitive env"
-        );
-        let stdin = sensitive_env_stdin(&env);
-        assert!(
-            stdin.is_empty(),
-            "stdin bytes must be empty for non-sensitive env"
-        );
-    }
-
-    // ── RFE #105 round-3: docker labels on argv ──────────────────────────────
-
-    #[test]
-    fn docker_run_args_omit_label_flag_when_labels_slice_empty() {
-        // Older callers (every session-broker prior to round-3 PR2)
-        // pass `labels: &[]`. The argv must be identical to the
-        // pre-PR shape — no spurious `--label` entries — so a
-        // newer launcher image works against the older broker.
-        let args = docker_run_args(&ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &[],
-            labels: &[],
-        });
-        assert!(
-            !args.iter().any(|a| a == "--label"),
-            "no --label entry must appear when labels slice is empty"
-        );
-    }
-
-    #[test]
-    fn docker_run_args_emit_label_flags_in_declaration_order() {
-        // The labels in session-broker's payload are tenant, workspace,
-        // plugin in that order; argv preserves the order so the
-        // janitor (and the operator running `docker inspect`) sees a
-        // stable layout.
-        let labels = vec![
-            ("io.botworkz.tenant".to_string(), "acme".to_string()),
-            ("io.botworkz.workspace".to_string(), "mcp".to_string()),
-            ("io.botworkz.plugin".to_string(), "mcp-bash".to_string()),
-        ];
-        let args = docker_run_args(&ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &[],
-            labels: &labels,
-        });
-        let tenant_idx = args
-            .windows(2)
-            .position(|p| p == ["--label", "io.botworkz.tenant=acme"])
-            .expect("tenant label argv pair");
-        let workspace_idx = args
-            .windows(2)
-            .position(|p| p == ["--label", "io.botworkz.workspace=mcp"])
-            .expect("workspace label argv pair");
-        let plugin_idx = args
-            .windows(2)
-            .position(|p| p == ["--label", "io.botworkz.plugin=mcp-bash"])
-            .expect("plugin label argv pair");
-        assert!(
-            tenant_idx < workspace_idx && workspace_idx < plugin_idx,
-            "labels must appear in declaration order on argv (got {tenant_idx} {workspace_idx} {plugin_idx})"
-        );
-        // Image is always the last positional argument; labels must
-        // land before it (docker is strict about post-image args
-        // being interpreted as the container's CMD override).
-        let image_idx = args
-            .iter()
-            .position(|a| a == "botwork/mcp-echo:local")
-            .expect("image argv");
-        assert!(
-            plugin_idx < image_idx,
-            "labels must precede the image positional ({plugin_idx} vs {image_idx})"
-        );
-    }
-
-    #[test]
-    fn docker_run_args_label_values_with_spaces_pass_through() {
-        // Wire validator rejects newlines + nulls in values, but spaces
-        // are legal (docker tolerates them; only the KEY=VALUE split
-        // matters). This test pins the argv emission so a future
-        // tightening of the validator doesn't accidentally break the
-        // KEY=VALUE-with-spaces shape that operator-typed labels
-        // might use.
-        let labels = vec![(
-            "io.botworkz.tenant".to_string(),
-            "value with spaces".to_string(),
-        )];
-        let args = docker_run_args(&ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &[],
-            labels: &labels,
-        });
-        assert!(args
-            .windows(2)
-            .any(|p| p == ["--label", "io.botworkz.tenant=value with spaces"]));
-    }
-
-    // ── inspect_ip_format ──────────────────────────────────────────────────
-    //
-    // The shape of the `--format` string passed to `docker inspect` is wire
-    // contract between launcher and the docker CLI. Go `text/template`
-    // parses identifiers as `[a-zA-Z_][a-zA-Z0-9_]*` and reads `-` as the
-    // subtraction operator, so the dotted form
-    // `{{.NetworkSettings.Networks.<net>.IPAddress}}` blows up at parse
-    // time for any network with a hyphen -- including our production
-    // `botwork-plugin`. We use the `index` builtin (which takes the key
-    // as a quoted string literal) to escape the identifier grammar.
-
-    #[test]
-    fn inspect_ip_format_uses_index_for_hyphenated_network() {
-        // Production case: this is the format string that blew up
-        // before the fix.
-        let format = inspect_ip_format("botwork-plugin").expect("valid network");
-        assert_eq!(
-            format,
-            r#"{{(index .NetworkSettings.Networks "botwork-plugin").IPAddress}}"#
-        );
-    }
-
-    #[test]
-    fn inspect_ip_format_uses_index_for_simple_network() {
-        // Identifier-safe names go through the same `index` shape rather
-        // than the dotted form so both code paths use one template
-        // grammar -- no second variant to drift.
-        let format = inspect_ip_format("bridge").expect("valid network");
-        assert_eq!(
-            format,
-            r#"{{(index .NetworkSettings.Networks "bridge").IPAddress}}"#
-        );
-    }
-
-    #[test]
-    fn inspect_ip_format_rejects_double_quote() {
-        // `"` would close the string literal in the `index ...` call and
-        // let a payload inject arbitrary template actions. The validator
-        // accepts only a conservative character class; everything else
-        // (including `"`, `{`, `}`, spaces) is refused at this layer.
-        let err = inspect_ip_format(r#"x"y"#).expect_err("must reject quote");
-        let crate::error::LauncherError::Internal(msg) = err else {
-            panic!("expected Internal, got: {err:?}");
-        };
-        assert!(msg.contains("invalid network name"), "{msg}");
-    }
-
-    #[test]
-    fn inspect_ip_format_rejects_curly_braces() {
-        // Same posture as the quote case -- defence in depth against any
-        // future caller that lets a network name slip through.
-        for bad in ["{x", "x}", "x{y}", " "] {
-            assert!(
-                inspect_ip_format(bad).is_err(),
-                "must reject network name {bad:?}"
-            );
+        ContainerInspectResponse {
+            state: Some(ContainerState {
+                status: Some(ContainerStateStatusEnum::RUNNING),
+                running: Some(true),
+                ..Default::default()
+            }),
+            network_settings: Some(NetworkSettings {
+                networks: Some(networks),
+                ..Default::default()
+            }),
+            ..Default::default()
         }
     }
-
-    #[test]
-    fn inspect_ip_format_accepts_alphanumeric_dot_dash_underscore() {
-        // Mirror the validator's accepted class so a future tightening
-        // of the validator is caught here too.
-        for ok in ["a", "ABC", "x1", "x-y", "x_y", "x.y", "x-y_z.0"] {
-            assert!(
-                inspect_ip_format(ok).is_ok(),
-                "must accept network name {ok:?}"
-            );
-        }
-    }
-
-    // ── docker_run_args: without workspace / without read-only ───────────────
-
-    #[test]
-    fn docker_run_args_no_workspace_no_readonly() {
-        let args = docker_run_args(&minimal_launch("mcp_session_aabbccddeeff", &[], &[]));
-        // Without workspace there must be no -v flag.
-        assert!(
-            !args.contains(&"-v".to_string()),
-            "-v must not appear when with_workspace is false"
-        );
-        // Without read-only rootfs there must be no --read-only flag.
-        assert!(
-            !args.contains(&"--read-only".to_string()),
-            "--read-only must not appear when read_only_rootfs is false"
-        );
-    }
-
-    #[test]
-    fn docker_run_args_image_is_last_positional() {
-        // docker is strict: any arg after the image is the container CMD.
-        let args = docker_run_args(&minimal_launch("mcp_session_aabbccddeeff", &[], &[]));
-        assert_eq!(
-            args.last().expect("args must not be empty"),
-            "botwork/mcp-echo:local",
-            "image must be the last element in the arg vector"
-        );
-    }
-
-    #[test]
-    fn docker_run_args_starts_with_docker_run() {
-        let args = docker_run_args(&minimal_launch("mcp_session_aabbccddeeff", &[], &[]));
-        assert_eq!(args[0], "docker");
-        assert_eq!(args[1], "run");
-    }
-
-    #[test]
-    fn sensitive_env_stdin_empty_for_no_vars() {
-        let content = sensitive_env_stdin(&[]);
-        assert!(content.is_empty(), "stdin must be empty when env is empty");
-    }
-
-    #[test]
-    fn sensitive_env_stdin_empty_for_non_sensitive_only() {
-        let env = vec![("FOO".to_string(), "bar".to_string())];
-        let content = sensitive_env_stdin(&env);
-        assert!(
-            content.is_empty(),
-            "stdin must be empty when there are no sensitive vars"
-        );
-    }
-
-    // ── parse_container_ip ──────────────────────────────────────────────────
 
     #[test]
     fn parse_container_ip_returns_valid_ipv4() {
-        use super::parse_container_ip;
         let ip = parse_container_ip("192.168.1.100\n", "mcp_session_x", "botwork-plugin")
             .expect("valid IPv4");
         assert_eq!(ip, "192.168.1.100");
     }
 
     #[test]
-    fn parse_container_ip_trims_whitespace() {
-        use super::parse_container_ip;
-        let ip = parse_container_ip("  10.0.0.1  \n", "mcp_session_x", "botwork")
-            .expect("valid IPv4 with surrounding whitespace");
-        assert_eq!(ip, "10.0.0.1");
-    }
-
-    #[test]
     fn parse_container_ip_fails_on_empty_output() {
-        use super::parse_container_ip;
-        use crate::error::LauncherError;
         let err = parse_container_ip("", "mcp_session_x", "botwork-plugin").unwrap_err();
-        assert!(
-            matches!(err, LauncherError::Internal(_)),
-            "expected Internal, got {err:?}"
-        );
-        let msg = format!("{err}");
-        assert!(msg.contains("no address"), "{msg}");
-    }
-
-    #[test]
-    fn parse_container_ip_fails_on_whitespace_only_output() {
-        use super::parse_container_ip;
-        use crate::error::LauncherError;
-        let err = parse_container_ip("\n   \n", "mcp_session_x", "botwork").unwrap_err();
         assert!(matches!(err, LauncherError::Internal(_)));
     }
 
     #[test]
     fn parse_container_ip_fails_on_non_ipv4_address() {
-        use super::parse_container_ip;
-        use crate::error::LauncherError;
-        // An IPv6 address is not acceptable.
         let err = parse_container_ip("::1", "mcp_session_x", "botwork-plugin").unwrap_err();
-        assert!(
-            matches!(err, LauncherError::Internal(_)),
-            "expected Internal, got {err:?}"
-        );
-        let msg = format!("{err}");
-        assert!(msg.contains("non-IPv4"), "{msg}");
-    }
-
-    #[test]
-    fn parse_container_ip_fails_on_hostname_string() {
-        use super::parse_container_ip;
-        use crate::error::LauncherError;
-        let err = parse_container_ip("not-an-ip", "mcp_session_x", "botwork").unwrap_err();
         assert!(matches!(err, LauncherError::Internal(_)));
     }
 
-    // ── log_docker_failure ──────────────────────────────────────────────────
-
     #[test]
-    fn log_docker_failure_does_not_panic() {
-        use super::{log_docker_failure, CommandOutput};
-        // Just verify the function is callable (it calls log_info which is
-        // a tracing::info! — no assertions on output since diagnostics go to
-        // the tracing subscriber, not stdout).
-        log_docker_failure(
-            "inspect",
-            &CommandOutput {
-                returncode: 1,
-                stdout: String::new(),
-                stderr: "container not found".into(),
-            },
+    fn build_container_config_includes_sandbox_flags_and_all_env() {
+        let env = vec![
+            ("FOO".to_string(), "plain".to_string()),
+            ("BOTWORK_SECRET_TOKEN".to_string(), "s3cr3t".to_string()),
+        ];
+        let labels = vec![("io.botworkz.tenant".to_string(), "acme".to_string())];
+        let mut launch = minimal_launch("mcp_session_aabbccddeeff", &env, &labels);
+        launch.with_workspace = true;
+
+        let config = build_container_config(&launch).expect("config");
+        let host = config.host_config.expect("host config");
+
+        assert_eq!(host.auto_remove, Some(true));
+        assert_eq!(host.cap_drop, Some(vec!["ALL".to_string()]));
+        assert_eq!(
+            host.security_opt,
+            Some(vec!["no-new-privileges".to_string()])
+        );
+        assert_eq!(host.pids_limit, Some(256));
+        assert_eq!(host.memory, Some(536_870_912));
+        assert_eq!(host.nano_cpus, Some(1_000_000_000));
+        assert_eq!(host.readonly_rootfs, Some(true));
+
+        assert_eq!(
+            config.env,
+            Some(vec![
+                "FOO=plain".to_string(),
+                "BOTWORK_SECRET_TOKEN=s3cr3t".to_string()
+            ])
+        );
+
+        let mounts = host.mounts.expect("mounts");
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].target.as_deref(), Some("/workspace"));
+        assert_eq!(mounts[0].source.as_deref(), Some(launch.staging_path));
+        assert_eq!(mounts[0].typ, Some(MountTypeEnum::BIND));
+        assert_eq!(
+            mounts[0].bind_options.as_ref().and_then(|b| b.propagation),
+            Some(MountBindOptionsPropagationEnum::RSLAVE)
+        );
+
+        assert_eq!(
+            config
+                .networking_config
+                .as_ref()
+                .and_then(|n| n.endpoints_config.as_ref())
+                .and_then(|m| m.get(launch.network))
+                .and_then(|e| e.aliases.as_ref())
+                .cloned(),
+            Some(vec![launch.name.to_string()])
         );
     }
 
-    // ── ensure_container_impl ───────────────────────────────────────────────
-
-    #[test]
-    fn ensure_container_returns_already_running_when_inspect_says_running() {
-        use super::ensure_container_impl;
-        use crate::validate::Validators;
+    #[tokio::test]
+    async fn ensure_container_returns_already_running_when_running() {
         let validators =
             Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
-        let request = ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork-plugin",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &[],
-            labels: &[],
-        };
+        let launch = minimal_launch("mcp_session_aabbccddeeff", &[], &[]);
+        let fake =
+            FakeDocker::default().with_inspect(vec![Ok(inspect_running("10.0.0.8", "botwork"))]);
 
-        let call_count = std::cell::Cell::new(0u32);
-        let outcome = ensure_container_impl(
-            &request,
-            &validators,
-            |_args| {
-                let n = call_count.get();
-                call_count.set(n + 1);
-                Ok(super::CommandOutput {
-                    returncode: 0,
-                    // First call: status inspect → "running"
-                    // Second call: IP inspect → IPv4
-                    stdout: if n == 0 {
-                        "running\n".into()
-                    } else {
-                        "192.168.10.5\n".into()
-                    },
-                    stderr: String::new(),
-                })
-            },
-            |_, _| unreachable!("run_with_stdin must not be called"),
-        )
-        .expect("must succeed");
+        let outcome = ensure_container_impl(&launch, &validators, &fake)
+            .await
+            .expect("outcome");
+
         assert_eq!(outcome.status, "already_running");
-        assert_eq!(outcome.container_ip, "192.168.10.5");
+        assert_eq!(outcome.container_ip, "10.0.0.8");
     }
 
-    #[test]
-    fn ensure_container_returns_error_when_inspect_fails_unexpectedly() {
-        use super::ensure_container_impl;
-        use crate::{error::LauncherError, validate::Validators};
+    #[tokio::test]
+    async fn ensure_container_starts_when_missing() {
         let validators =
             Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
-        let request = ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork-plugin",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &[],
-            labels: &[],
-        };
+        let launch = minimal_launch("mcp_session_aabbccddeeff", &[], &[]);
 
-        // First inspect fails with a non-"no such object" error
-        let err = ensure_container_impl(
-            &request,
-            &validators,
-            |_| {
-                Ok(super::CommandOutput {
-                    returncode: 1,
-                    stdout: String::new(),
-                    stderr: "permission denied".into(),
-                })
-            },
-            |_, _| unreachable!(),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, LauncherError::Internal(_)),
-            "expected Internal, got {err:?}"
-        );
-    }
+        let fake = FakeDocker::default()
+            .with_inspect(vec![
+                Err(BollardError::DockerResponseServerError {
+                    status_code: 404,
+                    message: "not found".to_string(),
+                }),
+                Ok(inspect_running("172.20.0.5", "botwork")),
+            ])
+            .with_create(vec![Ok(())])
+            .with_start(vec![Ok(())]);
 
-    #[test]
-    fn ensure_container_returns_error_when_run_fails() {
-        use super::ensure_container_impl;
-        use crate::{error::LauncherError, validate::Validators};
-        let validators =
-            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
-        let request = ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork-plugin",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &[],
-            labels: &[],
-        };
+        let outcome = ensure_container_impl(&launch, &validators, &fake)
+            .await
+            .expect("outcome");
 
-        let call_count = std::cell::Cell::new(0u32);
-        let err = ensure_container_impl(
-            &request,
-            &validators,
-            |_args| {
-                let n = call_count.get();
-                call_count.set(n + 1);
-                // First call: inspect returns "no such object" (not running, fresh start)
-                // Second call: docker run fails
-                if n == 0 {
-                    Ok(super::CommandOutput {
-                        returncode: 1,
-                        stdout: String::new(),
-                        stderr: "Error: No such object: mcp_session_aabbccddeeff".into(),
-                    })
-                } else {
-                    Ok(super::CommandOutput {
-                        returncode: 1,
-                        stdout: String::new(),
-                        stderr: "docker run failed: image not found".into(),
-                    })
-                }
-            },
-            |_, _| unreachable!("run_with_stdin not expected"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, LauncherError::Internal(_)),
-            "expected Internal, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn ensure_container_starts_new_container_and_returns_started() {
-        use super::ensure_container_impl;
-        use crate::validate::Validators;
-        let validators =
-            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
-        let request = ContainerLaunch {
-            name: "mcp_session_aabbccddeeff",
-            image: "botwork/mcp-echo:local",
-            network: "botwork-plugin",
-            staging_path: "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            with_workspace: false,
-            plugin_uid: 1000,
-            plugin_gid: 1000,
-            pids_limit: 256,
-            cpu_limit: "1.0",
-            memory_limit: "512m",
-            read_only_rootfs: false,
-            env: &[],
-            labels: &[],
-        };
-
-        let call_count = std::cell::Cell::new(0u32);
-        let outcome = ensure_container_impl(
-            &request,
-            &validators,
-            |args| {
-                let n = call_count.get();
-                call_count.set(n + 1);
-                Ok(super::CommandOutput {
-                    returncode: if n == 0 { 1 } else { 0 }, // first = inspect miss, rest = ok
-                    stdout: if args.contains(&"--format".to_string())
-                        && args.last().map(String::as_str) == Some("mcp_session_aabbccddeeff")
-                        && n > 0
-                    {
-                        "172.20.0.5\n".into()
-                    } else {
-                        String::new()
-                    },
-                    stderr: if n == 0 {
-                        "Error: No such object: mcp_session_aabbccddeeff".into()
-                    } else {
-                        String::new()
-                    },
-                })
-            },
-            |_, _| unreachable!(),
-        )
-        .expect("expected Ok");
         assert_eq!(outcome.status, "started");
         assert_eq!(outcome.container_ip, "172.20.0.5");
     }
 
-    // ── teardown_impl ───────────────────────────────────────────────────────
-
-    #[test]
-    fn teardown_succeeds_when_rm_and_umount_succeed() {
-        use super::teardown_impl;
-        use crate::validate::Validators;
+    #[tokio::test]
+    async fn ensure_container_returns_internal_when_inspect_fails() {
         let validators =
             Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
+        let launch = minimal_launch("mcp_session_aabbccddeeff", &[], &[]);
+        let fake = FakeDocker::default().with_inspect(vec![Err(
+            BollardError::DockerResponseServerError {
+                status_code: 500,
+                message: "boom".to_string(),
+            },
+        )]);
+
+        let err = ensure_container_impl(&launch, &validators, &fake)
+            .await
+            .expect_err("expected failure");
+
+        assert!(matches!(err, LauncherError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn ensure_container_returns_internal_when_start_fails() {
+        let validators =
+            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
+        let launch = minimal_launch("mcp_session_aabbccddeeff", &[], &[]);
+        let fake = FakeDocker::default()
+            .with_inspect(vec![Err(BollardError::DockerResponseServerError {
+                status_code: 404,
+                message: "not found".to_string(),
+            })])
+            .with_create(vec![Ok(())])
+            .with_start(vec![Err(BollardError::DockerResponseServerError {
+                status_code: 500,
+                message: "cannot start".to_string(),
+            })]);
+
+        let err = ensure_container_impl(&launch, &validators, &fake)
+            .await
+            .expect_err("expected failure");
+
+        assert!(matches!(err, LauncherError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn teardown_succeeds_when_container_already_removed() {
+        let validators =
+            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
+        let fake =
+            FakeDocker::default().with_remove(vec![Err(BollardError::DockerResponseServerError {
+                status_code: 404,
+                message: "gone".to_string(),
+            })]);
+
         let result = teardown_impl(
             "mcp_session_aabbccddeeff",
             "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
             &validators,
+            &fake,
             |_| {
-                Ok(super::CommandOutput {
-                    returncode: 0,
+                Ok(CommandOutput {
+                    returncode: 1,
                     stdout: String::new(),
-                    stderr: String::new(),
+                    stderr: "not mounted".to_string(),
                 })
             },
-        );
+        )
+        .await;
+
         assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
-    #[test]
-    fn teardown_succeeds_when_container_already_removed() {
-        use super::teardown_impl;
-        use crate::validate::Validators;
+    #[tokio::test]
+    async fn teardown_rejects_invalid_staging_path() {
         let validators =
             Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
-        let call_count = std::cell::Cell::new(0u32);
-        let result = teardown_impl(
-            "mcp_session_aabbccddeeff",
-            "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            &validators,
-            |args| {
-                let n = call_count.get();
-                call_count.set(n + 1);
-                // rm -f fails with "no such container" → non-fatal
-                if args.contains(&"rm".to_string()) {
-                    Ok(super::CommandOutput {
-                        returncode: 1,
-                        stdout: String::new(),
-                        stderr: "Error: No such container: mcp_session_aabbccddeeff".into(),
-                    })
-                } else {
-                    // umount returns "not mounted" → break out of loop
-                    Ok(super::CommandOutput {
-                        returncode: 1,
-                        stdout: String::new(),
-                        stderr: "umount: not mounted".into(),
-                    })
-                }
-            },
-        );
-        assert!(
-            result.is_ok(),
-            "non-fatal rm failure must not return Err: {result:?}"
-        );
-    }
+        let fake = FakeDocker::default();
 
-    #[test]
-    fn teardown_rejects_invalid_staging_path() {
-        use super::teardown_impl;
-        use crate::{error::LauncherError, validate::Validators};
-        let validators =
-            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
         let err = teardown_impl(
             "mcp_session_aabbccddeeff",
             "/invalid/path",
             &validators,
+            &fake,
             |_| unreachable!(),
         )
+        .await
         .unwrap_err();
-        assert!(
-            matches!(err, LauncherError::BadRequest(_)),
-            "expected BadRequest, got {err:?}"
-        );
-    }
 
-    #[test]
-    fn teardown_succeeds_when_rm_fails_non_fatally() {
-        use super::teardown_impl;
-        use crate::validate::Validators;
-        let validators =
-            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
-        // rm -f exits non-zero with a non-"no such container" error → logged but non-fatal
-        let call_count = std::cell::Cell::new(0u32);
-        let result = teardown_impl(
-            "mcp_session_aabbccddeeff",
-            "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
-            &validators,
-            |args| {
-                let n = call_count.get();
-                call_count.set(n + 1);
-                if n == 0 && args.contains(&"rm".to_string()) {
-                    Ok(super::CommandOutput {
-                        returncode: 1,
-                        stdout: String::new(),
-                        stderr: "daemon not responding".into(),
-                    })
-                } else {
-                    Ok(super::CommandOutput {
-                        returncode: 0,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    })
-                }
-            },
-        );
-        assert!(
-            result.is_ok(),
-            "non-fatal rm failure must not return Err: {result:?}"
-        );
+        assert!(matches!(err, LauncherError::BadRequest(_)));
     }
 }

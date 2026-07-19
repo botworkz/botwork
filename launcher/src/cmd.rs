@@ -1,5 +1,4 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use tracing::{info, warn};
 
@@ -8,6 +7,7 @@ use crate::config::PREFIX;
 #[derive(Debug)]
 pub struct CommandOutput {
     pub returncode: i32,
+    #[allow(dead_code)]
     pub stdout: String,
     pub stderr: String,
 }
@@ -148,57 +148,6 @@ pub fn run_command(args: &[String]) -> Result<CommandOutput, String> {
     let output = command
         .output()
         .map_err(|err| format!("failed to execute {}: {err}", args[0]))?;
-
-    Ok(CommandOutput {
-        returncode: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-}
-
-/// Like `run_command`, but pipes `stdin_data` into the child's stdin before
-/// waiting.  The pipe is closed (EOF) as soon as the write completes, so the
-/// child sees a clean end-of-file.  Use this when secret material must be
-/// delivered via stdin rather than on the argv.
-///
-/// The stdin write happens on a dedicated thread so that the parent can drain
-/// the child's stdout/stderr concurrently via `wait_with_output()`.  Without
-/// that, a child that produced enough output to fill its stdout/stderr pipe
-/// buffer (~64 KiB each on Linux) before it finished consuming stdin would
-/// deadlock.  `docker run -d` doesn't approach that today, but this shape is
-/// correct for any future caller that doesn't share that property.
-pub fn run_command_with_stdin(args: &[String], stdin_data: &[u8]) -> Result<CommandOutput, String> {
-    if args.is_empty() {
-        return Err("run_command requires at least one argument".to_string());
-    }
-
-    log_info(&format!("exec: {}", redact_argv(args)));
-
-    let mut child = Command::new(&args[0])
-        .args(&args[1..])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("failed to execute {}: {err}", args[0]))?;
-
-    let mut stdin = child.stdin.take().expect("stdin is piped");
-    let stdin_bytes = stdin_data.to_vec();
-
-    let writer = std::thread::spawn(move || -> Result<(), String> {
-        stdin
-            .write_all(&stdin_bytes)
-            .map_err(|err| format!("failed to write stdin: {err}"))
-        // `stdin` drops here, closing the pipe and sending EOF to the child.
-    });
-
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("failed to wait for {}: {err}", args[0]))?;
-
-    writer
-        .join()
-        .map_err(|_| "stdin writer thread panicked".to_string())??;
 
     Ok(CommandOutput {
         returncode: output.status.code().unwrap_or(-1),
@@ -379,14 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn redact_argv_does_not_redact_env_file_path() {
-        let arg = "--env-file";
-        let path = "/var/lib/botwork/tenants/phlax/staging/abc/.env-secrets";
-        let out = redact_argv(&argv(&[arg, path]));
-        assert_eq!(out, format!("{arg} {path}"));
-    }
-
-    #[test]
     fn redact_argv_does_not_redact_misc_flags() {
         for arg in ["--name", "mcp_session_xxx", "--memory", "512m"] {
             let out = redact_argv(&argv(&[arg]));
@@ -470,26 +411,6 @@ mod tests {
     fn run_command_empty_args_returns_error() {
         use super::run_command;
         let err = run_command(&[]).expect_err("empty args should fail");
-        assert!(err.contains("requires at least one argument"), "{err}");
-    }
-
-    // ── run_command_with_stdin ──────────────────────────────────────────────
-
-    #[test]
-    fn run_command_with_stdin_pipes_data_to_child() {
-        use super::run_command_with_stdin;
-        // `cat` reads stdin and writes it to stdout verbatim.
-        let input = b"BOTWORK_SECRET_X=hunter2\n";
-        let out = run_command_with_stdin(&["cat".to_string()], input)
-            .expect("run_command_with_stdin should not error");
-        assert_eq!(out.returncode, 0);
-        assert_eq!(out.stdout.as_bytes(), input);
-    }
-
-    #[test]
-    fn run_command_with_stdin_empty_args_returns_error() {
-        use super::run_command_with_stdin;
-        let err = run_command_with_stdin(&[], b"data").expect_err("empty args should fail");
         assert!(err.contains("requires at least one argument"), "{err}");
     }
 }

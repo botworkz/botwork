@@ -156,7 +156,8 @@ async fn handle_launch(
             labels: &launch.labels,
         },
         &state.validators,
-    )?;
+    )
+    .await?;
 
     log_info(&format!(
         "launch ok: name={} image={} network={} staging_path={} env_count={} label_count={} ip={}",
@@ -214,7 +215,7 @@ async fn handle_teardown(
     let payload = parse_json_object(request).await?;
     let teardown = parse_teardown_payload(&payload, &state.validators)?;
 
-    docker::teardown(teardown.name, teardown.staging_path, &state.validators)?;
+    docker::teardown(teardown.name, teardown.staging_path, &state.validators).await?;
 
     log_info(&format!(
         "teardown ok: name={} staging_path={}",
