@@ -456,4 +456,146 @@ mod tests {
             .expect_err("unavailable");
         assert!(matches!(err, SecretStoreError::Unavailable(_)));
     }
+
+    // ── Tier 1.5 fault-injection tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn put_secret_maps_bad_request_to_error() {
+        // 400 from backend → SecretStoreError::BadRequest
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad value"))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let err = client.put_secret(sample_put()).await.expect_err("bad request");
+        assert!(
+            matches!(&err, SecretStoreError::BadRequest(msg) if msg == "bad value"),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_secret_maps_other_status_to_unavailable() {
+        // 500 (or any other non-200/201/400/409 status) → SecretStoreError::Unavailable
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let err = client.put_secret(sample_put()).await.expect_err("unavailable");
+        assert!(matches!(err, SecretStoreError::Unavailable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn put_secret_maps_parse_failure_to_unavailable() {
+        // 200 with non-JSON body → json parse failure → SecretStoreError::Unavailable
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json at all"))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let err = client
+            .put_secret(sample_put())
+            .await
+            .expect_err("parse error");
+        assert!(matches!(err, SecretStoreError::Unavailable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_secret_transport_error_maps_to_unavailable() {
+        // Connection refused → SecretStoreError::Unavailable
+        let client = SecretStoreClient::with_endpoint("http://127.0.0.1:1");
+        let err = client
+            .delete_secret("phlax", "github.com", "pat")
+            .await
+            .expect_err("unavailable");
+        assert!(matches!(err, SecretStoreError::Unavailable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_secret_maps_200_ok_to_success() {
+        // 200 is in the OK family (alongside 204)
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/secrets/github.com/pat"))
+            .and(query_param("tenant", "phlax"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        client
+            .delete_secret("phlax", "github.com", "pat")
+            .await
+            .expect("200 should be success");
+    }
+
+    #[tokio::test]
+    async fn delete_secret_maps_bad_request_to_error() {
+        // 400 from backend → SecretStoreError::BadRequest
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/secrets/github.com/pat"))
+            .and(query_param("tenant", "phlax"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad"))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let err = client
+            .delete_secret("phlax", "github.com", "pat")
+            .await
+            .expect_err("bad request");
+        assert!(
+            matches!(&err, SecretStoreError::BadRequest(msg) if msg == "bad"),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_secret_maps_other_status_to_unavailable() {
+        // 500 (or any other non-200/204/400/404 status) → SecretStoreError::Unavailable
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/secrets/github.com/pat"))
+            .and(query_param("tenant", "phlax"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("error"))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let err = client
+            .delete_secret("phlax", "github.com", "pat")
+            .await
+            .expect_err("unavailable");
+        assert!(matches!(err, SecretStoreError::Unavailable(_)), "{err:?}");
+    }
+
+    #[test]
+    fn error_display_covers_all_variants() {
+        // Every Display arm in SecretStoreError
+        assert_eq!(
+            format!("{}", SecretStoreError::Disabled),
+            "secret-store disabled (break-glass)"
+        );
+        assert_eq!(
+            format!("{}", SecretStoreError::Unavailable("msg".to_string())),
+            "secret-store unavailable: msg"
+        );
+        assert_eq!(
+            format!("{}", SecretStoreError::AlreadyExists("dup".to_string())),
+            "already_exists: dup"
+        );
+        assert_eq!(
+            format!("{}", SecretStoreError::NotFound("key".to_string())),
+            "not_found: key"
+        );
+        assert_eq!(
+            format!("{}", SecretStoreError::BadRequest("bad".to_string())),
+            "bad_request: bad"
+        );
+    }
 }

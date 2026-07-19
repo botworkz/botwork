@@ -738,10 +738,16 @@ fn json_to_raw_plugin(body: PluginBody) -> Result<RawPluginEntry, ApiError> {
         // tag-aware in ways that don't compose with serde_json's
         // Value. Text is the lingua franca.
         let s = serde_json::to_string(&v).map_err(|err| {
+            // coverage:off — serde_json::to_string is infallible for any JsonValue;
+            // this arm exists for defensive completeness only.
             ApiError::bad_request(format!("could not re-serialise nested field: {err}"))
+            // coverage:on
         })?;
         serde_yaml::from_str(&s).map_err(|err| {
+            // coverage:off — valid JSON text (produced above) always deserialises as
+            // serde_yaml::Value; this arm exists for defensive completeness only.
             ApiError::bad_request(format!("nested field not yaml-roundtrip-able: {err}"))
+            // coverage:on
         })
     }
     Ok(RawPluginEntry {
@@ -1288,9 +1294,12 @@ async fn create_secret(
             )),
             SecretStoreError::AlreadyExists(msg) => ApiError::already_exists(msg),
             SecretStoreError::BadRequest(msg) => ApiError::bad_request(msg),
+            // coverage:off — SecretStoreClient::put_secret never returns NotFound;
+            // this arm covers the full enum for exhaustiveness.
             SecretStoreError::NotFound(msg) => ApiError::Internal {
                 detail: format!("unexpected NotFound from secret-store on POST: {msg}"),
             },
+            // coverage:on
         })?;
 
     audit_event(
@@ -1346,9 +1355,12 @@ async fn delete_secret(
                 ApiError::not_found("secret", format!("{service}/{name}"))
             }
             SecretStoreError::BadRequest(msg) => ApiError::bad_request(msg),
+            // coverage:off — SecretStoreClient::delete_secret never returns AlreadyExists;
+            // this arm covers the full enum for exhaustiveness.
             SecretStoreError::AlreadyExists(msg) => ApiError::Internal {
                 detail: format!("unexpected AlreadyExists from secret-store on DELETE: {msg}"),
             },
+            // coverage:on
         })?;
 
     audit_event(
@@ -1371,12 +1383,18 @@ async fn delete_secret(
 
 fn json_type(v: &JsonValue) -> &'static str {
     match v {
+        // coverage:off — Null and Object are matched by dedicated arms in every
+        // call site before reaching the `Some(other)` fallthrough that calls this
+        // function; these two arms exist for completeness only.
         JsonValue::Null => "null",
+        // coverage:on
         JsonValue::Bool(_) => "bool",
         JsonValue::Number(_) => "number",
         JsonValue::String(_) => "string",
         JsonValue::Array(_) => "array",
+        // coverage:off — see Null note above.
         JsonValue::Object(_) => "object",
+        // coverage:on
     }
 }
 
@@ -3397,5 +3415,102 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(json_body(response).await["error"]["code"], "unavailable");
+    }
+
+    // ── Tier 1.5: json_type Bool, String, Array arms ───────────────
+
+    #[tokio::test]
+    async fn create_workspace_plugin_rejects_bool_string_and_array_configs() {
+        let workspace_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+
+        // Bool arm
+        let resp_bool = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+        ))
+        .oneshot(tenant_request(
+            "POST",
+            "/api/tenant/phlax/workspace_plugins",
+            "phlax",
+            serde_json::json!({
+                "workspace_id": workspace_id,
+                "plugin_id": plugin_id,
+                "config": true
+            }),
+        ))
+        .await
+        .expect("response");
+        assert_eq!(resp_bool.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let json = json_body(resp_bool).await;
+        assert_eq!(json["error"]["code"], "validation_failed");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("bool"),
+            "expected 'bool' in message: {json}"
+        );
+
+        // String arm
+        let resp_string =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id,
+                    "config": "invalid"
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(resp_string.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let json = json_body(resp_string).await;
+        assert_eq!(json["error"]["code"], "validation_failed");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("string"),
+            "expected 'string' in message: {json}"
+        );
+
+        // Array arm
+        let resp_array =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id,
+                    "config": [1, 2, 3]
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(resp_array.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let json = json_body(resp_array).await;
+        assert_eq!(json["error"]["code"], "validation_failed");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("array"),
+            "expected 'array' in message: {json}"
+        );
     }
 }

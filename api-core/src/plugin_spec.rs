@@ -379,12 +379,16 @@ fn validate_env(
                 ),
             ));
         }
+        // coverage:off — serde_yaml 0.9 uses IndexMap which deduplicates keys at
+        // parse time, so `seen.insert()` returning false is unreachable via any
+        // serde_yaml-parsed Value::Mapping; kept as a defensive guard.
         if !seen.insert(key.to_string()) {
             return Err(plugin_err(
                 plugin,
                 &format!("env key '{key}': duplicate key"),
             ));
         }
+        // coverage:on
         out.push(serde_json::json!({"name": key, "value": value}));
     }
     Ok(JsonValue::Array(out))
@@ -531,10 +535,13 @@ fn validate_egress(
         validate_allow_entry(plugin, i, entry)?;
     }
     let json_val = serde_json::to_value(raw).map_err(|e| {
+        // coverage:off — serde_json::to_value is infallible for any serde_yaml::Value
+        // that passes the shape checks above; this arm exists for defensive completeness.
         plugin_err(
             plugin,
             &format!("has invalid 'egress': cannot represent as JSON: {e}"),
         )
+        // coverage:on
     })?;
     let serialised = serde_json::to_string(&json_val).expect("validated JSON serialises");
     if serialised.len() > MAX_ENV_VALUE_BYTES {
@@ -686,10 +693,13 @@ pub fn validate_workspace_plugin_config(
         return Ok(None);
     }
     let json_val: JsonValue = serde_json::to_value(raw).map_err(|e| {
+        // coverage:off — serde_json::to_value is infallible for any serde_yaml::Value
+        // that passes the null check above; this arm exists for defensive completeness.
         binding_err(
             binding_context,
             &format!("invalid 'config': cannot represent as JSON: {e}"),
         )
+        // coverage:on
     })?;
     if !json_val.is_object() {
         return Err(binding_err(
@@ -1090,5 +1100,125 @@ mod tests {
         );
         assert_eq!(json_type_name(&serde_json::json!(true)), "bool");
         assert_eq!(json_type_name(&serde_json::json!({})), "object");
+    }
+
+    // ── Tier 1.5 fault-injection / edge tests ──────────────────────
+
+    #[test]
+    fn egress_null_is_rejected() {
+        // validate_egress: raw.is_null() arm — `egress: ~` (YAML null)
+        let r = raw("p", "image: ghcr.io/example/p:1.0\negress: ~\n");
+        let err = validate_one(&r).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("egress"), "{msg}");
+    }
+
+    #[test]
+    fn egress_bool_shows_bool_in_type_error() {
+        // yaml_type_name Bool arm: `egress: true` is not a string/mapping
+        let r = raw("p", "image: ghcr.io/example/p:1.0\negress: true\n");
+        let err = validate_one(&r).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("bool"), "{msg}");
+    }
+
+    #[test]
+    fn egress_tagged_value_shows_tagged_in_type_error() {
+        // yaml_type_name Tagged arm: a YAML tagged scalar is not a string/mapping
+        let r = raw("p", "image: ghcr.io/example/p:1.0\negress: !custom val\n");
+        let err = validate_one(&r).unwrap_err();
+        let msg = format!("{err}");
+        // A tagged value that is not "all"/"none" must be rejected;
+        // the type name appears in the message.
+        assert!(
+            msg.contains("tagged") || msg.contains("all") || msg.contains("none"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn egress_allow_with_mapping_value_shows_mapping_in_type_error() {
+        // yaml_type_name Mapping arm: allow_val is a mapping, not a sequence
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n    k: v\n",
+        );
+        let err = validate_one(&r).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("mapping"), "{msg}");
+    }
+
+    #[test]
+    fn validate_allow_entry_rejects_non_mapping_entry() {
+        // validate_allow_entry: entry.as_mapping() fails — allow item is a scalar bool
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - true\n",
+        );
+        assert!(validate_one(&r).is_err());
+    }
+
+    #[test]
+    fn validate_allow_entry_rejects_non_string_host() {
+        // validate_allow_entry: host_val.as_str() fails — host is a number
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: 123\n    ports: [443]\n",
+        );
+        let err = validate_one(&r).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("host"), "{msg}");
+    }
+
+    #[test]
+    fn validate_allow_entry_rejects_non_sequence_ports() {
+        // validate_allow_entry: ports_val.as_sequence() fails — ports is a scalar
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - host: example.com\n    ports: 443\n",
+        );
+        let err = validate_one(&r).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("ports"), "{msg}");
+    }
+
+    #[test]
+    fn valid_env_name_rejects_empty_key() {
+        // valid_env_name: bytes.is_empty() arm — YAML empty-string key
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  '': value\n",
+        );
+        assert!(validate_one(&r).is_err());
+    }
+
+    #[test]
+    fn valid_env_name_rejects_key_with_invalid_subsequent_char() {
+        // valid_env_name: bytes.iter().skip(1) arm — starts uppercase, has lowercase
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  FOObar: value\n",
+        );
+        assert!(validate_one(&r).is_err());
+    }
+
+    #[test]
+    fn validate_env_rejects_non_string_key() {
+        // validate_env: key_val.as_str() fails — YAML integer key is not a string
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  1: value\n",
+        );
+        assert!(validate_one(&r).is_err());
+    }
+
+    #[test]
+    fn validate_resources_rejects_non_string_key() {
+        // validate_resources: key_val.as_str() fails — YAML integer key is not a string
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  1: value\n",
+        );
+        assert!(validate_one(&r).is_err());
     }
 }

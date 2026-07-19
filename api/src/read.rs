@@ -1363,4 +1363,82 @@ mod tests {
         assert_eq!(unbound.status(), StatusCode::NOT_FOUND);
         assert_eq!(json_body(unbound).await["error"]["code"], "not_found");
     }
+
+    // ── Tier 1.5 fault-injection / edge tests ──────────────────────
+
+    #[tokio::test]
+    async fn list_plugins_returns_seeded_rows() {
+        // list_plugins success path — exercises lines 196-197
+        let plugin_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new().with_plugin(plugin_row(plugin_id, "mcp-fetch")),
+        );
+        let app = crate::handler::build_router(state);
+        let response = app
+            .oneshot(admin_get("/api/plugins"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = json_body(response).await;
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["items"][0]["id"], plugin_id.to_string());
+        assert_eq!(json["items"][0]["name"], "mcp-fetch");
+    }
+
+    #[tokio::test]
+    async fn get_workspace_plugin_not_found_when_workspace_belongs_to_other_tenant() {
+        // get_workspace_plugin ownership check: workspace.tenant_id != tenant_id
+        let path_tenant_id = Uuid::new_v4();
+        let other_tenant_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(path_tenant_id, "phlax"))
+                // Workspace belongs to a DIFFERENT tenant — ownership check must reject it.
+                .with_workspace(workspace_row(workspace_id, other_tenant_id, "mcp")),
+        );
+        let app = crate::handler::build_router(state);
+        let response = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn get_session_worker_not_found_when_linked_session_is_missing() {
+        // get_session_worker: worker has Some(session_id) but that session doesn't exist
+        // → .or_not_found("agent_session", ...) fires → 404
+        let tenant_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let orphan_session_id = Uuid::new_v4();
+        let state = crate::test_support::app_state_with_mock_store(
+            MockApiStore::new()
+                .with_tenant(tenant_row(tenant_id, "phlax"))
+                // Worker references a session that does not exist in the store.
+                .with_session_worker(session_worker_row(
+                    worker_id,
+                    Some(orphan_session_id),
+                    plugin_id,
+                )),
+        );
+        let app = crate::handler::build_router(state);
+        let response = app
+            .oneshot(tenant_get(
+                &format!("/api/tenant/phlax/session_workers/{worker_id}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = json_body(response).await;
+        assert_eq!(json["error"]["code"], "not_found");
+    }
 }
