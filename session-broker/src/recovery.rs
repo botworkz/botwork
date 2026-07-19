@@ -587,15 +587,15 @@ mod tests {
     // DockerApi methods used in recovery.  All queues are optional — tests that
     // don't exercise a given method leave its queue empty and the method panics
     // if unexpectedly called (makes bugs obvious).
-    type ListQueue = Arc<Mutex<VecDeque<Result<Vec<ContainerSummary>, BollardError>>>>;
-    type InspectQueue = Arc<Mutex<VecDeque<Result<ContainerInspectResponse, BollardError>>>>;
-    type RemoveQueue = Arc<Mutex<VecDeque<Result<(), BollardError>>>>;
+    type FakeListQueue = Arc<Mutex<VecDeque<Result<Vec<ContainerSummary>, BollardError>>>>;
+    type FakeInspectQueue = Arc<Mutex<VecDeque<Result<ContainerInspectResponse, BollardError>>>>;
+    type FakeRemoveQueue = Arc<Mutex<VecDeque<Result<(), BollardError>>>>;
 
     #[derive(Default, Clone)]
     struct FakeDocker {
-        list_results: ListQueue,
-        inspect_results: InspectQueue,
-        remove_results: RemoveQueue,
+        list_results: FakeListQueue,
+        inspect_results: FakeInspectQueue,
+        remove_results: FakeRemoveQueue,
     }
 
     impl FakeDocker {
@@ -1019,6 +1019,9 @@ mod tests {
     // ── force_remove_container_impl (FakeDocker) ──────────────────────────────
 
     #[tokio::test]
+    // The log-capture guard must be held across the await so all log output from
+    // `force_remove_container_impl` is captured.  This mirrors the same pattern
+    // used by other log-capture tests in this module.
     #[allow(clippy::await_holding_lock)]
     async fn force_remove_impl_logs_success() {
         let _guard = crate::test_support::log_capture_guard();
@@ -1033,6 +1036,7 @@ mod tests {
     }
 
     #[tokio::test]
+    // See note on force_remove_impl_logs_success.
     #[allow(clippy::await_holding_lock)]
     async fn force_remove_impl_treats_404_as_success() {
         let _guard = crate::test_support::log_capture_guard();
