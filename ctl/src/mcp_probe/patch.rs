@@ -294,7 +294,10 @@ mod tests {
         assert!(matches!(err, PatchError::Patch(_)), "{err:?}");
         let msg = format!("{err}");
         assert!(msg.contains("commit"), "{msg}");
-        assert!(removed.load(Ordering::SeqCst), "remove_container should run");
+        assert!(
+            removed.load(Ordering::SeqCst),
+            "remove_container should run"
+        );
     }
 
     /// Load-bearing contract: every key=value in `labels` is passed to
@@ -447,7 +450,8 @@ mod tests {
 
         let got = captured.lock().unwrap().clone().expect("commit was called");
         assert_eq!(
-            got.get("org.opencontainers.image.title").map(String::as_str),
+            got.get("org.opencontainers.image.title")
+                .map(String::as_str),
             Some("base")
         );
         assert_eq!(got.get("keep.me").map(String::as_str), Some("1"));
