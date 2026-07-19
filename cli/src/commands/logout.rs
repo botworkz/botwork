@@ -34,11 +34,11 @@ mod tests {
     use super::*;
     use crate::keyring_store::{KeyringEntry, KeyringStore};
     use chrono::Utc;
-    use std::sync::Mutex;
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
-    fn env_lock() -> &'static Mutex<()> {
-        crate::test_env_lock::env_lock()
+    fn lock_env() -> MutexGuard<'static, ()> {
+        crate::test_env_lock::lock_env()
     }
 
     fn fixture_entry() -> KeyringEntry {
@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn run_removes_existing_entry() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
         KeyringStore::new()
@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn run_is_idempotent_when_entry_is_missing() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
 

@@ -60,7 +60,7 @@ fn format_export(token_env: &str, bearer: &str) -> String {
 mod tests {
     use super::*;
     use crate::keyring_store::{KeyringEntry, KeyringStore};
-    use std::sync::Mutex;
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     #[test]
@@ -71,8 +71,8 @@ mod tests {
         );
     }
 
-    fn env_lock() -> &'static Mutex<()> {
-        crate::test_env_lock::env_lock()
+    fn lock_env() -> MutexGuard<'static, ()> {
+        crate::test_env_lock::lock_env()
     }
 
     fn fixture_entry(expires_at: chrono::DateTime<Utc>) -> KeyringEntry {
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn run_uses_explicit_token_env_override() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
         KeyringStore::new()
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn run_reads_token_env_from_config_when_not_overridden() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
         let config = dir.path().join("config.toml");
         std::fs::write(&config, "token_env = \"ALT_TOKEN\"\n").unwrap();
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn run_errors_for_missing_or_expired_lease() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
 
