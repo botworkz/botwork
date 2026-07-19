@@ -460,4 +460,93 @@ mod tests {
         let err = Validators::new("(").expect_err("invalid regex should fail");
         assert!(!err.is_empty(), "regex error must be surfaced");
     }
+
+    // ── additional coverage for uncovered branches ──────────────────
+
+    #[test]
+    fn normalize_path_handles_curdir_and_parentdir_components() {
+        // CurDir (.) is skipped (line 246)
+        assert_eq!(
+            super::normalize_path("/tmp/./foo"),
+            "/tmp/foo",
+            "single CurDir component"
+        );
+        assert_eq!(
+            super::normalize_path("/tmp/./././foo"),
+            "/tmp/foo",
+            "repeated CurDir components"
+        );
+
+        // ParentDir (..) pops the last pushed component (lines 247-249)
+        assert_eq!(
+            super::normalize_path("/tmp/foo/../bar"),
+            "/tmp/bar",
+            "single ParentDir"
+        );
+        assert_eq!(
+            super::normalize_path("/tmp/a/b/../../c"),
+            "/tmp/c",
+            "double ParentDir"
+        );
+        assert_eq!(
+            super::normalize_path("/tmp/./foo/../bar"),
+            "/tmp/bar",
+            "mixed CurDir and ParentDir"
+        );
+    }
+
+    #[test]
+    fn safe_staging_path_second_check_rejects_when_normalize_escapes_base() {
+        // Use a trailing-slash staging_base so that:
+        //   • the regex embeds `{base}/` — with a trailing-slash base that
+        //     becomes `{base}//` — so a double-slash path like
+        //     `/tmp/staging_trailing//acme/staging/aabbccddeeff` matches the
+        //     regex (regex::escape does not change `/`; this is stable behavior
+        //     since forward-slash is not a regex metacharacter).
+        //   • normalize_path collapses the double slash to a single slash,
+        //     yielding `/tmp/staging_trailing/acme/staging/aabbccddeeff`.
+        //   • The second guard checks `safe.starts_with("/tmp/staging_trailing//")`,
+        //     which is now FALSE — so the second error branch fires.
+        let trailing = "/tmp/staging_trailing/";
+        let validators = Validators::new_with_bases(
+            r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$",
+            trailing,
+            "/var/lib/botwork/tenants", // agents_base irrelevant here
+        )
+        .expect("validators");
+
+        // Double-slash path passes the regex (which embeds the trailing slash)
+        // but fails the second starts_with check after normalization removes
+        // the extra slash.
+        let double_slash_path = "/tmp/staging_trailing//acme/staging/aabbccddeeff";
+        let result = validators.safe_staging_path(double_slash_path);
+        assert!(
+            matches!(result, Err(LauncherError::BadRequest(_))),
+            "expected second-check error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn safe_agent_dir_second_check_rejects_when_normalize_escapes_base() {
+        // Same trick for agents_base: trailing-slash base embeds a double-slash
+        // in the regex, a double-slash path matches the regex, but
+        // normalize_path collapses it to a single-slash path that no longer
+        // starts_with the double-slash prefix — so the second error branch fires.
+        let trailing = "/tmp/agents_trailing/";
+        let validators = Validators::new_with_bases(
+            r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$",
+            "/var/lib/botwork/tenants", // staging_base irrelevant here
+            trailing,
+        )
+        .expect("validators");
+
+        // Double-slash path passes the regex but fails the second starts_with
+        // check after normalization removes the extra slash.
+        let double_slash_path = "/tmp/agents_trailing//acme/workspaces/mcp/agents/agent-abc123";
+        let result = validators.safe_agent_dir(double_slash_path);
+        assert!(
+            matches!(result, Err(LauncherError::BadRequest(_))),
+            "expected second-check error, got {result:?}"
+        );
+    }
 }
