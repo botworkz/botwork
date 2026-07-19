@@ -280,6 +280,8 @@ fn file_delete(tenant: &str) -> Result<bool, LoginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use botwork_test_support::EnvGuard;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn fixture_entry() -> KeyringEntry {
@@ -407,10 +409,11 @@ mod tests {
     // unwrap_or_else so a panicking test can't cascade failures into others.
 
     #[test]
+    #[serial(env)]
     fn store_round_trips_via_env_dir() {
-        let _lock = crate::test_env_lock::lock_env();
         let dir = TempDir::new().unwrap();
-        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+        let keyring_dir = dir.path().to_string_lossy().into_owned();
+        let _env = EnvGuard::apply(&[("BOTWORK_LOGIN_KEYRING_DIR", Some(&keyring_dir))]);
 
         let store = KeyringStore::new();
         let entry = fixture_entry();
@@ -435,8 +438,6 @@ mod tests {
         assert!(!store.delete("phlax").unwrap());
         // Read after delete is None.
         assert!(store.read("phlax").unwrap().is_none());
-
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
     }
 
     #[test]
@@ -446,10 +447,11 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn read_and_delete_surface_non_notfound_fs_errors() {
-        let _lock = crate::test_env_lock::lock_env();
         let dir = TempDir::new().unwrap();
-        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+        let keyring_dir = dir.path().to_string_lossy().into_owned();
+        let _env = EnvGuard::apply(&[("BOTWORK_LOGIN_KEYRING_DIR", Some(&keyring_dir))]);
 
         // Create a directory where the tenant file should be so read_to_string/remove_file
         // both fail with a non-NotFound error path.
@@ -468,7 +470,5 @@ mod tests {
             matches!(delete_err, LoginError::Keyring(_)),
             "got {delete_err:?}"
         );
-
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
     }
 }

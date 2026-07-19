@@ -15,6 +15,7 @@ members = [
     "opaque-handshake",
     "session-broker",
     "ctl",
+    "test-support",
     "version",
 ]
 
@@ -54,6 +55,9 @@ default-members = [
 # this block is a policy gate, not a style sheet.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[workspace.dependencies]
+serial_test = "3"
 
 # Abort on panic in release builds. This removes the stack unwinder and
 # its dependency on libgcc_s.so.1, so the binaries run on distroless
