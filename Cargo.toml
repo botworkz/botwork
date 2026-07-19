@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "api",
     "api-core",
+    "auth-broker",
     "ui/server",
     "ui/wasm",
     "bootstrap",
@@ -16,6 +17,7 @@ members = [
     "session-broker",
     "ctl",
     "test-support",
+    "vault",
     "version",
 ]
 
@@ -28,6 +30,7 @@ members = [
 # container image builds it via `trunk build --release`.
 default-members = [
     "api",
+    "auth-broker",
     "ui/server",
     "bootstrap",
     "cli",
@@ -38,6 +41,7 @@ default-members = [
     "launcher",
     "session-broker",
     "ctl",
+    "vault",
     "version",
 ]
 

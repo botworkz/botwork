@@ -40,6 +40,12 @@ ignore = [
     # sea-bae (via sea-orm-macros), syn_derive (via rstml/leptos_hot_reload).
     # No upstream fix; all consumers need to migrate to manyhow or similar.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is pulled in by leptos macros and sea-orm-macros; no safe upgrade available until those crates migrate" },
+
+    # atomic-polyfill v1.0.3 — unmaintained (archived by embassy-rs). Pulled
+    # in transitively by heapless v0.7.17 → postcard v1.1.3 → botwork-vault →
+    # botwork-auth-broker. No safe upgrade: heapless 0.7.x depends on it and
+    # postcard has not yet moved to a newer heapless release.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill is pulled in by heapless 0.7.x via postcard; no safe upgrade available until postcard migrates to a newer heapless release" },
 ]
 
 # ── License policy ─────────────────────────────────────────────────────────────

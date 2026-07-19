@@ -92,6 +92,14 @@ jobs:
           package: botwork-api-core
           binary: ''
           artifact: none
+        - crate: auth-broker
+          service: auth-broker
+          package: botwork-auth-broker
+          binary: botwork-auth-broker
+          artifact: container
+          needs-db-migrate: true
+          needs-docker: true
+          features: test-support
         - crate: bootstrap
           service: bootstrap
           package: botwork-bootstrap
@@ -158,6 +166,12 @@ jobs:
           package: botwork-version
           binary: ''
           artifact: none
+        - crate: vault
+          service: vault
+          package: botwork-vault
+          binary: botwork-vault
+          artifact: binary
+          features: test-support
     uses: ./.github/workflows/_crate.yml
     with:
       crate: ${{ matrix.crate }}
@@ -168,6 +182,7 @@ jobs:
       needs-db-migrate: ${{ matrix.needs-db-migrate || false }}
       needs-docker: ${{ matrix.needs-docker || false }}
       wasm-target-check: ${{ matrix.wasm-target-check || false }}
+      features: ${{ matrix.features || '' }}
 
   coverage-aggregate:
     name: coverage-aggregate
@@ -407,6 +422,13 @@ jobs:
         name: botwork-cli-binary
         path: .ci-binaries
 
+    - name: Download botwork-vault binary
+      if: steps.version.outputs.is_release == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: botwork-vault-binary
+        path: .ci-binaries
+
     # ── GitHub Release: create + upload assets ──────────────────────────────
     # `softprops/action-gh-release` creates the tag and release in one
     # step. Overwrite protection is provided by the tag-existence check
@@ -423,3 +445,4 @@ jobs:
           .ci-binaries/botwork-launcher
           .ci-binaries/botctl
           .ci-binaries/bw
+          .ci-binaries/botwork-vault
