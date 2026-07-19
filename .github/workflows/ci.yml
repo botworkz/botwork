@@ -204,12 +204,24 @@ jobs:
         # Merge all per-crate lcovs into one repo-level report.
         # No fail-under threshold yet (baseline run). Maintainer will ratchet
         # a floor in a dedicated follow-up once the baseline is stable.
-        lcov "${tracefile_args[@]}" --output-file coverage/lcov.info
+        #
+        # lcov v2 aborts the merge if ANY input tracefile has no valid records.
+        # Crates that legitimately produce 0% coverage (e.g. api-core, version,
+        # bootstrap — pure glue / trait-only crates) emit an empty lcov, which is
+        # the "0% is not a failure" case, not an error. --ignore-errors
+        # empty,unused,corrupt makes lcov skip such a tracefile instead of
+        # killing the merge. The non-empty assertion on the merged output below
+        # still guards against a totally empty aggregate.
+        lcov "${tracefile_args[@]}" \
+          --ignore-errors empty,unused,corrupt \
+          --output-file coverage/lcov.info
         if [ ! -s coverage/lcov.info ]; then
           echo "::error::aggregate coverage/lcov.info missing or empty"
           exit 1
         fi
-        genhtml coverage/lcov.info --output-directory coverage/html
+        genhtml coverage/lcov.info \
+          --ignore-errors empty,unused,corrupt,source \
+          --output-directory coverage/html
     - name: Report aggregate coverage
       run: |
         set -euo pipefail
