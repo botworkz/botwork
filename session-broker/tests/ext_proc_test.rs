@@ -9,7 +9,9 @@ use botwork_session_broker::config_broker::{
 use botwork_session_broker::ext_proc::{
     upstream_header_mutation, ExternalProcessorService, PerStreamState, TeardownInfo,
 };
-use botwork_session_broker::test_support::{start_log_capture, take_log_capture};
+use botwork_session_broker::test_support::{
+    log_capture_guard, start_log_capture, take_log_capture,
+};
 use botwork_session_broker::{AppState, PendingInit, TransportState};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use envoy_proto::envoy::service::ext_proc::v3::{
@@ -1593,6 +1595,7 @@ async fn cap_present_in_per_stream_state_after_request_headers() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn bearer_value_not_logged_in_clear() {
     let auth_url = spawn_auth_broker_capture(
         200,
@@ -1613,6 +1616,7 @@ async fn bearer_value_not_logged_in_clear() {
         config_url,
     );
 
+    let _guard = log_capture_guard();
     start_log_capture();
     let mut stream = PerStreamState::default();
     let _ = ExternalProcessorService::handle_request_headers(
