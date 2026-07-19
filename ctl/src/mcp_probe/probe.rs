@@ -2,20 +2,17 @@
 //!
 //! The runtime shape is intentionally narrow:
 //!
-//! 1. `docker run -d --rm -p <host_port>:<package.port> <image>` —
-//!    bind the container port the operator declared in the package
-//!    file to a host port (ephemeral by default; pinned via
-//!    `--port`).
+//! 1. Create a detached container via the local docker daemon
+//!    (`bollard`), binding `127.0.0.1:<host_port>:<container_port>`
+//!    with `auto_remove: true` (replaces `docker run -d --rm -p`).
 //! 2. Poll `127.0.0.1:<host_port>` for TCP acceptance for up to the
 //!    user-supplied timeout. The first acceptable connect win is
 //!    the cue to start the JSON-RPC handshake.
 //! 3. Drive the four-call handshake the RFE specifies:
 //!    `initialize` → `notifications/initialized` → `tools/list` →
 //!    conditional `resources/list` / `prompts/list`.
-//! 4. Always `docker stop <container>` (and rely on `--rm` to clean
-//!    up). The teardown runs in a `Drop` impl so a panicking probe
-//!    doesn't leak a long-running container into the runner's
-//!    workspace.
+//! 4. Always stop the container via bollard on drop (`TeardownGuard`);
+//!    `auto_remove: true` ensures the daemon cleans it up.
 //!
 //! The HTTP client is `reqwest::blocking` to match the rest of
 //! `botctl` — the binary stays a single-threaded blocking
@@ -24,14 +21,15 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use bollard::models::{ContainerCreateBody, HostConfig, PortBinding, PortMap};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
 
+use crate::mcp_probe::docker::{connect_docker, is_socket_missing, DockerApi};
 use crate::mcp_probe::Args;
 
 /// Per-call HTTP timeout for the JSON-RPC roundtrip. Shorter than
@@ -98,10 +96,18 @@ pub fn run_probe(args: &Args) -> Result<ProbeResult, ProbeError> {
     //   mapping stays the property "what you bind on the host is
     //   the port the server listens on".
 
-    let container = start_container(&args.runtime, &args.image_in, host_port, container_port)?;
-    // RAII guard ensures we run `docker stop` even on panic.
+    let docker = connect_docker().map_err(|e| {
+        if is_socket_missing(&e) {
+            ProbeError::RuntimeMissing("docker socket not reachable".to_string())
+        } else {
+            ProbeError::Io(e.to_string())
+        }
+    })?;
+
+    let container = start_container(&docker, &args.image_in, host_port, container_port)?;
+    // RAII guard ensures we stop the container (and auto_remove cleans it up) even on panic.
     let _teardown = TeardownGuard {
-        runtime: args.runtime.clone(),
+        docker: docker.clone(),
         container_id: container.id.clone(),
     };
 
@@ -138,39 +144,78 @@ pub struct RunningContainer {
     pub id: String,
 }
 
-/// `docker run -d --rm -p host_port:container_port image`. Returns
-/// the container id (stdout of `docker run`).
-pub fn start_container(
-    runtime: &str,
+/// Create and start a container for probing.
+///
+/// Reproduces `docker run -d --rm -p 127.0.0.1:<host_port>:<container_port> <image>`
+/// via the bollard socket API.  Returns the container ID.
+pub(crate) fn start_container<D: DockerApi + ?Sized>(
+    docker: &D,
     image: &str,
     host_port: u16,
     container_port: u16,
 ) -> Result<RunningContainer, ProbeError> {
-    let port_arg = format!("127.0.0.1:{host_port}:{container_port}");
-    let output = Command::new(runtime)
-        .args(["run", "-d", "--rm", "-p", &port_arg, image])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => ProbeError::RuntimeMissing(runtime.to_string()),
-            _ => ProbeError::Io(err.to_string()),
-        })?;
-    if !output.status.success() {
-        return Err(ProbeError::ContainerStartFailed {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ProbeError::Io(format!("failed to initialize async runtime: {e}")))?;
+    rt.block_on(start_container_impl(
+        docker,
+        image,
+        host_port,
+        container_port,
+    ))
+}
+
+/// Async inner; testable via [`DockerApi`] seam.
+async fn start_container_impl<D: DockerApi + ?Sized>(
+    docker: &D,
+    image: &str,
+    host_port: u16,
+    container_port: u16,
+) -> Result<RunningContainer, ProbeError> {
+    // Build the port bindings: container_port/tcp → [127.0.0.1:host_port]
+    let mut port_bindings = PortMap::new();
+    port_bindings.insert(
+        format!("{container_port}/tcp"),
+        Some(vec![PortBinding {
+            host_ip: Some("127.0.0.1".to_string()),
+            host_port: Some(host_port.to_string()),
+        }]),
+    );
+
+    let body = ContainerCreateBody {
+        image: Some(image.to_string()),
+        host_config: Some(HostConfig {
+            auto_remove: Some(true),
+            port_bindings: Some(port_bindings),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let id = docker
+        .create_container(body)
+        .await
+        .map_err(|e| ProbeError::ContainerStartFailed {
             image: image.to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr)
-                .trim_end()
-                .to_string(),
-        });
-    }
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            stderr: e.to_string(),
+        })?;
+
     if id.is_empty() {
         return Err(ProbeError::ContainerStartFailed {
             image: image.to_string(),
-            stderr: "docker run produced no container id".to_string(),
+            stderr: "create_container returned empty id".to_string(),
         });
     }
+
+    docker
+        .start_container(&id)
+        .await
+        .map_err(|e| ProbeError::ContainerStartFailed {
+            image: image.to_string(),
+            stderr: e.to_string(),
+        })?;
+
     Ok(RunningContainer { id })
 }
 
@@ -513,22 +558,35 @@ fn check_deadline(deadline: Instant) -> Result<(), ProbeError> {
     Ok(())
 }
 
-/// RAII teardown: `docker stop <id>` on drop. We don't surface
-/// stop failures (the container has `--rm` so a stop almost always
-/// succeeds; if it doesn't, the runner will reap the container
-/// shortly).
+/// RAII teardown: stop the container via bollard on drop.  Stop
+/// failures are ignored — the container has `auto_remove: true` so
+/// the daemon will clean it up when it exits regardless.  Only the
+/// thin `bollard::Docker` wrapper and the RT spin-up are
+/// offline-unreachable; the rest is tested via FakeDocker.
 struct TeardownGuard {
-    runtime: String,
+    docker: bollard::Docker,
     container_id: String,
 }
 
 impl Drop for TeardownGuard {
     fn drop(&mut self) {
-        let _ = Command::new(&self.runtime)
-            .args(["stop", "--time", "2", &self.container_id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let docker = self.docker.clone();
+        let id = self.container_id.clone();
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            let _ = rt.block_on(
+                docker.stop_container(
+                    &id,
+                    Some(
+                        bollard::query_parameters::StopContainerOptionsBuilder::new()
+                            .t(2)
+                            .build(),
+                    ),
+                ),
+            );
+        }
     }
 }
 
@@ -623,7 +681,73 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::mcp_probe::docker::test_support::FakeDocker;
 
+    // ── start_container_impl via FakeDocker ─────────────────────────────────
+
+    #[tokio::test]
+    async fn start_container_returns_id_on_success() {
+        let fake = FakeDocker::default()
+            .with_create_container(Ok("abc123def456".to_string()))
+            .with_start_container(Ok(()));
+
+        let result = start_container_impl(&fake, "my-image:tag", 8080, 8000).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(result.unwrap().id, "abc123def456");
+    }
+
+    #[tokio::test]
+    async fn start_container_fails_when_create_returns_empty_id() {
+        let fake = FakeDocker::default().with_create_container(Ok(String::new()));
+
+        let err = start_container_impl(&fake, "my-image:tag", 8080, 8000)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ProbeError::ContainerStartFailed { .. }),
+            "expected ContainerStartFailed, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_container_maps_create_error_to_container_start_failed() {
+        use bollard::errors::Error as BollardError;
+        let fake = FakeDocker::default().with_create_container(Err(
+            BollardError::DockerResponseServerError {
+                status_code: 500,
+                message: "daemon error".into(),
+            },
+        ));
+
+        let err = start_container_impl(&fake, "bad:image", 9090, 8000)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ProbeError::ContainerStartFailed { ref image, .. } if image == "bad:image"),
+            "expected ContainerStartFailed, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_container_maps_start_error_to_container_start_failed() {
+        use bollard::errors::Error as BollardError;
+        let fake = FakeDocker::default()
+            .with_create_container(Ok("container-id".to_string()))
+            .with_start_container(Err(BollardError::DockerResponseServerError {
+                status_code: 500,
+                message: "oci runtime error".into(),
+            }));
+
+        let err = start_container_impl(&fake, "crash:image", 9091, 8000)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ProbeError::ContainerStartFailed { .. }),
+            "expected ContainerStartFailed, got {err:?}"
+        );
+    }
+
+    // ── existing tests (unchanged) ──────────────────────────────────────────
     #[test]
     fn tool_name_accepts_valid_shapes() {
         let v = json!({"name": "fetch"});
