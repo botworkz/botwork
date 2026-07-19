@@ -52,19 +52,24 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_env() -> Result<Self, String> {
-        let socket_path = env::var("BOTWORK_LAUNCHER_SOCKET_PATH")
-            .unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
-        let socket_group = env::var("BOTWORK_LAUNCHER_SOCKET_GROUP")
-            .ok()
+    /// Build a `Config` from an explicit key→value getter — the pure
+    /// core used by [`Self::from_env`] and by tests that inject an
+    /// in-memory map without touching the process-global environment.
+    ///
+    /// `get(name)` returns `Some(value)` when the variable is present
+    /// and valid UTF-8, `None` when it is absent (or, for the
+    /// `from_env` wrapper, when it is non-UTF-8 — see there for the
+    /// unicode-error handling that cannot be expressed via `Option`).
+    pub fn from_map(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let socket_path =
+            get("BOTWORK_LAUNCHER_SOCKET_PATH").unwrap_or_else(|| DEFAULT_SOCKET_PATH.to_string());
+        let socket_group = get("BOTWORK_LAUNCHER_SOCKET_GROUP")
             .map(|value| resolve_group_spec(&value))
             .transpose()?;
-        let allowed_peer_uid = env::var("BOTWORK_LAUNCHER_ALLOWED_UID")
-            .ok()
+        let allowed_peer_uid = get("BOTWORK_LAUNCHER_ALLOWED_UID")
             .map(|value| parse_u32_env("BOTWORK_LAUNCHER_ALLOWED_UID", &value))
             .transpose()?;
-        let allowed_peer_gid = env::var("BOTWORK_LAUNCHER_ALLOWED_GID")
-            .ok()
+        let allowed_peer_gid = get("BOTWORK_LAUNCHER_ALLOWED_GID")
             .map(|value| parse_u32_env("BOTWORK_LAUNCHER_ALLOWED_GID", &value))
             .transpose()?;
         let (allowed_peer_uid, allowed_peer_gid) =
@@ -75,35 +80,38 @@ impl Config {
             } else {
                 (allowed_peer_uid, allowed_peer_gid)
             };
-        let plugin_uid = env::var("BOTWORK_PLUGIN_UID")
-            .unwrap_or_else(|_| "1000".to_string())
+        let plugin_uid = get("BOTWORK_PLUGIN_UID")
+            .unwrap_or_else(|| "1000".to_string())
             .parse::<u32>()
             .map_err(|err| format!("invalid BOTWORK_PLUGIN_UID: {err}"))?;
-        let plugin_gid = env::var("BOTWORK_PLUGIN_GID")
-            .unwrap_or_else(|_| "1000".to_string())
+        let plugin_gid = get("BOTWORK_PLUGIN_GID")
+            .unwrap_or_else(|| "1000".to_string())
             .parse::<u32>()
             .map_err(|err| format!("invalid BOTWORK_PLUGIN_GID: {err}"))?;
-        let image_allowlist_regex = env::var("BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX")
-            .unwrap_or_else(|_| DEFAULT_IMAGE_ALLOWLIST.to_string());
-        let container_pids_limit = env::var("BOTWORK_LAUNCHER_PIDS_LIMIT")
-            .unwrap_or_else(|_| DEFAULT_CONTAINER_PIDS_LIMIT.to_string())
+        let image_allowlist_regex = get("BOTWORK_LAUNCHER_IMAGE_ALLOWLIST_REGEX")
+            .unwrap_or_else(|| DEFAULT_IMAGE_ALLOWLIST.to_string());
+        let container_pids_limit = get("BOTWORK_LAUNCHER_PIDS_LIMIT")
+            .unwrap_or_else(|| DEFAULT_CONTAINER_PIDS_LIMIT.to_string())
             .parse::<u32>()
             .map_err(|err| format!("invalid BOTWORK_LAUNCHER_PIDS_LIMIT: {err}"))?;
-        let container_cpu_limit = env::var("BOTWORK_LAUNCHER_CPU_LIMIT")
-            .unwrap_or_else(|_| DEFAULT_CONTAINER_CPU_LIMIT.to_string());
+        let container_cpu_limit = get("BOTWORK_LAUNCHER_CPU_LIMIT")
+            .unwrap_or_else(|| DEFAULT_CONTAINER_CPU_LIMIT.to_string());
         if container_cpu_limit.trim().is_empty() {
             return Err("invalid BOTWORK_LAUNCHER_CPU_LIMIT: must not be empty".to_string());
         }
-        let container_memory_limit = env::var("BOTWORK_LAUNCHER_MEMORY_LIMIT")
-            .unwrap_or_else(|_| DEFAULT_CONTAINER_MEMORY_LIMIT.to_string());
+        let container_memory_limit = get("BOTWORK_LAUNCHER_MEMORY_LIMIT")
+            .unwrap_or_else(|| DEFAULT_CONTAINER_MEMORY_LIMIT.to_string());
         if container_memory_limit.trim().is_empty() {
             return Err("invalid BOTWORK_LAUNCHER_MEMORY_LIMIT: must not be empty".to_string());
         }
-        let container_read_only_rootfs =
-            parse_bool_env("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS")?.unwrap_or(false);
-        let broker_socket_path = env::var("BOTWORK_BROKER_SOCKET_PATH")
-            .unwrap_or_else(|_| DEFAULT_BROKER_SOCKET_PATH.to_string());
-        let default_network = env::var("BOTWORK_LAUNCHER_DEFAULT_NETWORK").map_err(|_| {
+        let container_read_only_rootfs = parse_bool_value(
+            "BOTWORK_LAUNCHER_READ_ONLY_ROOTFS",
+            get("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS"),
+        )?
+        .unwrap_or(false);
+        let broker_socket_path = get("BOTWORK_BROKER_SOCKET_PATH")
+            .unwrap_or_else(|| DEFAULT_BROKER_SOCKET_PATH.to_string());
+        let default_network = get("BOTWORK_LAUNCHER_DEFAULT_NETWORK").ok_or_else(|| {
             "BOTWORK_LAUNCHER_DEFAULT_NETWORK must be set: the launcher refuses to \
              guess which docker network plugin containers belong to. Set it to the \
              network alias plugins should join (e.g. `botwork-plugin`)."
@@ -122,7 +130,7 @@ impl Config {
                  expected ^[a-z0-9_-]+$ (must match docker network naming)"
             ));
         }
-        let egress_proxy = parse_egress_proxy_env()?;
+        let egress_proxy = parse_egress_proxy_value(get("BOTWORK_LAUNCHER_EGRESS_PROXY"))?;
 
         Ok(Self {
             socket_path,
@@ -141,11 +149,33 @@ impl Config {
             egress_proxy,
         })
     }
+
+    /// Build a `Config` from the process-global environment.
+    ///
+    /// Thin wrapper: checks for non-UTF-8 env values that cannot be
+    /// expressed via the `Option<String>` getter, then delegates to
+    /// [`Self::from_map`].
+    pub fn from_env() -> Result<Self, String> {
+        // Preserve the NotUnicode error paths. The from_map getter uses
+        // env::var(...).ok() which silently converts NotUnicode to None;
+        // we check these two vars explicitly before delegating so an
+        // operator who sets a non-UTF-8 value still gets a clear error.
+        for name in &[
+            "BOTWORK_LAUNCHER_READ_ONLY_ROOTFS",
+            "BOTWORK_LAUNCHER_EGRESS_PROXY",
+        ] {
+            if let Err(env::VarError::NotUnicode(_)) = env::var(name) {
+                return Err(format!("invalid {name}: not valid unicode"));
+            }
+        }
+        Self::from_map(|name| env::var(name).ok())
+    }
 }
 
-/// Parse and validate the optional `BOTWORK_LAUNCHER_EGRESS_PROXY` env
-/// var. Returns `Ok(None)` when unset (the default), `Ok(Some(url))`
-/// when set and valid, `Err(_)` on a malformed value.
+/// Parse and validate the optional egress proxy value. Returns `Ok(None)`
+/// when `raw` is `None` or whitespace-only (the default / "switch-off"
+/// intent), `Ok(Some(url))` when set and valid, `Err(_)` on a malformed
+/// value.
 ///
 /// Validation is intentionally conservative — we only need to confirm
 /// the value looks like an absolute `http://` / `https://` URL with a
@@ -162,13 +192,10 @@ impl Config {
 /// * Strict early rejection of the typo cases (missing scheme, bare
 ///   hostname, embedded whitespace) is what catches the realistic
 ///   operator mistake; deeper RFC 3986 conformance gains nothing.
-fn parse_egress_proxy_env() -> Result<Option<String>, String> {
-    let raw = match env::var("BOTWORK_LAUNCHER_EGRESS_PROXY") {
-        Ok(value) => value,
-        Err(env::VarError::NotPresent) => return Ok(None),
-        Err(env::VarError::NotUnicode(_)) => {
-            return Err("invalid BOTWORK_LAUNCHER_EGRESS_PROXY: not valid unicode".to_string());
-        }
+fn parse_egress_proxy_value(raw: Option<String>) -> Result<Option<String>, String> {
+    let raw = match raw {
+        Some(s) => s,
+        None => return Ok(None),
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -222,17 +249,18 @@ fn parse_u32_env(name: &str, value: &str) -> Result<u32, String> {
         .map_err(|err| format!("invalid {name}: {err}"))
 }
 
-fn parse_bool_env(name: &str) -> Result<Option<bool>, String> {
-    match env::var(name) {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+/// Parse an already-read bool-ish env value. `raw` is `None` when the
+/// variable is absent; `Some(value)` when it was set.
+fn parse_bool_value(name: &str, raw: Option<String>) -> Result<Option<bool>, String> {
+    match raw {
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Ok(Some(true)),
             "0" | "false" | "no" | "off" => Ok(Some(false)),
             _ => Err(format!(
                 "invalid {name}: expected one of 1,true,yes,on,0,false,no,off"
             )),
         },
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(format!("invalid {name}: not valid unicode")),
+        None => Ok(None),
     }
 }
 
@@ -258,18 +286,20 @@ fn resolve_group_spec(spec: &str) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
+    use std::collections::HashMap;
 
     use nix::unistd::{getegid, Group};
 
     use super::{
-        parse_bool_env, resolve_group_spec, validate_egress_proxy, Config,
-        DEFAULT_CONTAINER_CPU_LIMIT,
+        parse_bool_value, parse_egress_proxy_value, resolve_group_spec, validate_egress_proxy,
+        Config, DEFAULT_CONTAINER_CPU_LIMIT,
     };
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// Build a getter closure from a `HashMap<&str, &str>` for use with
+    /// [`Config::from_map`] in tests. Equivalent to the `std::env::var`
+    /// getter used in production but hermetic.
+    fn map_get<'a>(map: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| map.get(name).map(|v| (*v).to_string())
     }
 
     #[test]
@@ -302,52 +332,44 @@ mod tests {
 
     #[test]
     fn parse_bool_env_accepts_expected_values() {
-        std::env::set_var("BOTWORK_TEST_BOOL_ENV", "yes");
         assert_eq!(
-            parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect("parse bool"),
+            parse_bool_value("BOTWORK_TEST_BOOL_ENV", Some("yes".to_string())).expect("parse bool"),
             Some(true)
         );
-        std::env::set_var("BOTWORK_TEST_BOOL_ENV", "off");
         assert_eq!(
-            parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect("parse bool"),
+            parse_bool_value("BOTWORK_TEST_BOOL_ENV", Some("off".to_string())).expect("parse bool"),
             Some(false)
         );
-        std::env::remove_var("BOTWORK_TEST_BOOL_ENV");
         assert_eq!(
-            parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect("missing bool"),
+            parse_bool_value("BOTWORK_TEST_BOOL_ENV", None).expect("missing bool"),
             None
         );
     }
 
     #[test]
     fn from_env_uses_default_cpu_limit_when_unset() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::remove_var("BOTWORK_LAUNCHER_CPU_LIMIT");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
-        let config = Config::from_env().expect("config");
+        let map = HashMap::from([("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin")]);
+        let config = Config::from_map(map_get(&map)).expect("config");
         assert_eq!(config.container_cpu_limit, DEFAULT_CONTAINER_CPU_LIMIT);
         assert_eq!(config.default_network, "botwork-plugin");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
     fn from_env_rejects_empty_cpu_limit() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_LAUNCHER_CPU_LIMIT", "   ");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_CPU_LIMIT", "   "),
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+        ]);
         assert_eq!(
-            Config::from_env().expect_err("empty cpu limit should fail"),
+            Config::from_map(map_get(&map)).expect_err("empty cpu limit should fail"),
             "invalid BOTWORK_LAUNCHER_CPU_LIMIT: must not be empty"
         );
-        std::env::remove_var("BOTWORK_LAUNCHER_CPU_LIMIT");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
     fn from_env_rejects_missing_default_network() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
-        let err = Config::from_env().expect_err("missing default network should fail");
+        let map = HashMap::new();
+        let err = Config::from_map(map_get(&map)).expect_err("missing default network should fail");
         assert!(
             err.contains("BOTWORK_LAUNCHER_DEFAULT_NETWORK must be set"),
             "unexpected error: {err}"
@@ -356,16 +378,13 @@ mod tests {
 
     #[test]
     fn from_env_rejects_empty_default_network() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "   ");
-        let err = Config::from_env().expect_err("empty default network should fail");
+        let map = HashMap::from([("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "   ")]);
+        let err = Config::from_map(map_get(&map)).expect_err("empty default network should fail");
         assert_eq!(err, "BOTWORK_LAUNCHER_DEFAULT_NETWORK must not be empty");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
     fn from_env_rejects_default_network_with_invalid_characters() {
-        let _guard = env_lock().lock().expect("env lock");
         // Whitespace, slashes, uppercase, dots — anything outside [a-z0-9_-] —
         // must be rejected at construction time so an operator typo cannot
         // produce a runtime docker error after the launcher has accepted the
@@ -376,24 +395,20 @@ mod tests {
             "Botwork",
             "botwork.plugin",
         ] {
-            std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", bad);
-            let err = Config::from_env().expect_err("invalid network should fail");
+            let map = HashMap::from([("BOTWORK_LAUNCHER_DEFAULT_NETWORK", bad)]);
+            let err = Config::from_map(map_get(&map)).expect_err("invalid network should fail");
             assert!(
                 err.contains("has invalid characters"),
                 "unexpected error for {bad:?}: {err}"
             );
         }
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
     fn from_env_egress_proxy_unset_is_none() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::remove_var("BOTWORK_LAUNCHER_EGRESS_PROXY");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
-        let config = Config::from_env().expect("config");
+        let map = HashMap::from([("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin")]);
+        let config = Config::from_map(map_get(&map)).expect("config");
         assert_eq!(config.egress_proxy, None);
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
@@ -401,27 +416,25 @@ mod tests {
         // An empty / whitespace-only Environment= line in a systemd unit
         // is the obvious "switch off the proxy without rewriting the unit
         // file" gesture, so accept it as unset rather than fail-start.
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_LAUNCHER_EGRESS_PROXY", "   ");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
-        let config = Config::from_env().expect("config");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+            ("BOTWORK_LAUNCHER_EGRESS_PROXY", "   "),
+        ]);
+        let config = Config::from_map(map_get(&map)).expect("config");
         assert_eq!(config.egress_proxy, None);
-        std::env::remove_var("BOTWORK_LAUNCHER_EGRESS_PROXY");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
     fn from_env_egress_proxy_valid_http_url() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_LAUNCHER_EGRESS_PROXY", "http://egress_envoy:3128");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
-        let config = Config::from_env().expect("config");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+            ("BOTWORK_LAUNCHER_EGRESS_PROXY", "http://egress_envoy:3128"),
+        ]);
+        let config = Config::from_map(map_get(&map)).expect("config");
         assert_eq!(
             config.egress_proxy.as_deref(),
             Some("http://egress_envoy:3128")
         );
-        std::env::remove_var("BOTWORK_LAUNCHER_EGRESS_PROXY");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
@@ -472,87 +485,86 @@ mod tests {
 
     #[test]
     fn parse_bool_env_rejects_invalid_value() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_TEST_BOOL_ENV", "definitely-not-bool");
-        let err = parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect_err("must reject");
+        let err = parse_bool_value(
+            "BOTWORK_TEST_BOOL_ENV",
+            Some("definitely-not-bool".to_string()),
+        )
+        .expect_err("must reject");
         assert!(err.contains("expected one of"), "{err}");
-        std::env::remove_var("BOTWORK_TEST_BOOL_ENV");
     }
 
     #[test]
     fn from_env_honors_read_only_rootfs_and_peer_overrides() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
-        std::env::set_var("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS", "true");
-        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_UID", "1234");
-        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_GID", "4321");
-
-        let config = Config::from_env().expect("config");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+            ("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS", "true"),
+            ("BOTWORK_LAUNCHER_ALLOWED_UID", "1234"),
+            ("BOTWORK_LAUNCHER_ALLOWED_GID", "4321"),
+        ]);
+        let config = Config::from_map(map_get(&map)).expect("config");
         assert!(config.container_read_only_rootfs);
         assert_eq!(config.allowed_peer_uid, Some(1234));
         assert_eq!(config.allowed_peer_gid, Some(4321));
-
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
-        std::env::remove_var("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS");
-        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_UID");
-        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_GID");
     }
 
     #[test]
     fn from_env_rejects_empty_memory_limit() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_LAUNCHER_MEMORY_LIMIT", " ");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
-        let err = Config::from_env().expect_err("empty memory limit should fail");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_MEMORY_LIMIT", " "),
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+        ]);
+        let err = Config::from_map(map_get(&map)).expect_err("empty memory limit should fail");
         assert_eq!(
             err,
             "invalid BOTWORK_LAUNCHER_MEMORY_LIMIT: must not be empty"
         );
-        std::env::remove_var("BOTWORK_LAUNCHER_MEMORY_LIMIT");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
     fn from_env_rejects_invalid_allowed_uid_and_gid() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
-        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_UID", "not-a-number");
-        let err = Config::from_env().expect_err("invalid uid should fail");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+            ("BOTWORK_LAUNCHER_ALLOWED_UID", "not-a-number"),
+        ]);
+        let err = Config::from_map(map_get(&map)).expect_err("invalid uid should fail");
         assert!(
             err.contains("invalid BOTWORK_LAUNCHER_ALLOWED_UID"),
             "{err}"
         );
-        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_UID");
 
-        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_GID", "not-a-number");
-        let err = Config::from_env().expect_err("invalid gid should fail");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+            ("BOTWORK_LAUNCHER_ALLOWED_GID", "not-a-number"),
+        ]);
+        let err = Config::from_map(map_get(&map)).expect_err("invalid gid should fail");
         assert!(
             err.contains("invalid BOTWORK_LAUNCHER_ALLOWED_GID"),
             "{err}"
         );
-        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_GID");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
     fn from_env_rejects_invalid_plugin_uid_gid_and_pids_limit() {
-        let _guard = env_lock().lock().expect("env lock");
-        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
-        std::env::set_var("BOTWORK_PLUGIN_UID", "abc");
-        let err = Config::from_env().expect_err("invalid plugin uid should fail");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+            ("BOTWORK_PLUGIN_UID", "abc"),
+        ]);
+        let err = Config::from_map(map_get(&map)).expect_err("invalid plugin uid should fail");
         assert!(err.contains("invalid BOTWORK_PLUGIN_UID"), "{err}");
-        std::env::remove_var("BOTWORK_PLUGIN_UID");
 
-        std::env::set_var("BOTWORK_PLUGIN_GID", "abc");
-        let err = Config::from_env().expect_err("invalid plugin gid should fail");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+            ("BOTWORK_PLUGIN_GID", "abc"),
+        ]);
+        let err = Config::from_map(map_get(&map)).expect_err("invalid plugin gid should fail");
         assert!(err.contains("invalid BOTWORK_PLUGIN_GID"), "{err}");
-        std::env::remove_var("BOTWORK_PLUGIN_GID");
 
-        std::env::set_var("BOTWORK_LAUNCHER_PIDS_LIMIT", "abc");
-        let err = Config::from_env().expect_err("invalid pids limit should fail");
+        let map = HashMap::from([
+            ("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin"),
+            ("BOTWORK_LAUNCHER_PIDS_LIMIT", "abc"),
+        ]);
+        let err = Config::from_map(map_get(&map)).expect_err("invalid pids limit should fail");
         assert!(err.contains("invalid BOTWORK_LAUNCHER_PIDS_LIMIT"), "{err}");
-        std::env::remove_var("BOTWORK_LAUNCHER_PIDS_LIMIT");
-        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
     }
 
     #[test]
@@ -560,5 +572,18 @@ mod tests {
         let missing = format!("botwork-group-does-not-exist-{}", std::process::id());
         let err = resolve_group_spec(&missing).expect_err("missing group should fail");
         assert!(err.contains("no such group"), "{err}");
+    }
+
+    #[test]
+    fn parse_egress_proxy_value_unset_is_none() {
+        assert_eq!(parse_egress_proxy_value(None).expect("none"), None);
+    }
+
+    #[test]
+    fn parse_egress_proxy_value_whitespace_is_none() {
+        assert_eq!(
+            parse_egress_proxy_value(Some("   ".to_string())).expect("whitespace"),
+            None
+        );
     }
 }

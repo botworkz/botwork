@@ -92,8 +92,18 @@ pub struct Args {
 }
 
 impl Args {
-    /// Parse `argv[2..]` (everything after `botctl bootstrap`).
-    pub fn from_argv(argv: &[String]) -> Result<Self, BootstrapError> {
+    /// Pure flag-parsing + env-fallback logic. `config_env` and
+    /// `endpoint_env` are the already-read values of
+    /// [`CONFIG_PATH_ENV`] and [`ENDPOINT_ENV`] respectively (both
+    /// `None` when the variable is unset).
+    ///
+    /// Extracted so tests can inject explicit values without touching
+    /// the process-global environment.
+    pub fn resolve(
+        argv: &[String],
+        config_env: Option<String>,
+        endpoint_env: Option<String>,
+    ) -> Result<Self, BootstrapError> {
         let mut config_path: Option<PathBuf> = None;
         let mut endpoint: Option<String> = None;
         let mut operator: Option<String> = None;
@@ -132,16 +142,24 @@ impl Args {
 
         Ok(Self {
             config_path: config_path.unwrap_or_else(|| {
-                std::env::var(CONFIG_PATH_ENV)
+                config_env
                     .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH))
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH))
             }),
-            endpoint: endpoint.unwrap_or_else(|| {
-                std::env::var(ENDPOINT_ENV).unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string())
-            }),
+            endpoint: endpoint
+                .unwrap_or_else(|| endpoint_env.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())),
             operator: operator.unwrap_or_else(|| DEFAULT_OPERATOR.to_string()),
             dry_run,
         })
+    }
+
+    /// Parse `argv[2..]` (everything after `botctl bootstrap`).
+    pub fn from_argv(argv: &[String]) -> Result<Self, BootstrapError> {
+        Self::resolve(
+            argv,
+            std::env::var(CONFIG_PATH_ENV).ok(),
+            std::env::var(ENDPOINT_ENV).ok(),
+        )
     }
 }
 
@@ -226,55 +244,14 @@ impl BootstrapError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::{
-        help_text, summary_message, Args, BootstrapError, CONFIG_PATH_ENV, DEFAULT_CONFIG_PATH,
-        DEFAULT_ENDPOINT, DEFAULT_OPERATOR, ENDPOINT_ENV,
+        help_text, summary_message, Args, BootstrapError, DEFAULT_CONFIG_PATH, DEFAULT_ENDPOINT,
+        DEFAULT_OPERATOR,
     };
     use crate::bootstrap::apply::ApplyOutcome;
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    /// Serialise all env-var-touching tests within this module and
-    /// restore each variable on drop (handles assertion failures too).
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        /// Snapshot the current values of `vars`, then apply `ops`
-        /// (key, Some(value) = set, None = remove).
-        fn apply(ops: &[(&'static str, Option<&str>)]) -> Self {
-            let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-            let saved = ops
-                .iter()
-                .map(|(k, _)| (*k, std::env::var(k).ok()))
-                .collect();
-            for (k, v) in ops {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-            Self { _lock: lock, saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (k, v) in &self.saved {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
     }
 
     #[test]
@@ -302,15 +279,13 @@ mod tests {
         );
     }
 
-    // --- Args::from_argv: flag parsing ---
+    // --- Args::resolve: flag parsing ---
 
     #[test]
     fn empty_argv_uses_all_defaults() {
-        // Remove env vars that would override the defaults so the
-        // test is hermetic regardless of what the runner's env has set.
-        let _g = EnvGuard::apply(&[(CONFIG_PATH_ENV, None), (ENDPOINT_ENV, None)]);
-
-        let args = Args::from_argv(&argv(&[])).expect("parse");
+        // Pass None for both env overrides so the test is hermetic
+        // regardless of the runner's environment.
+        let args = Args::resolve(&argv(&[]), None, None).expect("parse");
         assert_eq!(
             args.config_path.to_str().unwrap(),
             DEFAULT_CONFIG_PATH,
@@ -363,7 +338,7 @@ mod tests {
         assert!(args.dry_run);
     }
 
-    // --- Args::from_argv: help / usage branches ---
+    // --- Args::resolve: help / usage branches ---
 
     #[test]
     fn dash_h_returns_usage_error_with_exit_code_zero() {
@@ -379,7 +354,7 @@ mod tests {
         assert_eq!(err.exit_code(), 0);
     }
 
-    // --- Args::from_argv: error cases ---
+    // --- Args::resolve: error cases ---
 
     #[test]
     fn unknown_flag_returns_invalid_usage() {
@@ -409,32 +384,30 @@ mod tests {
         assert!(matches!(err, BootstrapError::InvalidUsage(_)));
     }
 
-    // --- Env-var fallbacks ---
+    // --- Env-var fallbacks (injected via Args::resolve) ---
 
     #[test]
     fn config_path_env_var_used_when_no_flag() {
-        let _g = EnvGuard::apply(&[
-            (CONFIG_PATH_ENV, Some("/env/bootstrap.yaml")),
-            (ENDPOINT_ENV, None),
-        ]);
-        let args = Args::from_argv(&argv(&[])).expect("parse");
+        let args = Args::resolve(&argv(&[]), Some("/env/bootstrap.yaml".to_string()), None)
+            .expect("parse");
         assert_eq!(args.config_path.to_str().unwrap(), "/env/bootstrap.yaml");
     }
 
     #[test]
     fn endpoint_env_var_used_when_no_flag() {
-        let _g = EnvGuard::apply(&[
-            (CONFIG_PATH_ENV, None),
-            (ENDPOINT_ENV, Some("http://env-api:9400")),
-        ]);
-        let args = Args::from_argv(&argv(&[])).expect("parse");
+        let args = Args::resolve(&argv(&[]), None, Some("http://env-api:9400".to_string()))
+            .expect("parse");
         assert_eq!(args.endpoint, "http://env-api:9400");
     }
 
     #[test]
     fn explicit_flag_takes_priority_over_env_var() {
-        let _g = EnvGuard::apply(&[(CONFIG_PATH_ENV, Some("/env/bootstrap.yaml"))]);
-        let args = Args::from_argv(&argv(&["--config", "/flag/override.yaml"])).expect("parse");
+        let args = Args::resolve(
+            &argv(&["--config", "/flag/override.yaml"]),
+            Some("/env/bootstrap.yaml".to_string()),
+            None,
+        )
+        .expect("parse");
         assert_eq!(args.config_path.to_str().unwrap(), "/flag/override.yaml");
     }
 

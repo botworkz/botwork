@@ -122,16 +122,13 @@ pub struct SecretStoreClient {
 }
 
 impl SecretStoreClient {
-    /// Build a client from environment.
-    ///
-    /// Reads `BOTWORK_SECRET_STORE_ENDPOINT` (default
-    /// `http://secret_store:9500`) and
-    /// `BOTWORK_API_DISABLE_SECRET_STORE` (truthy to disable).
-    pub fn from_env() -> Self {
-        let endpoint = std::env::var(ENDPOINT_ENV).unwrap_or_else(|_| ENDPOINT_DEFAULT.to_string());
-        let disabled = match std::env::var(DISABLE_ENV) {
-            Ok(v) => matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"),
-            Err(_) => false,
+    /// Build a client from explicit values — the pure core used by
+    /// [`Self::from_env`] and by tests that inject values directly.
+    fn from_parts(endpoint: Option<String>, disabled: Option<String>) -> Self {
+        let endpoint = endpoint.unwrap_or_else(|| ENDPOINT_DEFAULT.to_string());
+        let disabled = match disabled {
+            Some(v) => matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"),
+            None => false,
         };
         Self {
             endpoint,
@@ -141,6 +138,18 @@ impl SecretStoreClient {
                 .build()
                 .expect("reqwest client build"),
         }
+    }
+
+    /// Build a client from environment.
+    ///
+    /// Reads `BOTWORK_SECRET_STORE_ENDPOINT` (default
+    /// `http://secret_store:9500`) and
+    /// `BOTWORK_API_DISABLE_SECRET_STORE` (truthy to disable).
+    pub fn from_env() -> Self {
+        Self::from_parts(
+            std::env::var(ENDPOINT_ENV).ok(),
+            std::env::var(DISABLE_ENV).ok(),
+        )
     }
 
     /// Construct a client pointed at the given endpoint.
@@ -320,35 +329,6 @@ mod tests {
 
     use super::*;
 
-    struct EnvGuard {
-        endpoint: Option<String>,
-        disabled: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn capture() -> Self {
-            Self {
-                endpoint: std::env::var(ENDPOINT_ENV).ok(),
-                disabled: std::env::var(DISABLE_ENV).ok(),
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(v) = &self.endpoint {
-                std::env::set_var(ENDPOINT_ENV, v);
-            } else {
-                std::env::remove_var(ENDPOINT_ENV);
-            }
-            if let Some(v) = &self.disabled {
-                std::env::set_var(DISABLE_ENV, v);
-            } else {
-                std::env::remove_var(DISABLE_ENV);
-            }
-        }
-    }
-
     fn sample_put() -> PutSecretRequest {
         PutSecretRequest {
             tenant: "phlax".to_string(),
@@ -364,17 +344,29 @@ mod tests {
 
     #[test]
     fn from_env_honors_default_and_disable_flag() {
-        let _guard = EnvGuard::capture();
-        std::env::remove_var(ENDPOINT_ENV);
-        std::env::remove_var(DISABLE_ENV);
-
-        let default_client = SecretStoreClient::from_env();
+        let default_client = SecretStoreClient::from_parts(None, None);
         assert_eq!(default_client.endpoint, ENDPOINT_DEFAULT);
         assert!(!default_client.is_disabled());
 
-        std::env::set_var(DISABLE_ENV, "1");
-        let disabled_client = SecretStoreClient::from_env();
+        let disabled_client = SecretStoreClient::from_parts(None, Some("1".to_string()));
         assert!(disabled_client.is_disabled());
+    }
+
+    #[test]
+    fn from_env_recognizes_all_truthy_disable_values() {
+        for truthy in &["true", "TRUE", "yes", "YES"] {
+            let client = SecretStoreClient::from_parts(None, Some((*truthy).to_string()));
+            assert!(
+                client.is_disabled(),
+                "expected disabled=true for DISABLE_ENV={truthy}"
+            );
+        }
+        // "0" is NOT truthy
+        let not_disabled = SecretStoreClient::from_parts(None, Some("0".to_string()));
+        assert!(
+            !not_disabled.is_disabled(),
+            "expected disabled=false for DISABLE_ENV=0"
+        );
     }
 
     #[tokio::test]
@@ -516,25 +508,5 @@ mod tests {
             .delete_secret("phlax", "github.com", "pat")
             .await
             .expect("delete 200 ok");
-    }
-
-    #[test]
-    fn from_env_recognizes_all_truthy_disable_values() {
-        let _guard = EnvGuard::capture();
-        for truthy in &["true", "TRUE", "yes", "YES"] {
-            std::env::set_var(DISABLE_ENV, truthy);
-            let client = SecretStoreClient::from_env();
-            assert!(
-                client.is_disabled(),
-                "expected disabled=true for DISABLE_ENV={truthy}"
-            );
-        }
-        // "0" is NOT truthy
-        std::env::set_var(DISABLE_ENV, "0");
-        let not_disabled = SecretStoreClient::from_env();
-        assert!(
-            !not_disabled.is_disabled(),
-            "expected disabled=false for DISABLE_ENV=0"
-        );
     }
 }
