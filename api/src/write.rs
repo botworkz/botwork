@@ -3484,24 +3484,23 @@ mod tests {
         );
 
         // Array arm
-        let resp_array =
-            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-                MockDatabase::new(DatabaseBackend::Postgres)
-                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
-                    .append_query_results([Vec::<workspace_plugin::Model>::new()]),
-            ))
-            .oneshot(tenant_request(
-                "POST",
-                "/api/tenant/phlax/workspace_plugins",
-                "phlax",
-                serde_json::json!({
-                    "workspace_id": workspace_id,
-                    "plugin_id": plugin_id,
-                    "config": [1, 2, 3]
-                }),
-            ))
-            .await
-            .expect("response");
+        let resp_array = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+        ))
+        .oneshot(tenant_request(
+            "POST",
+            "/api/tenant/phlax/workspace_plugins",
+            "phlax",
+            serde_json::json!({
+                "workspace_id": workspace_id,
+                "plugin_id": plugin_id,
+                "config": [1, 2, 3]
+            }),
+        ))
+        .await
+        .expect("response");
         assert_eq!(resp_array.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let json = json_body(resp_array).await;
         assert_eq!(json["error"]["code"], "validation_failed");

@@ -469,7 +469,10 @@ mod tests {
             .mount(&server)
             .await;
         let client = SecretStoreClient::with_endpoint(server.uri());
-        let err = client.put_secret(sample_put()).await.expect_err("bad request");
+        let err = client
+            .put_secret(sample_put())
+            .await
+            .expect_err("bad request");
         assert!(
             matches!(&err, SecretStoreError::BadRequest(msg) if msg == "bad value"),
             "{err:?}"
@@ -486,7 +489,10 @@ mod tests {
             .mount(&server)
             .await;
         let client = SecretStoreClient::with_endpoint(server.uri());
-        let err = client.put_secret(sample_put()).await.expect_err("unavailable");
+        let err = client
+            .put_secret(sample_put())
+            .await
+            .expect_err("unavailable");
         assert!(matches!(err, SecretStoreError::Unavailable(_)), "{err:?}");
     }
 

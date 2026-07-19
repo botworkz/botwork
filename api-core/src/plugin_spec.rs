@@ -1105,7 +1105,7 @@ mod tests {
     // ── Tier 1.5 fault-injection / edge tests ──────────────────────
 
     #[test]
-    fn egress_null_is_rejected() {
+    fn validate_egress_rejects_null_value() {
         // validate_egress: raw.is_null() arm — `egress: ~` (YAML null)
         let r = raw("p", "image: ghcr.io/example/p:1.0\negress: ~\n");
         let err = validate_one(&r).unwrap_err();
@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn egress_bool_shows_bool_in_type_error() {
+    fn validate_egress_rejects_bool_value_with_type_in_message() {
         // yaml_type_name Bool arm: `egress: true` is not a string/mapping
         let r = raw("p", "image: ghcr.io/example/p:1.0\negress: true\n");
         let err = validate_one(&r).unwrap_err();
@@ -1123,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn egress_tagged_value_shows_tagged_in_type_error() {
+    fn validate_egress_rejects_tagged_value_with_type_in_message() {
         // yaml_type_name Tagged arm: a YAML tagged scalar is not a string/mapping
         let r = raw("p", "image: ghcr.io/example/p:1.0\negress: !custom val\n");
         let err = validate_one(&r).unwrap_err();
@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn egress_allow_with_mapping_value_shows_mapping_in_type_error() {
+    fn validate_egress_allow_rejects_mapping_value_with_type_in_message() {
         // yaml_type_name Mapping arm: allow_val is a mapping, not a sequence
         let r = raw(
             "p",
