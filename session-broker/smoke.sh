@@ -10,7 +10,8 @@
 #
 # Local reproduction:
 #
-#   earthly +session-broker-image
+#   docker buildx build --platform linux/amd64 --load \
+#     -t botwork/session-broker:local -f session-broker/Dockerfile .
 #   bash session-broker/smoke.sh
 
 set -euo pipefail

@@ -43,5 +43,5 @@ exclude-files = [
   "ui/wasm/src/api.rs",
   "ui/wasm/src/pages/mod.rs",
 ]
-out = ["Lcov", "Xml"]
+out = ["Lcov"]
 output-dir = "coverage"

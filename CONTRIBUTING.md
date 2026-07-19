@@ -18,8 +18,8 @@ make coverage
 DOCKER_HOST=unix:///nonexistent cargo tarpaulin
 ```
 
-Both commands pick up `tarpaulin.toml` automatically and write Lcov and
-Xml reports into a `coverage/` directory.
+Both commands pick up `tarpaulin.toml` automatically and write an Lcov
+report into a `coverage/` directory.
 
 ### What is measured
 

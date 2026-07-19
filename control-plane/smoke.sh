@@ -4,7 +4,8 @@
 #
 # Local reproduction:
 #
-#   earthly +control-plane-image
+#   docker buildx build --platform linux/amd64 --load \
+#     -t botwork/control-plane:local -f control-plane/Dockerfile .
 #   bash control-plane/smoke.sh
 
 set -euo pipefail

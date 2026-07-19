@@ -107,7 +107,7 @@ runs:
   # ── Install botctl ───────────────────────────────────────────
   # We download from the matching release tag and drop the binary
   # into the runner's PATH. The release artifact is published by
-  # `botwork`'s own ci.yml (release-binaries job) so there's no
+  # `botwork`'s own ci.yml (per-crate binary artifacts) so there's no
   # separate "tools" release stream to track. `latest` is supported
   # explicitly for consumers who opt in to the floating tag (see the
   # input's docstring).
