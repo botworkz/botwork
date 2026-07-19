@@ -39,87 +39,87 @@
 //! initialize-response window is sub-second and a broker restart
 //! mid-window is exceedingly rare.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bollard::errors::Error as BollardError;
+use bollard::models::{ContainerInspectResponse, MountPoint};
 use tracing::warn;
 
 use crate::config_broker;
+use crate::docker::{connect_docker, DockerApi};
 use crate::log_info;
 use crate::session_worker::LiveWorker;
 use crate::{AppState, TransportState};
 
-/// Pull the running `mcp_session_*` set out of `docker ps`. Returns
-/// `None` when docker is unreachable so the caller can skip recovery
-/// (rather than treat the empty set as authoritative and reap every
-/// DB row).
-fn list_running_session_containers() -> Option<HashSet<String>> {
-    let output = std::process::Command::new("docker")
-        .args([
-            "ps",
-            "--filter",
-            "name=^mcp_session_",
-            "--format",
-            "{{.Names}}",
-        ])
-        .output();
-    match output {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+/// Returns the set of running `mcp_session_*` container names via the bollard
+/// Docker socket API.  Returns `None` when docker is unreachable (transport
+/// error / socket not found) so the caller can skip recovery entirely rather
+/// than treating an empty set as authoritative and reaping every DB row.
+/// Returns `Some(set)` — possibly empty — when docker responds successfully.
+async fn list_running_session_containers_impl<D: DockerApi + ?Sized>(
+    docker: &D,
+) -> Option<HashSet<String>> {
+    let mut filters = HashMap::new();
+    filters.insert("name".to_string(), vec!["mcp_session_".to_string()]);
+    match docker.list_containers(filters).await {
+        Ok(summaries) => {
+            let names = summaries
+                .into_iter()
+                .flat_map(|s| s.names.unwrap_or_default())
+                .map(|n| n.trim_start_matches('/').to_string())
+                .filter(|n| !n.is_empty())
+                .collect();
+            Some(names)
+        }
+        Err(e) => {
             warn!(
-                "[session-broker] docker CLI not available during recovery; \
+                "[session-broker] docker list_containers failed during recovery: {e}; \
                  skipping cold-start reconciliation"
             );
             None
         }
-        Err(err) => {
-            warn!("[session-broker] docker ps failed during recovery: {err}");
-            None
-        }
-        Ok(out) if !out.status.success() => {
-            warn!(
-                "[session-broker] docker ps exited {:?} during recovery; \
-                 skipping reconciliation",
-                out.status.code()
-            );
-            None
-        }
-        Ok(out) => Some(
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect(),
-        ),
     }
 }
 
-/// Forces a running container off the host. Used to enforce the
-/// "live container with no DB row" reap posture during cold start.
-fn force_remove_container(container_name: &str) {
-    let result = std::process::Command::new("docker")
-        .args(["rm", "-f", container_name])
-        .output();
-    match result {
-        Ok(out) if out.status.success() => {
+/// Forces a running container off the host via the bollard Docker socket API.
+/// Used to enforce the "live container with no DB row" reap posture during
+/// cold start.  Success → log_info; 404 (already gone) → treated as success;
+/// any other error → warn (non-fatal, never propagated).
+async fn force_remove_container_impl<D: DockerApi + ?Sized>(container_name: &str, docker: &D) {
+    match docker.remove_container(container_name).await {
+        Ok(()) => {
             log_info(&format!(
                 "recovery: reaped orphan container {container_name} (no matching DB row)"
             ));
         }
-        Ok(out) => {
+        Err(BollardError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {
+            // Already gone — treat as success.
+            log_info(&format!(
+                "recovery: orphan container {container_name} already gone (404)"
+            ));
+        }
+        Err(e) => {
+            warn!("[session-broker] recovery: force-remove of {container_name} failed: {e}");
+        }
+    }
+}
+
+/// Production wrapper: connect to docker and force-remove a container.
+/// NOT covered by offline unit tests (`connect_docker` requires the docker socket).
+async fn force_remove_container(container_name: &str) {
+    match connect_docker() {
+        Err(e) => {
             warn!(
-                "[session-broker] recovery: docker rm -f {container_name} \
-                 exited {:?} (stderr: {})",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
+                "[session-broker] recovery: docker socket unavailable for force-remove \
+                 {container_name}: {e}"
             );
         }
-        Err(err) => {
-            warn!(
-                "[session-broker] recovery: docker rm -f {container_name} \
-                 failed to spawn: {err}"
-            );
+        Ok(docker) => {
+            force_remove_container_impl(container_name, &docker).await;
         }
     }
 }
@@ -131,12 +131,65 @@ fn force_remove_container(container_name: &str) {
 /// Called once at startup from `run()`.
 pub async fn recover_live_workers(state: &AppState) {
     let endpoint = state.config_broker_endpoint.clone();
+
+    // Connect to docker once; if unavailable, pass a None lister so the seam
+    // skips recovery immediately (None-vs-Some(empty) contract preserved).
+    let docker = match connect_docker() {
+        Ok(d) => Arc::new(d),
+        Err(e) => {
+            warn!(
+                "[session-broker] docker socket unavailable during recovery: {e}; \
+                 skipping cold-start reconciliation"
+            );
+            recover_live_workers_with(
+                state,
+                || None,
+                |_| None,
+                move |tenant: String, workspace: String, plugin: String| {
+                    let ep = endpoint.clone();
+                    async move {
+                        config_broker::resolve(
+                            &ep,
+                            &tenant,
+                            &workspace,
+                            &plugin,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    }
+                },
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Pre-compute the running set asynchronously, then hand it to the sync seam.
+    let running = list_running_session_containers_impl(&*docker).await;
+
+    // Pre-compute all inspect results so the inspector closure can be sync.
+    let inspect_cache: Arc<HashMap<String, Option<InspectResult>>> = {
+        let mut m = HashMap::new();
+        if let Some(ref names) = running {
+            for name in names {
+                m.insert(
+                    name.clone(),
+                    inspect_container_for_recovery_impl(name, &*docker).await,
+                );
+            }
+        }
+        Arc::new(m)
+    };
+
+    let running_captured = running.clone();
+    let endpoint2 = endpoint.clone();
+
     recover_live_workers_with(
         state,
-        list_running_session_containers,
-        inspect_container_for_recovery,
+        move || running_captured.clone(),
+        move |name: &str| inspect_cache.get(name).cloned().flatten(),
         move |tenant: String, workspace: String, plugin: String| {
-            let ep = endpoint.clone();
+            let ep = endpoint2.clone();
             async move {
                 config_broker::resolve(&ep, &tenant, &workspace, &plugin, Duration::from_secs(5))
                     .await
@@ -212,7 +265,7 @@ pub(crate) async fn recover_live_workers_with<L, I, RF, Fut>(
     // Orphan containers (docker has it, DB doesn't) → reap.
     for container in &running {
         if !row_by_name.contains_key(container) {
-            force_remove_container(container);
+            force_remove_container(container).await;
         }
     }
 
@@ -363,6 +416,7 @@ pub(crate) async fn recover_live_workers_with<L, I, RF, Fut>(
 
 /// Result of `docker inspect <container>` filtered down to the bits
 /// we use during recovery.
+#[derive(Clone)]
 pub(crate) struct InspectResult {
     pub(crate) container_ip: String,
     pub(crate) tenant: String,
@@ -378,69 +432,60 @@ pub(crate) struct InspectResult {
     pub(crate) staging_token: Option<String>,
 }
 
-/// Parse a `docker inspect --format {{json .}}` JSON blob into the fields
-/// recovery needs.  Extracted from `inspect_container_for_recovery` so the
-/// JSON-parsing branches can be exercised in unit tests without spawning a
-/// real docker process.
-pub(crate) fn parse_inspect_json(raw: &serde_json::Value) -> Option<InspectResult> {
-    // `inspect` returns an array of one object for a single arg, but
-    // with `--format {{json .}}` we get just the object — keep
-    // future-flexibility for either shape.
-    let obj: &serde_json::Value = match raw {
-        serde_json::Value::Array(arr) if !arr.is_empty() => &arr[0],
-        v => v,
-    };
+/// Extract the recovery fields from a typed bollard `ContainerInspectResponse`.
+///
+/// Returns `None` when any required field (tenant, workspace, container IP) is
+/// absent — the caller skips that container.
+///
+/// This replaces the old raw-JSON `parse_inspect_json` function.  The
+/// field-extraction semantics are identical:
+/// - `tenant` ← `Config.Labels["io.botworkz.tenant"]` (required)
+/// - `workspace` ← `Config.Labels["io.botworkz.workspace"]` (required)
+/// - `agent_session_label` ← `Config.Labels["io.botworkz.agent_session"]` (optional)
+/// - `container_ip` ← `NetworkSettings.Networks["botwork-plugin"].IPAddress`,
+///   falling back to the first network's `IPAddress` if absent (required)
+/// - `staging_token` ← last path segment of the `Source` for the mount whose
+///   `Destination == "/workspace"` (optional)
+pub(crate) fn extract_inspect_result(r: &ContainerInspectResponse) -> Option<InspectResult> {
+    let labels = r.config.as_ref().and_then(|c| c.labels.as_ref());
 
-    // Labels live at .Config.Labels (a string→string map).
-    let labels = obj
-        .pointer("/Config/Labels")
-        .and_then(serde_json::Value::as_object);
-    let tenant = labels
-        .and_then(|m| m.get("io.botworkz.tenant"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)?;
+    let tenant = labels.and_then(|m| m.get("io.botworkz.tenant")).cloned()?;
     let workspace = labels
         .and_then(|m| m.get("io.botworkz.workspace"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)?;
+        .cloned()?;
     let agent_session_label = labels
         .and_then(|m| m.get("io.botworkz.agent_session"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
+        .cloned();
 
-    // Container IPv4 on `botwork-plugin`. Same shape we use during
-    // spawn — fall back to the first network if the named one isn't
-    // populated (some test paths run on a single network).
-    let ip = obj
-        .pointer("/NetworkSettings/Networks/botwork-plugin/IPAddress")
-        .and_then(serde_json::Value::as_str)
+    // Container IPv4 on `botwork-plugin`; fall back to the first network.
+    let networks = r
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.networks.as_ref());
+    let ip = networks
+        .and_then(|m| m.get("botwork-plugin"))
+        .and_then(|ep| ep.ip_address.as_deref())
+        .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| {
-            obj.pointer("/NetworkSettings/Networks")
-                .and_then(serde_json::Value::as_object)
+            networks
                 .and_then(|m| m.values().next())
-                .and_then(|n| n.get("IPAddress"))
-                .and_then(serde_json::Value::as_str)
+                .and_then(|ep| ep.ip_address.as_deref())
+                .filter(|s| !s.is_empty())
                 .map(str::to_string)
         })?;
 
-    // Staging token: peel it out of the bind-mount destination if
-    // present. Inferring from the mount means the broker doesn't
-    // need a new label for it (the staging path is reconstructed
-    // from `tenant_name + staging_token` anyway).
-    let staging_token = obj
-        .pointer("/Mounts")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|mounts| {
-            mounts.iter().find_map(|m| {
-                let dest = m.get("Destination").and_then(serde_json::Value::as_str)?;
-                if dest != "/workspace" {
-                    return None;
-                }
-                let source = m.get("Source").and_then(serde_json::Value::as_str)?;
-                source.rsplit('/').next().map(str::to_string)
-            })
-        });
+    // Staging token: last path segment of the `/workspace` bind-mount source.
+    let staging_token = r.mounts.as_deref().and_then(|mounts: &[MountPoint]| {
+        mounts.iter().find_map(|m| {
+            let dest = m.destination.as_deref()?;
+            if dest != "/workspace" {
+                return None;
+            }
+            let source = m.source.as_deref()?;
+            source.rsplit('/').next().map(str::to_string)
+        })
+    });
 
     Some(InspectResult {
         container_ip: ip,
@@ -451,16 +496,31 @@ pub(crate) fn parse_inspect_json(raw: &serde_json::Value) -> Option<InspectResul
     })
 }
 
-fn inspect_container_for_recovery(container_name: &str) -> Option<InspectResult> {
-    let output = std::process::Command::new("docker")
-        .args(["inspect", "--format", "{{json .}}", container_name])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Inspect a single container via the bollard Docker socket API and extract
+/// the recovery fields.  Returns `None` on any error (container gone, docker
+/// unreachable, required label missing, etc.).
+async fn inspect_container_for_recovery_impl<D: DockerApi + ?Sized>(
+    container_name: &str,
+    docker: &D,
+) -> Option<InspectResult> {
+    match docker.inspect_container(container_name).await {
+        Ok(response) => extract_inspect_result(&response),
+        Err(BollardError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {
+            log_info(&format!(
+                "recovery: container {container_name} gone before inspect; skipping"
+            ));
+            None
+        }
+        Err(e) => {
+            warn!(
+                "[session-broker] recovery: inspect failed for {container_name}: {e}; \
+                 skipping rehydration"
+            );
+            None
+        }
     }
-    let raw: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    parse_inspect_json(&raw)
 }
 
 /// Soft-handle a sessions.json file left from the pre-cutover broker.
@@ -508,11 +568,179 @@ fn _imports_keepalive(_: Arc<dyn crate::store::SessionWorkerStore>, _: LiveWorke
 mod tests {
     use super::*;
     use crate::store::mock::MockSessionWorkerStore;
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use bollard::errors::Error as BollardError;
+    use bollard::models::{
+        ContainerConfig, ContainerInspectResponse, ContainerSummary, EndpointSettings, MountPoint,
+        NetworkSettings,
+    };
+    use futures_util::future::BoxFuture;
+    use futures_util::FutureExt;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
-    use tokio::sync::Mutex;
+    use tokio::sync::Mutex as TokioMutex;
     use uuid::Uuid;
+
+    // ── FakeDocker ────────────────────────────────────────────────────────────
+    //
+    // Minimal in-memory fake that returns pre-canned responses for the three
+    // DockerApi methods used in recovery.  All queues are optional — tests that
+    // don't exercise a given method leave its queue empty and the method panics
+    // if unexpectedly called (makes bugs obvious).
+    type FakeListQueue = Arc<Mutex<VecDeque<Result<Vec<ContainerSummary>, BollardError>>>>;
+    type FakeInspectQueue = Arc<Mutex<VecDeque<Result<ContainerInspectResponse, BollardError>>>>;
+    type FakeRemoveQueue = Arc<Mutex<VecDeque<Result<(), BollardError>>>>;
+
+    #[derive(Default, Clone)]
+    struct FakeDocker {
+        list_results: FakeListQueue,
+        inspect_results: FakeInspectQueue,
+        remove_results: FakeRemoveQueue,
+    }
+
+    impl FakeDocker {
+        fn with_list(self, results: Vec<Result<Vec<ContainerSummary>, BollardError>>) -> Self {
+            *self.list_results.lock().expect("list lock") = VecDeque::from(results);
+            self
+        }
+
+        fn with_inspect(
+            self,
+            results: Vec<Result<ContainerInspectResponse, BollardError>>,
+        ) -> Self {
+            *self.inspect_results.lock().expect("inspect lock") = VecDeque::from(results);
+            self
+        }
+
+        fn with_remove(self, results: Vec<Result<(), BollardError>>) -> Self {
+            *self.remove_results.lock().expect("remove lock") = VecDeque::from(results);
+            self
+        }
+    }
+
+    impl DockerApi for FakeDocker {
+        fn inspect_container<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>> {
+            async move {
+                self.inspect_results
+                    .lock()
+                    .expect("inspect lock")
+                    .pop_front()
+                    .expect("unexpected inspect_container call")
+            }
+            .boxed()
+        }
+
+        fn list_containers<'a>(
+            &'a self,
+            _filters: HashMap<String, Vec<String>>,
+        ) -> BoxFuture<'a, Result<Vec<ContainerSummary>, BollardError>> {
+            async move {
+                self.list_results
+                    .lock()
+                    .expect("list lock")
+                    .pop_front()
+                    .expect("unexpected list_containers call")
+            }
+            .boxed()
+        }
+
+        fn remove_container<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> BoxFuture<'a, Result<(), BollardError>> {
+            async move {
+                self.remove_results
+                    .lock()
+                    .expect("remove lock")
+                    .pop_front()
+                    .expect("unexpected remove_container call")
+            }
+            .boxed()
+        }
+    }
+
+    // ── typed fixture helpers ─────────────────────────────────────────────────
+
+    /// Build a minimal `ContainerInspectResponse` with the given labels, network
+    /// IP, and optional workspace mount source.
+    fn inspect_response(
+        labels: HashMap<&str, &str>,
+        network_name: &str,
+        ip: &str,
+        workspace_mount_source: Option<&str>,
+    ) -> ContainerInspectResponse {
+        let label_map: HashMap<String, String> = labels
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        let ep = EndpointSettings {
+            ip_address: if ip.is_empty() {
+                None
+            } else {
+                Some(ip.to_string())
+            },
+            ..Default::default()
+        };
+        let mut networks = HashMap::new();
+        if !network_name.is_empty() {
+            networks.insert(network_name.to_string(), ep);
+        }
+
+        let mounts = workspace_mount_source.map(|src| {
+            vec![MountPoint {
+                destination: Some("/workspace".to_string()),
+                source: Some(src.to_string()),
+                ..Default::default()
+            }]
+        });
+
+        ContainerInspectResponse {
+            config: Some(ContainerConfig {
+                labels: Some(label_map),
+                ..Default::default()
+            }),
+            network_settings: Some(NetworkSettings {
+                networks: Some(networks),
+                ..Default::default()
+            }),
+            mounts,
+            ..Default::default()
+        }
+    }
+
+    fn required_labels<'a>(tenant: &'a str, workspace: &'a str) -> HashMap<&'a str, &'a str> {
+        [
+            ("io.botworkz.tenant", tenant),
+            ("io.botworkz.workspace", workspace),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn container_summary(name: &str) -> ContainerSummary {
+        ContainerSummary {
+            names: Some(vec![format!("/{name}")]),
+            ..Default::default()
+        }
+    }
+
+    fn err_404() -> BollardError {
+        BollardError::DockerResponseServerError {
+            status_code: 404,
+            message: "No such container".into(),
+        }
+    }
+
+    fn err_500() -> BollardError {
+        BollardError::DockerResponseServerError {
+            status_code: 500,
+            message: "Internal server error".into(),
+        }
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -520,15 +748,15 @@ mod tests {
         writer: Option<Arc<dyn crate::store::SessionWorkerStore>>,
     ) -> AppState {
         AppState {
-            transport_sessions: Arc::new(Mutex::new(HashMap::new())),
-            pending_init: Arc::new(Mutex::new(HashMap::new())),
+            transport_sessions: Arc::new(TokioMutex::new(HashMap::new())),
+            pending_init: Arc::new(TokioMutex::new(HashMap::new())),
             launcher_socket_path: "/tmp/missing.sock".to_string(),
             auth_broker_url: "http://127.0.0.1:1".to_string(),
             config_broker_endpoint: "http://127.0.0.1:1".to_string(),
             control_plane_endpoint: "http://127.0.0.1:1".to_string(),
-            tombstones: Arc::new(Mutex::new(HashMap::new())),
-            liveness_cache: Arc::new(Mutex::new(HashMap::new())),
-            stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+            tombstones: Arc::new(TokioMutex::new(HashMap::new())),
+            liveness_cache: Arc::new(TokioMutex::new(HashMap::new())),
+            stream_liveness: Arc::new(TokioMutex::new(HashMap::new())),
             disconnect_grace: std::time::Duration::from_secs(30),
             cold_start_timeout: crate::COLD_START_TIMEOUT,
             agent_session_writer: None,
@@ -586,48 +814,49 @@ mod tests {
         assert!(logs.contains("removed"), "should log removal");
     }
 
-    // ── list_running_session_containers ──────────────────────────────────────
+    // ── list_running_session_containers_impl (FakeDocker) ────────────────────
 
-    #[test]
-    fn list_running_session_containers_is_total_function() {
-        if let Some(names) = list_running_session_containers() {
-            assert!(
-                names.iter().all(|name| name.starts_with("mcp_session_")),
-                "docker filter should only return mcp_session_* containers"
-            );
-        }
+    #[tokio::test]
+    async fn list_running_session_containers_impl_returns_names_stripped_of_slash() {
+        let docker = FakeDocker::default().with_list(vec![Ok(vec![
+            container_summary("mcp_session_abc"),
+            container_summary("mcp_session_def"),
+        ])]);
+        let result = list_running_session_containers_impl(&docker)
+            .await
+            .expect("should return Some");
+        assert!(result.contains("mcp_session_abc"));
+        assert!(result.contains("mcp_session_def"));
+        assert_eq!(result.len(), 2);
     }
 
-    // ── inspect_container_for_recovery (real docker call — minimal) ──────────
+    #[tokio::test]
+    async fn list_running_session_containers_impl_returns_some_empty_on_no_containers() {
+        // Docker reachable but no containers — Some(empty), NOT None.
+        let docker = FakeDocker::default().with_list(vec![Ok(vec![])]);
+        let result = list_running_session_containers_impl(&docker).await;
+        assert_eq!(result, Some(HashSet::new()));
+    }
+
+    #[tokio::test]
+    async fn list_running_session_containers_impl_returns_none_on_transport_error() {
+        // Docker unreachable — None (skip recovery, don't reap everything).
+        let docker = FakeDocker::default().with_list(vec![Err(err_500())]);
+        let result = list_running_session_containers_impl(&docker).await;
+        assert!(result.is_none());
+    }
+
+    // ── extract_inspect_result (typed, ported from parse_inspect_json) ────────
 
     #[test]
-    fn inspect_container_for_recovery_missing_container_returns_none() {
-        assert!(
-            inspect_container_for_recovery("mcp_session_definitely_missing_for_test").is_none()
+    fn extract_inspect_result_minimal_object() {
+        let r = inspect_response(
+            required_labels("acme", "mcp"),
+            "botwork-plugin",
+            "10.0.0.5",
+            None,
         );
-    }
-
-    // ── parse_inspect_json ───────────────────────────────────────────────────
-
-    #[test]
-    fn parse_inspect_json_minimal_object() {
-        let json = serde_json::json!({
-            "Config": {
-                "Labels": {
-                    "io.botworkz.tenant": "acme",
-                    "io.botworkz.workspace": "mcp"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": {
-                    "botwork-plugin": {
-                        "IPAddress": "10.0.0.5"
-                    }
-                }
-            },
-            "Mounts": []
-        });
-        let result = parse_inspect_json(&json).expect("should parse");
+        let result = extract_inspect_result(&r).expect("should parse");
         assert_eq!(result.tenant, "acme");
         assert_eq!(result.workspace, "mcp");
         assert_eq!(result.container_ip, "10.0.0.5");
@@ -636,192 +865,197 @@ mod tests {
     }
 
     #[test]
-    fn parse_inspect_json_array_shape() {
-        let json = serde_json::json!([{
-            "Config": {
-                "Labels": {
-                    "io.botworkz.tenant": "t1",
-                    "io.botworkz.workspace": "w1"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": {
-                    "botwork-plugin": { "IPAddress": "10.1.2.3" }
-                }
-            },
-            "Mounts": []
-        }]);
-        let result = parse_inspect_json(&json).expect("array shape should parse");
-        assert_eq!(result.tenant, "t1");
-        assert_eq!(result.container_ip, "10.1.2.3");
-    }
-
-    #[test]
-    fn parse_inspect_json_fallback_network() {
+    fn extract_inspect_result_fallback_network() {
         // No botwork-plugin network — falls back to the first network found.
-        let json = serde_json::json!({
-            "Config": {
-                "Labels": {
-                    "io.botworkz.tenant": "t1",
-                    "io.botworkz.workspace": "w1"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": {
-                    "bridge": { "IPAddress": "172.17.0.2" }
-                }
-            },
-            "Mounts": []
-        });
-        let result = parse_inspect_json(&json).expect("fallback network");
+        let r = inspect_response(required_labels("t1", "w1"), "bridge", "172.17.0.2", None);
+        let result = extract_inspect_result(&r).expect("fallback network");
         assert_eq!(result.container_ip, "172.17.0.2");
     }
 
     #[test]
-    fn parse_inspect_json_missing_tenant_returns_none() {
-        let json = serde_json::json!({
-            "Config": {
-                "Labels": {
-                    "io.botworkz.workspace": "mcp"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": { "bridge": { "IPAddress": "1.2.3.4" } }
-            },
-            "Mounts": []
-        });
+    fn extract_inspect_result_missing_tenant_returns_none() {
+        let labels: HashMap<&str, &str> = [("io.botworkz.workspace", "mcp")].into_iter().collect();
+        let r = inspect_response(labels, "bridge", "1.2.3.4", None);
         assert!(
-            parse_inspect_json(&json).is_none(),
+            extract_inspect_result(&r).is_none(),
             "missing tenant should return None"
         );
     }
 
     #[test]
-    fn parse_inspect_json_missing_workspace_returns_none() {
-        let json = serde_json::json!({
-            "Config": {
-                "Labels": {
-                    "io.botworkz.tenant": "acme"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": { "bridge": { "IPAddress": "1.2.3.4" } }
-            },
-            "Mounts": []
-        });
+    fn extract_inspect_result_missing_workspace_returns_none() {
+        let labels: HashMap<&str, &str> = [("io.botworkz.tenant", "acme")].into_iter().collect();
+        let r = inspect_response(labels, "bridge", "1.2.3.4", None);
         assert!(
-            parse_inspect_json(&json).is_none(),
+            extract_inspect_result(&r).is_none(),
             "missing workspace should return None"
         );
     }
 
     #[test]
-    fn parse_inspect_json_missing_ip_returns_none() {
-        let json = serde_json::json!({
-            "Config": {
-                "Labels": {
-                    "io.botworkz.tenant": "acme",
-                    "io.botworkz.workspace": "mcp"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": {}
-            },
-            "Mounts": []
-        });
+    fn extract_inspect_result_missing_ip_returns_none() {
+        // Empty networks map → no IP anywhere → None.
+        let r = ContainerInspectResponse {
+            config: Some(ContainerConfig {
+                labels: Some(
+                    required_labels("acme", "mcp")
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+            network_settings: Some(NetworkSettings {
+                networks: Some(HashMap::new()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         assert!(
-            parse_inspect_json(&json).is_none(),
+            extract_inspect_result(&r).is_none(),
             "missing IP should return None"
         );
     }
 
     #[test]
-    fn parse_inspect_json_staging_token_from_workspace_mount() {
-        let json = serde_json::json!({
-            "Config": {
-                "Labels": {
-                    "io.botworkz.tenant": "acme",
-                    "io.botworkz.workspace": "mcp"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": {
-                    "botwork-plugin": { "IPAddress": "10.0.0.1" }
-                }
-            },
-            "Mounts": [
-                {
-                    "Source": "/var/lib/botwork/tenants/acme/staging/abc123",
-                    "Destination": "/workspace"
-                }
-            ]
-        });
-        let result = parse_inspect_json(&json).expect("should parse");
+    fn extract_inspect_result_staging_token_from_workspace_mount() {
+        let r = inspect_response(
+            required_labels("acme", "mcp"),
+            "botwork-plugin",
+            "10.0.0.1",
+            Some("/var/lib/botwork/tenants/acme/staging/abc123"),
+        );
+        let result = extract_inspect_result(&r).expect("should parse");
         assert_eq!(result.staging_token, Some("abc123".to_string()));
     }
 
     #[test]
-    fn parse_inspect_json_staging_token_skips_non_workspace_mount() {
-        let json = serde_json::json!({
-            "Config": {
-                "Labels": {
-                    "io.botworkz.tenant": "acme",
-                    "io.botworkz.workspace": "mcp"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": {
-                    "botwork-plugin": { "IPAddress": "10.0.0.1" }
-                }
-            },
-            "Mounts": [
-                {
-                    "Source": "/some/other/path/tok99",
-                    "Destination": "/data"
-                }
-            ]
-        });
-        let result = parse_inspect_json(&json).expect("should parse");
+    fn extract_inspect_result_staging_token_skips_non_workspace_mount() {
+        // Mount with Destination != "/workspace" is ignored.
+        let r = ContainerInspectResponse {
+            config: Some(ContainerConfig {
+                labels: Some(
+                    required_labels("acme", "mcp")
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                ),
+                ..Default::default()
+            }),
+            network_settings: Some(NetworkSettings {
+                networks: Some(
+                    [(
+                        "botwork-plugin".to_string(),
+                        EndpointSettings {
+                            ip_address: Some("10.0.0.1".to_string()),
+                            ..Default::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            }),
+            mounts: Some(vec![MountPoint {
+                destination: Some("/data".to_string()),
+                source: Some("/some/other/path/tok99".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let result = extract_inspect_result(&r).expect("should parse");
         assert_eq!(result.staging_token, None);
     }
 
     #[test]
-    fn parse_inspect_json_agent_session_label_present() {
-        let json = serde_json::json!({
-            "Config": {
-                "Labels": {
-                    "io.botworkz.tenant": "acme",
-                    "io.botworkz.workspace": "mcp",
-                    "io.botworkz.agent_session": "sess-abc"
-                }
-            },
-            "NetworkSettings": {
-                "Networks": {
-                    "botwork-plugin": { "IPAddress": "10.0.0.1" }
-                }
-            },
-            "Mounts": []
-        });
-        let result = parse_inspect_json(&json).expect("should parse");
+    fn extract_inspect_result_agent_session_label_present() {
+        let mut labels = required_labels("acme", "mcp");
+        labels.insert("io.botworkz.agent_session", "sess-abc");
+        let r = inspect_response(labels, "botwork-plugin", "10.0.0.1", None);
+        let result = extract_inspect_result(&r).expect("should parse");
         assert_eq!(result.agent_session_label, Some("sess-abc".to_string()));
     }
 
     #[test]
-    fn parse_inspect_json_empty_array_returns_none() {
-        // Empty array: no object to work with — tenant/workspace will
-        // be missing, so None is returned.
-        let json = serde_json::json!([]);
-        assert!(parse_inspect_json(&json).is_none());
+    fn extract_inspect_result_no_config_returns_none() {
+        // ContainerInspectResponse with no Config at all → None (tenant missing).
+        let r = ContainerInspectResponse {
+            ..Default::default()
+        };
+        assert!(extract_inspect_result(&r).is_none());
     }
 
-    // ── force_remove_container ────────────────────────────────────────────────
+    // ── inspect_container_for_recovery_impl (FakeDocker) ──────────────────────
 
-    #[test]
-    fn force_remove_container_total_function() {
-        let before = list_running_session_containers();
-        force_remove_container("mcp_session_definitely_missing_for_test");
-        let after = list_running_session_containers();
-        assert_eq!(before.is_some(), after.is_some());
+    #[tokio::test]
+    async fn inspect_impl_returns_result_on_success() {
+        let response = inspect_response(
+            required_labels("acme", "mcp"),
+            "botwork-plugin",
+            "10.0.0.7",
+            None,
+        );
+        let docker = FakeDocker::default().with_inspect(vec![Ok(response)]);
+        let result = inspect_container_for_recovery_impl("mcp_session_abc", &docker).await;
+        let r = result.expect("should return Some on success");
+        assert_eq!(r.tenant, "acme");
+        assert_eq!(r.container_ip, "10.0.0.7");
+    }
+
+    #[tokio::test]
+    async fn inspect_impl_returns_none_on_404() {
+        let docker = FakeDocker::default().with_inspect(vec![Err(err_404())]);
+        let result = inspect_container_for_recovery_impl("mcp_session_gone", &docker).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn inspect_impl_returns_none_on_api_error() {
+        let docker = FakeDocker::default().with_inspect(vec![Err(err_500())]);
+        let result = inspect_container_for_recovery_impl("mcp_session_abc", &docker).await;
+        assert!(result.is_none());
+    }
+
+    // ── force_remove_container_impl (FakeDocker) ──────────────────────────────
+
+    #[tokio::test]
+    // The log-capture guard must be held across the await so all log output from
+    // `force_remove_container_impl` is captured.  This mirrors the same pattern
+    // used by other log-capture tests in this module.
+    #[allow(clippy::await_holding_lock)]
+    async fn force_remove_impl_logs_success() {
+        let _guard = crate::test_support::log_capture_guard();
+        crate::test_support::start_log_capture();
+        let docker = FakeDocker::default().with_remove(vec![Ok(())]);
+        force_remove_container_impl("mcp_session_orphan", &docker).await;
+        let logs = crate::test_support::take_log_capture().join("\n");
+        assert!(
+            logs.contains("reaped orphan container"),
+            "expected success log; got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    // See note on force_remove_impl_logs_success.
+    #[allow(clippy::await_holding_lock)]
+    async fn force_remove_impl_treats_404_as_success() {
+        let _guard = crate::test_support::log_capture_guard();
+        crate::test_support::start_log_capture();
+        let docker = FakeDocker::default().with_remove(vec![Err(err_404())]);
+        force_remove_container_impl("mcp_session_gone", &docker).await;
+        let logs = crate::test_support::take_log_capture().join("\n");
+        assert!(
+            logs.contains("already gone"),
+            "expected 404-gone log; got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_remove_impl_warns_on_other_error_non_fatal() {
+        // A non-404 error should warn (non-fatal) and not panic.
+        let docker = FakeDocker::default().with_remove(vec![Err(err_500())]);
+        // This must complete without panicking.
+        force_remove_container_impl("mcp_session_err", &docker).await;
     }
 
     // ── recover_live_workers (real entry point) ───────────────────────────────
