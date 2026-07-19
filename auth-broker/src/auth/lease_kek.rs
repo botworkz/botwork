@@ -40,7 +40,7 @@
 //! does.
 
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -72,14 +72,14 @@ pub fn derive_lease_kek(bearer: &[u8]) -> Zeroizing<[u8; LEASE_KEK_LEN]> {
 
 pub fn wrap_session_key(bearer: &[u8], session_key: &[u8]) -> Vec<u8> {
     let kek = derive_lease_kek(bearer);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(kek.as_ref()));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(&*kek));
 
     let mut nonce_bytes = [0u8; LEASE_KEK_NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
 
     let mut buf = session_key.to_vec();
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&nonce_bytes), &[], &mut buf)
+        .encrypt_in_place_detached(&Nonce::from(nonce_bytes), &[], &mut buf)
         .expect("ChaCha20-Poly1305 encrypt is infallible for sub-2^32 inputs");
 
     let mut out = Vec::with_capacity(LEASE_KEK_NONCE_LEN + buf.len() + LEASE_KEK_TAG_LEN);
@@ -100,14 +100,14 @@ pub fn unwrap_session_key(
     let (ciphertext, tag) = rest.split_at(rest.len() - LEASE_KEK_TAG_LEN);
 
     let kek = derive_lease_kek(bearer);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(kek.as_ref()));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(&*kek));
     let mut buf = ciphertext.to_vec();
     cipher
         .decrypt_in_place_detached(
-            Nonce::from_slice(nonce_bytes),
+            <&Nonce>::from(nonce_bytes),
             &[],
             &mut buf,
-            chacha20poly1305::Tag::from_slice(tag),
+            <&Tag>::from(tag),
         )
         .map_err(|_| LeaseKekError::Decrypt)?;
 

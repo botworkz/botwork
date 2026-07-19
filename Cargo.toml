@@ -59,6 +59,7 @@ default-members = [
 # this block is a policy gate, not a style sheet.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 
 [workspace.dependencies]
 serial_test = "3"
