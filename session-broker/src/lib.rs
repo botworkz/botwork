@@ -287,6 +287,9 @@ pub struct AppState {
     /// startup from `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` and then reused for
     /// every timer arm.
     pub disconnect_grace: Duration,
+    /// Total wall-clock budget for cold-start probe readiness checks.
+    /// Defaults to `COLD_START_TIMEOUT` in production.
+    pub cold_start_timeout: Duration,
     /// RFE #105 PR2: optional handle for the `agent_session`
     /// write-through path. `None` in tests that don't care about the
     /// DB; `Some(_)` in production where `run()` connects to
@@ -419,6 +422,7 @@ pub async fn run() -> Result<(), String> {
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
         disconnect_grace,
+        cold_start_timeout: COLD_START_TIMEOUT,
         agent_session_writer,
         session_worker_writer,
         db: Some(db_arc),
