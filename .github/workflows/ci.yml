@@ -97,6 +97,7 @@ jobs:
           package: botwork-auth-broker
           binary: botwork-auth-broker
           artifact: container
+          needs-db-migrate: true
           needs-docker: true
           features: test-support
         - crate: bootstrap
@@ -421,6 +422,13 @@ jobs:
         name: botwork-cli-binary
         path: .ci-binaries
 
+    - name: Download botwork-vault binary
+      if: steps.version.outputs.is_release == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: botwork-vault-binary
+        path: .ci-binaries
+
     # ── GitHub Release: create + upload assets ──────────────────────────────
     # `softprops/action-gh-release` creates the tag and release in one
     # step. Overwrite protection is provided by the tag-existence check
@@ -437,3 +445,4 @@ jobs:
           .ci-binaries/botwork-launcher
           .ci-binaries/botctl
           .ci-binaries/bw
+          .ci-binaries/botwork-vault
