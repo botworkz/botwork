@@ -457,7 +457,6 @@ mod tests {
         assert!(matches!(err, SecretStoreError::Unavailable(_)));
     }
 
-<<<<<<< HEAD
     // ── Tier 1.5 fault-injection tests ─────────────────────────────
 
     #[tokio::test]
@@ -523,7 +522,8 @@ mod tests {
             .await
             .expect_err("unavailable");
         assert!(matches!(err, SecretStoreError::Unavailable(_)), "{err:?}");
-=======
+    }
+
     #[test]
     fn display_trait_covers_all_variants() {
         let disabled = SecretStoreError::Disabled;
@@ -564,18 +564,14 @@ mod tests {
         let ok = client.put_secret(sample_put()).await.expect("put 200 ok");
         assert_eq!(ok.stored, "github.com/pat");
         assert!(!ok.created);
->>>>>>> origin/main
     }
 
     #[tokio::test]
     async fn delete_secret_maps_200_ok_to_success() {
-<<<<<<< HEAD
-        // 200 is in the OK family (alongside 204)
-=======
-        // Backend returning 200 (rather than 204) must also be treated as
-        // success — both are in the `s == StatusCode::OK || s == StatusCode::NO_CONTENT`
-        // arm at line 267.
->>>>>>> origin/main
+        // 200 is in the OK family (alongside 204). Backend returning 200
+        // (rather than 204) must also be treated as success — both are in
+        // the `s == StatusCode::OK || s == StatusCode::NO_CONTENT` arm at
+        // line 267.
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))
             .and(path("/secrets/github.com/pat"))
@@ -587,7 +583,6 @@ mod tests {
         client
             .delete_secret("phlax", "github.com", "pat")
             .await
-<<<<<<< HEAD
             .expect("200 should be success");
     }
 
@@ -652,8 +647,7 @@ mod tests {
         assert_eq!(
             format!("{}", SecretStoreError::BadRequest("bad".to_string())),
             "bad_request: bad"
-=======
-            .expect("delete 200 ok");
+        );
     }
 
     #[test]
@@ -673,7 +667,6 @@ mod tests {
         assert!(
             !not_disabled.is_disabled(),
             "expected disabled=false for DISABLE_ENV=0"
->>>>>>> origin/main
         );
     }
 }
