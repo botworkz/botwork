@@ -260,6 +260,7 @@ mod tests {
     use super::{
         valid_env_name, valid_label_name, Validators, LABEL_NAMESPACE_PREFIX, RESERVED_ENV_NAMES,
     };
+    use crate::error::LauncherError;
 
     fn validators() -> Validators {
         Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators")
@@ -438,5 +439,25 @@ mod tests {
         let validators = validators();
         assert!(validators.valid_label_name("io.botworkz.tenant"));
         assert!(!validators.valid_label_name("tenant"));
+    }
+
+    #[test]
+    fn safe_staging_and_agent_paths_reject_invalid_values() {
+        let validators = validators();
+        let staging_err = validators
+            .safe_staging_path("/outside/acme/staging/aabbccddeeff")
+            .expect_err("invalid staging path should fail");
+        assert!(matches!(staging_err, LauncherError::BadRequest(_)));
+
+        let agent_err = validators
+            .safe_agent_dir("/outside/acme/workspaces/ws/agents/agent-1")
+            .expect_err("invalid agent dir should fail");
+        assert!(matches!(agent_err, LauncherError::BadRequest(_)));
+    }
+
+    #[test]
+    fn validators_new_rejects_invalid_image_regex() {
+        let err = Validators::new("(").expect_err("invalid regex should fail");
+        assert!(!err.is_empty(), "regex error must be surfaced");
     }
 }
