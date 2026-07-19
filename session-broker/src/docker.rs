@@ -165,14 +165,14 @@ mod tests {
             &'a self,
             _filters: HashMap<String, Vec<String>>,
         ) -> BoxFuture<'a, Result<Vec<ContainerSummary>, BollardError>> {
-            unimplemented!("list_containers not used in docker.rs tests")
+            async { Ok(vec![]) }.boxed()
         }
 
         fn remove_container<'a>(
             &'a self,
             _name: &'a str,
         ) -> BoxFuture<'a, Result<(), BollardError>> {
-            unimplemented!("remove_container not used in docker.rs tests")
+            async { Ok(()) }.boxed()
         }
     }
 

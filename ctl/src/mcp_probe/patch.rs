@@ -3,10 +3,13 @@
 //! `patch_image` stamps a new label set onto `image_in` and writes the
 //! result to `image_out` by:
 //!
-//! 1. Creating a stopped container from `image_in`.
-//! 2. Committing it with a `ContainerConfig { labels }` override,
+//! 1. Inspecting `image_in` and merging its existing config labels with
+//!    the freshly-composed label set (new values win on collision, like
+//!    `crane mutate --label`).
+//! 2. Creating a stopped container from `image_in`.
+//! 3. Committing it with the merged `ContainerConfig { labels }`,
 //!    producing a new local image tagged as `image_out`.
-//! 3. Removing the temporary container.
+//! 4. Removing the temporary container.
 //!
 //! This is the daemon-native analog of what `crane mutate --tag` did
 //! previously — it rewrites the image config locally without touching
@@ -15,7 +18,6 @@
 //! call is a library call and is never "missing".
 
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 
 use thiserror::Error;
 
@@ -55,6 +57,22 @@ async fn patch_image_impl<D: DockerApi + ?Sized>(
     // Split image_out into repo + tag for CommitContainerOptions.
     let (repo, tag) = parse_image_ref(image_out);
 
+    // Inspect the source image so commit preserves its existing labels,
+    // matching `crane mutate --label` merge semantics.
+    let inspect = docker
+        .inspect_image(image_in)
+        .await
+        .map_err(|e| PatchError::Patch(format!("inspect image {image_in}: {e}")))?;
+    let mut label_map = inspect
+        .config
+        .as_ref()
+        .and_then(|config| config.labels.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in labels {
+        label_map.insert(key.clone(), value.clone());
+    }
+
     // 1. Create a stopped container from image_in (don't start it).
     let body = ContainerCreateBody {
         image: Some(image_in.to_string()),
@@ -65,8 +83,7 @@ async fn patch_image_impl<D: DockerApi + ?Sized>(
         .await
         .map_err(|e| PatchError::Patch(format!("create container from {image_in}: {e}")))?;
 
-    // 2. Commit the container with the new label set, producing image_out.
-    let label_map: HashMap<String, String> = labels.clone().into_iter().collect();
+    // 2. Commit the container with the merged label set, producing image_out.
     let result = docker
         .commit_container(&container_id, repo, tag, label_map)
         .await;
@@ -85,6 +102,9 @@ async fn patch_image_impl<D: DockerApi + ?Sized>(
 /// by a `/` (which would indicate a registry host:port rather than a
 /// tag separator).  If no tag is found, `"latest"` is returned.
 fn parse_image_ref(image: &str) -> (&str, &str) {
+    if let Some((name, _digest)) = image.split_once('@') {
+        return parse_image_ref(name);
+    }
     if let Some(pos) = image.rfind(':') {
         let after = &image[pos + 1..];
         if !after.contains('/') {
@@ -111,12 +131,24 @@ pub enum PatchError {
 mod tests {
     use super::*;
     use crate::mcp_probe::docker::test_support::FakeDocker;
+    use bollard::models::{ImageConfig, ImageInspect};
+    use std::collections::HashMap;
 
     fn two_labels() -> BTreeMap<String, String> {
         let mut labels = BTreeMap::new();
         labels.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
         labels.insert("org.botwork.mcp.port".to_string(), "8000".to_string());
         labels
+    }
+
+    fn inspect_with_labels(labels: Option<HashMap<String, String>>) -> ImageInspect {
+        ImageInspect {
+            config: Some(ImageConfig {
+                labels,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
     }
 
     // ── parse_image_ref ─────────────────────────────────────────────────────
@@ -149,11 +181,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_image_ref_treats_digest_refs_as_untagged_images() {
+        assert_eq!(parse_image_ref("repo@sha256:abc123"), ("repo", "latest"));
+        assert_eq!(
+            parse_image_ref("ghcr.io/org/name@sha256:deadbeef"),
+            ("ghcr.io/org/name", "latest")
+        );
+    }
+
     // ── patch_image_impl via FakeDocker ─────────────────────────────────────
 
     #[tokio::test]
     async fn patch_succeeds_and_commits_labels() {
         let fake = FakeDocker::default()
+            .with_inspect_image(Ok(inspect_with_labels(Some(HashMap::new()))))
             .with_create_container(Ok("tmp-container-id".to_string()))
             .with_commit_container(Ok("sha256:newimgid".to_string()))
             .with_remove_container(Ok(()));
@@ -166,12 +208,12 @@ mod tests {
     #[tokio::test]
     async fn patch_fails_when_create_fails() {
         use bollard::errors::Error as BollardError;
-        let fake = FakeDocker::default().with_create_container(Err(
-            BollardError::DockerResponseServerError {
+        let fake = FakeDocker::default()
+            .with_inspect_image(Ok(inspect_with_labels(Some(HashMap::new()))))
+            .with_create_container(Err(BollardError::DockerResponseServerError {
                 status_code: 500,
                 message: "daemon overloaded".into(),
-            },
-        ));
+            }));
 
         let err = patch_image_impl("in:latest", "out:labeled", &two_labels(), &fake)
             .await
@@ -184,21 +226,75 @@ mod tests {
     #[tokio::test]
     async fn patch_fails_when_commit_fails_and_still_removes_container() {
         use bollard::errors::Error as BollardError;
-        let fake = FakeDocker::default()
-            .with_create_container(Ok("tmp-id".to_string()))
-            .with_commit_container(Err(BollardError::DockerResponseServerError {
-                status_code: 500,
-                message: "commit error".into(),
-            }))
-            .with_remove_container(Ok(()));
+        use bollard::models::{ContainerCreateBody, ImageInspect};
+        use futures_util::future::BoxFuture;
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
 
-        let err = patch_image_impl("in:latest", "out:labeled", &two_labels(), &fake)
+        struct SpyDocker {
+            removed: Arc<AtomicBool>,
+        }
+
+        impl DockerApi for SpyDocker {
+            fn inspect_image<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> BoxFuture<'a, Result<ImageInspect, BollardError>> {
+                async { Ok(inspect_with_labels(Some(HashMap::new()))) }.boxed()
+            }
+
+            fn create_container<'a>(
+                &'a self,
+                _config: ContainerCreateBody,
+            ) -> BoxFuture<'a, Result<String, BollardError>> {
+                async { Ok("tmp-id".to_string()) }.boxed()
+            }
+
+            fn start_container<'a>(
+                &'a self,
+                _id: &'a str,
+            ) -> BoxFuture<'a, Result<(), BollardError>> {
+                async { panic!("unexpected") }.boxed()
+            }
+
+            fn remove_container<'a>(
+                &'a self,
+                _id: &'a str,
+            ) -> BoxFuture<'a, Result<(), BollardError>> {
+                self.removed.store(true, Ordering::SeqCst);
+                async { Ok(()) }.boxed()
+            }
+
+            fn commit_container<'a>(
+                &'a self,
+                _container_id: &'a str,
+                _repo: &'a str,
+                _tag: &'a str,
+                _labels: HashMap<String, String>,
+            ) -> BoxFuture<'a, Result<String, BollardError>> {
+                async {
+                    Err(BollardError::DockerResponseServerError {
+                        status_code: 500,
+                        message: "commit error".into(),
+                    })
+                }
+                .boxed()
+            }
+        }
+
+        let removed = Arc::new(AtomicBool::new(false));
+        let spy = SpyDocker {
+            removed: Arc::clone(&removed),
+        };
+
+        let err = patch_image_impl("in:latest", "out:labeled", &two_labels(), &spy)
             .await
             .unwrap_err();
         assert!(matches!(err, PatchError::Patch(_)), "{err:?}");
         let msg = format!("{err}");
         assert!(msg.contains("commit"), "{msg}");
-        // The remove_container result was consumed — confirming it was called.
+        assert!(removed.load(Ordering::SeqCst), "remove_container should run");
     }
 
     /// Load-bearing contract: every key=value in `labels` is passed to
@@ -224,7 +320,7 @@ mod tests {
                 &'a self,
                 _name: &'a str,
             ) -> BoxFuture<'a, Result<ImageInspect, BollardError>> {
-                async { panic!("unexpected") }.boxed()
+                async { Ok(inspect_with_labels(Some(HashMap::new()))) }.boxed()
             }
             fn create_container<'a>(
                 &'a self,
@@ -273,6 +369,97 @@ mod tests {
             Some("8000")
         );
         assert_eq!(got.len(), labels.len(), "all labels passed through");
+    }
+
+    #[tokio::test]
+    async fn patch_merges_source_image_labels_before_commit() {
+        use crate::mcp_probe::docker::DockerApi;
+        use bollard::errors::Error as BollardError;
+        use bollard::models::{ContainerCreateBody, ImageInspect};
+        use futures_util::future::BoxFuture;
+        use futures_util::FutureExt;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct SpyDocker {
+            committed_labels: Arc<Mutex<Option<HashMap<String, String>>>>,
+        }
+
+        impl DockerApi for SpyDocker {
+            fn inspect_image<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> BoxFuture<'a, Result<ImageInspect, BollardError>> {
+                async {
+                    Ok(inspect_with_labels(Some(HashMap::from([
+                        (
+                            "org.opencontainers.image.title".to_string(),
+                            "base".to_string(),
+                        ),
+                        ("keep.me".to_string(), "1".to_string()),
+                        ("overlap".to_string(), "base-value".to_string()),
+                    ]))))
+                }
+                .boxed()
+            }
+
+            fn create_container<'a>(
+                &'a self,
+                _config: ContainerCreateBody,
+            ) -> BoxFuture<'a, Result<String, BollardError>> {
+                async { Ok("spy-container".to_string()) }.boxed()
+            }
+
+            fn start_container<'a>(
+                &'a self,
+                _id: &'a str,
+            ) -> BoxFuture<'a, Result<(), BollardError>> {
+                async { panic!("unexpected") }.boxed()
+            }
+
+            fn remove_container<'a>(
+                &'a self,
+                _id: &'a str,
+            ) -> BoxFuture<'a, Result<(), BollardError>> {
+                async { Ok(()) }.boxed()
+            }
+
+            fn commit_container<'a>(
+                &'a self,
+                _container_id: &'a str,
+                _repo: &'a str,
+                _tag: &'a str,
+                labels: HashMap<String, String>,
+            ) -> BoxFuture<'a, Result<String, BollardError>> {
+                *self.committed_labels.lock().unwrap() = Some(labels);
+                async { Ok("sha256:spy".to_string()) }.boxed()
+            }
+        }
+
+        let spy = SpyDocker::default();
+        let captured = Arc::clone(&spy.committed_labels);
+        let mut labels = two_labels();
+        labels.insert("overlap".to_string(), "new-value".to_string());
+
+        patch_image_impl("in:latest", "out:tag", &labels, &spy)
+            .await
+            .expect("ok");
+
+        let got = captured.lock().unwrap().clone().expect("commit was called");
+        assert_eq!(
+            got.get("org.opencontainers.image.title").map(String::as_str),
+            Some("base")
+        );
+        assert_eq!(got.get("keep.me").map(String::as_str), Some("1"));
+        assert_eq!(got.get("overlap").map(String::as_str), Some("new-value"));
+        assert_eq!(
+            got.get("org.botwork.mcp.name").map(String::as_str),
+            Some("echo")
+        );
+        assert_eq!(
+            got.get("org.botwork.mcp.port").map(String::as_str),
+            Some("8000")
+        );
     }
 
     // ── PatchError display ───────────────────────────────────────────────────
