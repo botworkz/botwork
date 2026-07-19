@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 use chrono::Utc;
 use rand::RngCore;
 use tracing::{debug, info, trace, warn};
@@ -107,11 +107,11 @@ fn seal_with_master(
     // whole payload that protects the on-disk file. AAD =
     // header_core, so any tamper of magic, format version, suite
     // version, or salt fails the tag check at open time.
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(master));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(master));
 
     let mut buf = payload;
     let tag = cipher
-        .encrypt_in_place_detached(Nonce::from_slice(&nonce), &header_core, &mut buf)
+        .encrypt_in_place_detached(&Nonce::from(nonce), &header_core, &mut buf)
         .map_err(|e| VaultError::Integrity(format!("encrypt: {e}")))?;
 
     let mut out = Vec::with_capacity(HEADER_FULL_LEN + buf.len() + TAG_LEN);
@@ -169,14 +169,16 @@ fn open_contents(
     let ciphertext = &data[HEADER_FULL_LEN..ciphertext_end];
     let tag = &data[ciphertext_end..];
 
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(master));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(master));
     let mut plaintext = ciphertext.to_vec();
     cipher
         .decrypt_in_place_detached(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce),
             header_core_bytes,
             &mut plaintext,
-            chacha20poly1305::Tag::from_slice(tag),
+            <&Tag>::from(
+                <&[u8; TAG_LEN]>::try_from(tag).expect("tag slice is exactly TAG_LEN bytes"),
+            ),
         )
         .map_err(|_| {
             let message = format!(
@@ -834,10 +836,10 @@ mod tests {
         let master = kdf::derive_master_key(EXPORT_KEY, &salt, suite_version).unwrap();
         let header = header_core(suite_version, &salt);
         let nonce = gen_nonce();
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(master.as_ref()));
+        let cipher = ChaCha20Poly1305::new(<&Key>::from(&*master));
         let mut plaintext = vec![0xff, 0xff, 0xff, 0xff];
         let tag = cipher
-            .encrypt_in_place_detached(Nonce::from_slice(&nonce), &header, &mut plaintext)
+            .encrypt_in_place_detached(&Nonce::from(nonce), &header, &mut plaintext)
             .unwrap();
 
         let mut out = Vec::new();

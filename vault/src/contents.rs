@@ -290,7 +290,7 @@ fn wrap_dek_under_master(
     master: &[u8; KEY_LEN],
     dek: &[u8; KEY_LEN],
 ) -> Result<Vec<u8>, VaultError> {
-    let cipher = ChaCha20Poly1305::new(Key::from(master));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(master));
     let mut nonce_bytes = [0u8; ENTRY_NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let mut buf = dek.to_vec();
@@ -324,14 +324,18 @@ fn unwrap_dek_under_master(
     let ct_end = ENTRY_NONCE_LEN + KEY_LEN;
     let ciphertext = &wrapped[ENTRY_NONCE_LEN..ct_end];
     let tag = &wrapped[ct_end..];
-    let cipher = ChaCha20Poly1305::new(Key::from(master));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(master));
     let mut buf = ciphertext.to_vec();
     cipher
         .decrypt_in_place_detached(
-            Nonce::try_from(nonce).expect("nonce slice is exactly ENTRY_NONCE_LEN bytes"),
+            // nonce is exactly ENTRY_NONCE_LEN bytes: structurally guaranteed
+            // by the MIN_WRAPPED length check above.
+            <&Nonce>::from(nonce),
             &[],
             &mut buf,
-            Tag::try_from(tag).expect("tag slice is exactly 16 bytes"),
+            // tag is exactly 16 bytes: structurally guaranteed by
+            // the MIN_WRAPPED length check above.
+            <&Tag>::from(tag),
         )
         .map_err(|_| VaultError::Auth)?;
     let mut dek = [0u8; KEY_LEN];
@@ -364,7 +368,7 @@ pub fn seal_entry(
 
     let nonce = gen_entry_nonce();
     let aad = aad_bytes(&meta)?;
-    let cipher = ChaCha20Poly1305::new(Key::from(&*dek));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(&*dek));
     let mut buf = value.to_vec();
     let tag = cipher
         .encrypt_in_place_detached(&Nonce::from(nonce), &aad, &mut buf)
@@ -404,14 +408,16 @@ pub fn open_entry(
     let (value_ct, tag) = envelope.ciphertext.split_at(split);
 
     let aad = aad_bytes(&envelope.meta)?;
-    let cipher = ChaCha20Poly1305::new(Key::from(&*dek));
+    let cipher = ChaCha20Poly1305::new(<&Key>::from(&*dek));
     let mut buf = value_ct.to_vec();
     cipher
         .decrypt_in_place_detached(
             &Nonce::from(envelope.nonce),
             &aad,
             &mut buf,
-            Tag::try_from(tag).expect("tag slice is exactly 16 bytes"),
+            // tag is exactly 16 bytes: structurally guaranteed by
+            // the `envelope.ciphertext.len() < 16` guard above.
+            <&Tag>::from(tag),
         )
         .map_err(|_| VaultError::Auth)?;
     Ok(Zeroizing::new(buf))
