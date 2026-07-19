@@ -318,7 +318,10 @@ fn panic_payload(payload: Box<dyn Any + Send + 'static>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
@@ -327,7 +330,10 @@ mod tests {
     use tokio::net::UnixStream;
     use tokio::time::timeout;
 
-    use super::{accept_next_stream, listener_from_listenfd, peer_is_allowed};
+    use super::{
+        accept_next_stream, bind_listener, chown_group, listener_from_listenfd, peer_is_allowed,
+    };
+    use crate::Config;
 
     /// listenfd's `from_env` mutates `LISTEN_*` env vars, so every test that
     /// touches them must serialise. Mirrors the env_lock pattern in
@@ -478,5 +484,79 @@ mod tests {
             pid: None,
         };
         assert_eq!(creds.describe(), "uid=0 gid=0 pid=unknown");
+    }
+
+    fn base_config(socket_path: PathBuf) -> Config {
+        Config {
+            socket_path: socket_path.to_string_lossy().into_owned(),
+            socket_group: None,
+            allowed_peer_uid: Some(geteuid().as_raw()),
+            allowed_peer_gid: Some(getegid().as_raw()),
+            plugin_uid: 1000,
+            plugin_gid: 1000,
+            image_allowlist_regex: r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$".to_string(),
+            container_pids_limit: 256,
+            container_cpu_limit: "1.0".to_string(),
+            container_memory_limit: "512m".to_string(),
+            container_read_only_rootfs: false,
+            broker_socket_path: "/tmp/broker.sock".to_string(),
+            default_network: "botwork-plugin".to_string(),
+            egress_proxy: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_listener_creates_socket_with_secure_default_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("launcher.sock");
+        let config = base_config(socket_path.clone());
+        let listener = bind_listener(&config).expect("bind listener");
+
+        let mode = std::fs::metadata(&socket_path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn bind_listener_uses_group_mode_when_socket_group_configured() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("launcher.sock");
+        let mut config = base_config(socket_path.clone());
+        config.socket_group = Some(getegid().as_raw());
+        let listener = bind_listener(&config).expect("bind listener");
+
+        let metadata = std::fs::metadata(&socket_path).expect("metadata");
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o660);
+        assert_eq!(metadata.gid(), getegid().as_raw());
+
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn bind_listener_replaces_existing_socket_path_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("launcher.sock");
+        File::create(&socket_path).expect("create stale file");
+        let config = base_config(socket_path.clone());
+        let listener = bind_listener(&config).expect("bind listener");
+        let metadata = std::fs::metadata(&socket_path).expect("metadata");
+        assert!(
+            metadata.file_type().is_socket(),
+            "must replace stale file with socket"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn chown_group_returns_error_for_missing_path() {
+        let missing = Path::new("/tmp/this-path-should-not-exist-botwork-launcher.sock");
+        let err = chown_group(missing, getegid().as_raw()).expect_err("missing path should fail");
+        assert!(err.contains("failed to chown"), "{err}");
     }
 }

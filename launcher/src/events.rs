@@ -330,6 +330,29 @@ mod tests {
         assert_eq!(exit_code, Some(137));
     }
 
+    #[test]
+    fn parse_event_line_rejects_missing_required_fields() {
+        for line in [
+            r#"{"Type":"container","Actor":{"Attributes":{"name":"mcp_session_5ea57ab800c5"}}}"#,
+            r#"{"Type":"container","Action":"die"}"#,
+            r#"{"Type":"container","Action":"die","Actor":{}}"#,
+            r#"{"Type":"container","Action":"die","Actor":{"Attributes":{}}}"#,
+            r#"{"Type":"container","Action":123,"action":"die","Actor":{"Attributes":{"name":"mcp_session_5ea57ab800c5"}}}"#,
+        ] {
+            assert!(
+                parse_event_line(line).is_none(),
+                "expected None for malformed event: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_event_line_handles_non_string_exit_code_as_none() {
+        let line = r#"{"Type":"container","Action":"die","Actor":{"ID":"abc","Attributes":{"name":"mcp_session_5ea57ab800c5","exitCode":137}}}"#;
+        let result = parse_event_line(line).expect("event should parse");
+        assert_eq!(result.2, None);
+    }
+
     // ── build_exit_payload ──────────────────────────────────────────────────
 
     #[test]
