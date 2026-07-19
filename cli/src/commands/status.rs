@@ -54,7 +54,7 @@ fn format_status(tenant: &str, entry: &KeyringEntry, now: chrono::DateTime<Utc>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     #[test]
@@ -75,8 +75,8 @@ mod tests {
         assert!(msg.contains("1day"));
     }
 
-    fn env_lock() -> &'static Mutex<()> {
-        crate::test_env_lock::env_lock()
+    fn lock_env() -> MutexGuard<'static, ()> {
+        crate::test_env_lock::lock_env()
     }
 
     fn fixture_entry(expires_at: chrono::DateTime<Utc>) -> KeyringEntry {
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn run_returns_status_for_live_entry() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
         KeyringStore::new()
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn run_returns_no_lease_and_expired_errors() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
 

@@ -143,25 +143,34 @@ fn parse_entry(payload: &str) -> Result<KeyringEntry, LoginError> {
     serde_json::from_str(payload).map_err(|err| LoginError::Keyring(err.into()))
 }
 
-/// Resolve the directory the file storage writes into. Prefers
-/// `$BOTWORK_LOGIN_KEYRING_DIR` (set by tests so they don't scribble
-/// on the user's `$HOME`), then `$XDG_CONFIG_HOME/botspace/keyring`,
-/// then `$HOME/.config/botspace/keyring`. Returns an error if no
-/// candidate resolves.
-fn keyring_dir() -> Result<PathBuf, KeyringStorageError> {
-    if let Ok(value) = std::env::var("BOTWORK_LOGIN_KEYRING_DIR") {
+/// Pure resolver for the keyring directory. Prefers
+/// `keyring_dir_env` (the value of `$BOTWORK_LOGIN_KEYRING_DIR`),
+/// then `$XDG_CONFIG_HOME/botspace/keyring` if `xdg_config_home` is
+/// `Some`, then `$HOME/.config/botspace/keyring` if `home` is `Some`.
+/// Returns an error if no candidate resolves.
+///
+/// Taking the three inputs explicitly (instead of reading
+/// `std::env` directly) makes this function pure and lets tests call
+/// it with explicit `Some`/`None` values without mutating
+/// process-global environment variables.
+fn resolve_keyring_dir(
+    keyring_dir_env: Option<&str>,
+    xdg_config_home: Option<&str>,
+    home: Option<&str>,
+) -> Result<PathBuf, KeyringStorageError> {
+    if let Some(value) = keyring_dir_env {
         if !value.is_empty() {
             return Ok(PathBuf::from(value));
         }
     }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+    if let Some(xdg) = xdg_config_home {
         if !xdg.is_empty() {
             return Ok(PathBuf::from(xdg).join("botspace").join("keyring"));
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return Ok(PathBuf::from(home)
+    if let Some(h) = home {
+        if !h.is_empty() {
+            return Ok(PathBuf::from(h)
                 .join(".config")
                 .join("botspace")
                 .join("keyring"));
@@ -172,6 +181,17 @@ fn keyring_dir() -> Result<PathBuf, KeyringStorageError> {
          cannot resolve a writable keyring directory"
             .to_string(),
     ))
+}
+
+/// Resolve the directory the file storage writes into by reading the
+/// three relevant environment variables and delegating to
+/// [`resolve_keyring_dir`].
+fn keyring_dir() -> Result<PathBuf, KeyringStorageError> {
+    resolve_keyring_dir(
+        std::env::var("BOTWORK_LOGIN_KEYRING_DIR").ok().as_deref(),
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
 }
 
 fn file_for(tenant: &str) -> Result<PathBuf, KeyringStorageError> {
@@ -260,19 +280,7 @@ fn file_delete(tenant: &str) -> Result<bool, LoginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    /// Tests in this module mutate `BOTWORK_LOGIN_KEYRING_DIR` /
-    /// `XDG_CONFIG_HOME` / `HOME` to drive the path resolver
-    /// through specific code paths. Cargo's default test runner is
-    /// multi-threaded, so the mutations race; we serialise them
-    /// behind a `Mutex` so each env-mutating test gets a clean
-    /// window. `std::sync::Mutex` is enough — these tests are
-    /// sub-millisecond so lock contention is trivial.
-    fn env_lock() -> &'static Mutex<()> {
-        crate::test_env_lock::env_lock()
-    }
 
     fn fixture_entry() -> KeyringEntry {
         KeyringEntry {
@@ -310,9 +318,92 @@ mod tests {
         assert!(entry.is_expired(now));
     }
 
+    // ── resolve_keyring_dir pure-function tests ───────────────────────────
+    // These call the inner resolver directly with explicit inputs so they
+    // never touch process-global environment variables and need no mutex.
+
+    #[test]
+    fn missing_dir_env_is_an_error_at_resolve_time() {
+        let err = resolve_keyring_dir(None, None, None).expect_err("no inputs should error");
+        assert!(matches!(err, KeyringStorageError::NoBackend(_)));
+    }
+
+    #[test]
+    fn keyring_dir_falls_back_from_xdg_to_home() {
+        // Explicit BOTWORK_LOGIN_KEYRING_DIR wins.
+        assert_eq!(
+            resolve_keyring_dir(
+                Some("/tmp/explicit-dir"),
+                Some("/tmp/xdg-config-home"),
+                Some("/tmp/home-dir")
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/explicit-dir"),
+        );
+
+        // XDG_CONFIG_HOME used when no explicit dir.
+        assert_eq!(
+            resolve_keyring_dir(None, Some("/tmp/xdg-config-home"), Some("/tmp/home-dir")).unwrap(),
+            PathBuf::from("/tmp/xdg-config-home")
+                .join("botspace")
+                .join("keyring"),
+        );
+
+        // Falls back to HOME when XDG_CONFIG_HOME is absent.
+        assert_eq!(
+            resolve_keyring_dir(None, None, Some("/tmp/home-dir")).unwrap(),
+            PathBuf::from("/tmp/home-dir")
+                .join(".config")
+                .join("botspace")
+                .join("keyring"),
+        );
+
+        // Empty strings are treated as absent.
+        assert_eq!(
+            resolve_keyring_dir(Some(""), Some(""), Some("/tmp/home-dir")).unwrap(),
+            PathBuf::from("/tmp/home-dir")
+                .join(".config")
+                .join("botspace")
+                .join("keyring"),
+        );
+    }
+
+    // ── path-traversal guard ──────────────────────────────────────────────
+    // The path-traversal check in file_for() fires before keyring_dir() is
+    // ever called, so no env mutation or mutex is needed here.
+
+    #[test]
+    fn rejects_path_traversal_in_tenant_name() {
+        for bad in ["..", ".", "../escape", "with/slash", r"win\slash"] {
+            let err = file_for(bad).expect_err(bad);
+            assert!(
+                matches!(err, KeyringStorageError::NoBackend(_)),
+                "should refuse {bad}; got {err:?}"
+            );
+        }
+    }
+
+    // ── read/delete noops when file_for returns NoBackend ─────────────────
+    // Path-traversal names trigger NoBackend before keyring_dir() is
+    // consulted, so the same graceful-noop branches in file_read /
+    // file_delete are exercised without touching env vars.
+
+    #[test]
+    fn read_and_delete_are_noops_when_backend_cannot_be_resolved() {
+        let store = KeyringStore::new();
+        assert!(store.read("../escape").unwrap().is_none());
+        assert!(!store.delete("../escape").unwrap());
+    }
+
+    // ── filesystem round-trip tests ───────────────────────────────────────
+    // These write real files and need BOTWORK_LOGIN_KEYRING_DIR to point at
+    // a temp directory. They share the process-level env lock so concurrent
+    // test threads don't race on the env var; the lock acquisition uses
+    // unwrap_or_else so a panicking test can't cascade failures into others.
+
     #[test]
     fn store_round_trips_via_env_dir() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = crate::test_env_lock::lock_env();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
 
@@ -344,101 +435,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_path_traversal_in_tenant_name() {
-        let _lock = env_lock().lock().unwrap();
-        let dir = TempDir::new().unwrap();
-        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
-        for bad in ["..", ".", "../escape", "with/slash", r"win\slash"] {
-            let err = file_for(bad).expect_err(bad);
-            assert!(
-                matches!(err, KeyringStorageError::NoBackend(_)),
-                "should refuse {bad}; got {err:?}"
-            );
-        }
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
-    }
-
-    #[test]
-    fn missing_dir_env_is_an_error_at_resolve_time() {
-        let _lock = env_lock().lock().unwrap();
-        // Save + clear all three env vars the resolver consults.
-        let saved_keyring = std::env::var("BOTWORK_LOGIN_KEYRING_DIR").ok();
-        let saved_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_home = std::env::var("HOME").ok();
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("HOME");
-        let err = keyring_dir().expect_err("no env should error");
-        assert!(matches!(err, KeyringStorageError::NoBackend(_)));
-        if let Some(v) = saved_keyring {
-            std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", v);
-        }
-        if let Some(v) = saved_xdg {
-            std::env::set_var("XDG_CONFIG_HOME", v);
-        }
-        if let Some(v) = saved_home {
-            std::env::set_var("HOME", v);
-        }
-    }
-
-    #[test]
-    fn keyring_dir_falls_back_from_xdg_to_home() {
-        let _lock = env_lock().lock().unwrap();
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
-        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
-        std::env::set_var("HOME", "/tmp/home-dir");
-        assert_eq!(
-            keyring_dir().unwrap(),
-            PathBuf::from("/tmp/xdg-config-home")
-                .join("botspace")
-                .join("keyring")
-        );
-
-        std::env::remove_var("XDG_CONFIG_HOME");
-        assert_eq!(
-            keyring_dir().unwrap(),
-            PathBuf::from("/tmp/home-dir")
-                .join(".config")
-                .join("botspace")
-                .join("keyring")
-        );
-        std::env::remove_var("HOME");
-    }
-
-    #[test]
     fn malformed_json_payload_is_shaped_as_keyring_error() {
         let err = parse_entry("{not-json").unwrap_err();
         assert!(matches!(err, LoginError::Keyring(_)), "got {err:?}");
     }
 
     #[test]
-    fn read_and_delete_are_noops_when_backend_cannot_be_resolved() {
-        let _lock = env_lock().lock().unwrap();
-        let saved_keyring = std::env::var("BOTWORK_LOGIN_KEYRING_DIR").ok();
-        let saved_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        let saved_home = std::env::var("HOME").ok();
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("HOME");
-
-        let store = KeyringStore::new();
-        assert!(store.read("phlax").unwrap().is_none());
-        assert!(!store.delete("phlax").unwrap());
-
-        if let Some(v) = saved_keyring {
-            std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", v);
-        }
-        if let Some(v) = saved_xdg {
-            std::env::set_var("XDG_CONFIG_HOME", v);
-        }
-        if let Some(v) = saved_home {
-            std::env::set_var("HOME", v);
-        }
-    }
-
-    #[test]
     fn read_and_delete_surface_non_notfound_fs_errors() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = crate::test_env_lock::lock_env();
         let dir = TempDir::new().unwrap();
         std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
 

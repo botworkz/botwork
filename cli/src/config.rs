@@ -197,25 +197,35 @@ pub struct ResolvedServerSettings {
     pub token_env: String,
 }
 
-/// Probe the standard config locations and return the first one
-/// that resolves. Does NOT check whether the file exists — callers
-/// must handle the missing-file case (we treat it as
-/// [`Config::default()`]).
-pub fn resolve_config_path() -> Option<PathBuf> {
-    if let Ok(value) = std::env::var(ENV_CONFIG_PATH) {
+/// Pure resolver for the config file path. Prefers `config_path_env`
+/// (the value of `$BOTWORK_LOGIN_CONFIG`), then
+/// `$XDG_CONFIG_HOME/botspace/config.toml` if `xdg_config_home` is
+/// `Some`, then `$HOME/.config/botspace/config.toml` if `home` is
+/// `Some`. Returns `None` if no candidate resolves.
+///
+/// Taking the three inputs explicitly (instead of reading
+/// `std::env` directly) makes this function pure and lets tests call
+/// it with explicit `Some`/`None` values without mutating
+/// process-global environment variables.
+fn resolve_config_path_inner(
+    config_path_env: Option<&str>,
+    xdg_config_home: Option<&str>,
+    home: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(value) = config_path_env {
         if !value.is_empty() {
             return Some(PathBuf::from(value));
         }
     }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+    if let Some(xdg) = xdg_config_home {
         if !xdg.is_empty() {
             return Some(PathBuf::from(xdg).join("botspace").join("config.toml"));
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
+    if let Some(h) = home {
+        if !h.is_empty() {
             return Some(
-                PathBuf::from(home)
+                PathBuf::from(h)
                     .join(".config")
                     .join("botspace")
                     .join("config.toml"),
@@ -223,6 +233,18 @@ pub fn resolve_config_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Probe the standard config locations and return the first one
+/// that resolves. Does NOT check whether the file exists — callers
+/// must handle the missing-file case (we treat it as
+/// [`Config::default()`]).
+pub fn resolve_config_path() -> Option<PathBuf> {
+    resolve_config_path_inner(
+        std::env::var(ENV_CONFIG_PATH).ok().as_deref(),
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
 }
 
 /// Parse and validate a server URL string.
@@ -563,52 +585,44 @@ mod tests {
         );
     }
 
+    // ── resolve_config_path pure-function tests ───────────────────────────
+    // These call the inner resolver directly with explicit inputs so they
+    // never touch process-global environment variables and need no mutex.
+
     #[test]
     fn resolve_config_path_prefers_explicit_env_over_xdg_and_home() {
-        let _lock = lock_env();
-        std::env::set_var(ENV_CONFIG_PATH, "/tmp/explicit-config.toml");
-        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-home");
-        std::env::set_var("HOME", "/tmp/home-dir");
-
         assert_eq!(
-            resolve_config_path().as_deref(),
+            resolve_config_path_inner(
+                Some("/tmp/explicit-config.toml"),
+                Some("/tmp/xdg-home"),
+                Some("/tmp/home-dir")
+            )
+            .as_deref(),
             Some(std::path::Path::new("/tmp/explicit-config.toml"))
         );
-
-        std::env::remove_var(ENV_CONFIG_PATH);
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("HOME");
     }
 
     #[test]
     fn resolve_config_path_falls_back_to_xdg_then_home() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_CONFIG_PATH);
-        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-home");
-        std::env::set_var("HOME", "/tmp/home-dir");
+        // XDG wins when no explicit env.
         assert_eq!(
-            resolve_config_path().as_deref(),
+            resolve_config_path_inner(None, Some("/tmp/xdg-home"), Some("/tmp/home-dir"))
+                .as_deref(),
             Some(std::path::Path::new("/tmp/xdg-home/botspace/config.toml"))
         );
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        // Falls back to HOME when XDG is absent.
         assert_eq!(
-            resolve_config_path().as_deref(),
+            resolve_config_path_inner(None, None, Some("/tmp/home-dir")).as_deref(),
             Some(std::path::Path::new(
                 "/tmp/home-dir/.config/botspace/config.toml"
             ))
         );
-
-        std::env::remove_var("HOME");
     }
 
     #[test]
     fn resolve_config_path_is_none_when_no_candidates_exist() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_CONFIG_PATH);
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("HOME");
-        assert!(resolve_config_path().is_none());
+        assert!(resolve_config_path_inner(None, None, None).is_none());
     }
 
     #[test]

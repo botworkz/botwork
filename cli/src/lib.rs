@@ -54,12 +54,17 @@ pub use keyring_store::{KeyringEntry, KeyringStore};
 
 #[cfg(test)]
 pub(crate) mod test_env_lock {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard};
 
-    /// Shared process-wide lock for tests that mutate environment
-    /// variables.
-    pub(crate) fn env_lock() -> &'static Mutex<()> {
+    fn env_lock() -> &'static Mutex<()> {
         static LOCK: Mutex<()> = Mutex::new(());
         &LOCK
+    }
+
+    /// Acquire the env-mutation lock, recovering from a poisoned mutex
+    /// so that a panicking test doesn't cascade failures into every
+    /// subsequent test that touches env vars.
+    pub(crate) fn lock_env() -> MutexGuard<'static, ()> {
+        env_lock().lock().unwrap_or_else(|p| p.into_inner())
     }
 }
