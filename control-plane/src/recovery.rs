@@ -326,6 +326,7 @@ impl SessionRow {
 mod tests {
     use super::*;
     use crate::sessions::SessionRecord;
+    use sea_orm::{DatabaseBackend, MockDatabase};
 
     /// Construct a SessionRow with deliberately-fixed defaults so the
     /// projection tests are tightly readable. Mirrors the row shape
@@ -404,6 +405,241 @@ mod tests {
         ];
         let inserted = seed_store(&store, records).await;
         assert_eq!(inserted, 1);
+        assert_eq!(store.len().await, 2);
+    }
+
+    // ── fetch_live_sessions / run_with_retries_config (MockDatabase) ─────────
+
+    /// Helper: build a MockDatabase connection backed by Postgres dialect.
+    fn mock_db(mock: MockDatabase) -> sea_orm::DatabaseConnection {
+        mock.into_connection()
+    }
+
+    #[tokio::test]
+    async fn fetch_live_sessions_empty_result() {
+        // No live rows → Ok([]).
+        use botwork_entity::session_worker;
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([Vec::<session_worker::Model>::new()]),
+        );
+        let records = fetch_live_sessions(&db).await.expect("should succeed");
+        assert!(records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_live_sessions_db_error() {
+        // DB returns an error → RecoveryError::Db.
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([sea_orm::DbErr::Custom("db gone".to_string())]),
+        );
+        let err = fetch_live_sessions(&db).await.expect_err("should fail");
+        match err {
+            RecoveryError::Db(inner) => {
+                assert!(inner.to_string().contains("db gone"), "{inner}");
+            }
+            other => panic!("expected Db variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_live_sessions_nonempty_row_projects_ok() {
+        // Single live row with the right column aliases → Ok([SessionRecord]).
+        use std::collections::BTreeMap;
+        let mut mock_row: BTreeMap<String, sea_orm::Value> = BTreeMap::new();
+        mock_row.insert(
+            "session_id".to_string(),
+            sea_orm::Value::String(Some(Box::new("mcp_session_abc".to_string()))),
+        );
+        mock_row.insert(
+            "container_ip".to_string(),
+            sea_orm::Value::String(Some(Box::new("10.0.0.7".to_string()))),
+        );
+        mock_row.insert(
+            "tenant".to_string(),
+            sea_orm::Value::String(Some(Box::new("acme".to_string()))),
+        );
+        mock_row.insert(
+            "workspace".to_string(),
+            sea_orm::Value::String(Some(Box::new("mcp".to_string()))),
+        );
+        mock_row.insert(
+            "plugin".to_string(),
+            sea_orm::Value::String(Some(Box::new("fetch".to_string()))),
+        );
+        mock_row.insert(
+            "egress_policy".to_string(),
+            sea_orm::Value::Json(Some(Box::new(serde_json::json!({})))),
+        );
+
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![mock_row]]),
+        );
+        let records = fetch_live_sessions(&db).await.expect("should succeed");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].session_id, "mcp_session_abc");
+        assert_eq!(
+            records[0].container_ip,
+            "10.0.0.7".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert_eq!(records[0].tenant, "acme");
+        assert_eq!(records[0].plugin, "fetch");
+    }
+
+    #[tokio::test]
+    async fn fetch_live_sessions_row_with_bad_ip_returns_bad_row() {
+        // A row with an un-parseable IP → RecoveryError::BadRow.
+        use std::collections::BTreeMap;
+        let mut mock_row: BTreeMap<String, sea_orm::Value> = BTreeMap::new();
+        mock_row.insert(
+            "session_id".to_string(),
+            sea_orm::Value::String(Some(Box::new("mcp_session_bad".to_string()))),
+        );
+        mock_row.insert(
+            "container_ip".to_string(),
+            sea_orm::Value::String(Some(Box::new("not-an-ip".to_string()))),
+        );
+        mock_row.insert(
+            "tenant".to_string(),
+            sea_orm::Value::String(Some(Box::new("acme".to_string()))),
+        );
+        mock_row.insert(
+            "workspace".to_string(),
+            sea_orm::Value::String(Some(Box::new("mcp".to_string()))),
+        );
+        mock_row.insert(
+            "plugin".to_string(),
+            sea_orm::Value::String(Some(Box::new("fetch".to_string()))),
+        );
+        mock_row.insert(
+            "egress_policy".to_string(),
+            sea_orm::Value::Json(Some(Box::new(serde_json::json!({})))),
+        );
+
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![mock_row]]),
+        );
+        let err = fetch_live_sessions(&db)
+            .await
+            .expect_err("bad ip should fail");
+        match err {
+            RecoveryError::BadRow(msg) => {
+                assert!(msg.contains("not-an-ip"), "{msg}");
+            }
+            other => panic!("expected BadRow, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_retries_config_succeeds_on_first_attempt() {
+        // First DB call returns empty result → success, count=0, no retries.
+        use botwork_entity::session_worker;
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([Vec::<session_worker::Model>::new()]),
+        );
+        let store = Arc::new(SessionStore::new());
+        let count = run_with_retries_config(store, &db, 3, Duration::ZERO)
+            .await
+            .expect("success on first attempt");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn run_with_retries_config_error_then_success() {
+        // First attempt errors; second attempt returns empty set → Ok(0).
+        use botwork_entity::session_worker;
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([sea_orm::DbErr::Custom("transient".to_string())])
+                .append_query_results([Vec::<session_worker::Model>::new()]),
+        );
+        let store = Arc::new(SessionStore::new());
+        let count = run_with_retries_config(store, &db, 2, Duration::ZERO)
+            .await
+            .expect("second attempt succeeds");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn run_with_retries_config_exhausted_returns_err() {
+        // All attempts fail → Err after max_attempts=1 (no sleep needed).
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_errors([sea_orm::DbErr::Custom("always-fail".to_string())]),
+        );
+        let store = Arc::new(SessionStore::new());
+        let err = run_with_retries_config(store, &db, 1, Duration::ZERO)
+            .await
+            .expect_err("should exhaust attempts");
+        match err {
+            RecoveryError::Db(inner) => {
+                assert!(inner.to_string().contains("always-fail"), "{inner}");
+            }
+            other => panic!("expected Db, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_retries_delegates_to_config() {
+        // The public wrapper uses default constants; just confirm it returns
+        // Ok(0) on a clean empty-result mock without blocking.
+        use botwork_entity::session_worker;
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([Vec::<session_worker::Model>::new()]),
+        );
+        let store = Arc::new(SessionStore::new());
+        // run_with_retries uses MAX_ATTEMPTS=30 and ATTEMPT_INTERVAL=5s, but
+        // since the first attempt succeeds the interval is never used.
+        let count = run_with_retries(store, &db).await.expect("delegates ok");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn run_with_retries_config_seeded_record_counts() {
+        // Non-empty successful result → count reflects inserted sessions.
+        use std::collections::BTreeMap;
+        let make_row = |session_id: &str, ip: &str| -> BTreeMap<String, sea_orm::Value> {
+            let mut r = BTreeMap::new();
+            r.insert(
+                "session_id".to_string(),
+                sea_orm::Value::String(Some(Box::new(session_id.to_string()))),
+            );
+            r.insert(
+                "container_ip".to_string(),
+                sea_orm::Value::String(Some(Box::new(ip.to_string()))),
+            );
+            r.insert(
+                "tenant".to_string(),
+                sea_orm::Value::String(Some(Box::new("acme".to_string()))),
+            );
+            r.insert(
+                "workspace".to_string(),
+                sea_orm::Value::String(Some(Box::new("mcp".to_string()))),
+            );
+            r.insert(
+                "plugin".to_string(),
+                sea_orm::Value::String(Some(Box::new("fetch".to_string()))),
+            );
+            r.insert(
+                "egress_policy".to_string(),
+                sea_orm::Value::Json(Some(Box::new(serde_json::json!({})))),
+            );
+            r
+        };
+        let db = mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
+                make_row("mcp_session_1", "10.0.0.1"),
+                make_row("mcp_session_2", "10.0.0.2"),
+            ]]),
+        );
+        let store = Arc::new(SessionStore::new());
+        let count = run_with_retries_config(store.clone(), &db, 1, Duration::ZERO)
+            .await
+            .expect("success");
+        assert_eq!(count, 2);
         assert_eq!(store.len().await, 2);
     }
 }

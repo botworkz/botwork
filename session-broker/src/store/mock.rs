@@ -257,6 +257,11 @@ struct SessionWorkerInner {
     recorded_mcp_backfills: Vec<(String, String)>,
     recorded_agent_backfills: Vec<(String, Uuid)>,
     recorded_reaps: Vec<String>,
+    /// Per-container override: if the container name is in this map,
+    /// `record_reap` returns that error instead of succeeding.
+    record_reap_errors: HashMap<String, String>,
+    /// If set, `resolve_plugin_name` returns this error for every lookup.
+    resolve_plugin_name_error: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -322,6 +327,32 @@ impl MockSessionWorkerStore {
 
     pub async fn drain_recorded_mcp_backfills(&self) -> Vec<(String, String)> {
         std::mem::take(&mut self.inner.lock().expect("lock").recorded_mcp_backfills)
+    }
+
+    /// Configure `record_reap` to return an error for a specific container.
+    /// All other operations (including `list_live`) still succeed.
+    pub fn with_record_reap_error(
+        self,
+        container_name: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        {
+            let mut inner = self.inner.lock().expect("lock");
+            inner
+                .record_reap_errors
+                .insert(container_name.into(), msg.into());
+        }
+        self
+    }
+
+    /// Configure `resolve_plugin_name` to return a DB error for every call.
+    /// All other operations (including `list_live`) still succeed.
+    pub fn with_resolve_plugin_name_error(self, msg: impl Into<String>) -> Self {
+        {
+            let mut inner = self.inner.lock().expect("lock");
+            inner.resolve_plugin_name_error = Some(msg.into());
+        }
+        self
     }
 
     fn maybe_db_err(&self) -> Option<SessionWorkerWriteError> {
@@ -415,6 +446,9 @@ impl SessionWorkerStore for MockSessionWorkerStore {
         }
         let mut inner = self.inner.lock().expect("lock");
         inner.recorded_reaps.push(container_name.to_string());
+        if let Some(msg) = inner.record_reap_errors.get(container_name) {
+            return Err(SessionWorkerWriteError::Db(DbErr::Custom(msg.clone())));
+        }
         let Some(row) = inner.workers.get_mut(container_name) else {
             return Err(SessionWorkerWriteError::UnknownContainer(
                 container_name.to_string(),
@@ -449,12 +483,10 @@ impl SessionWorkerStore for MockSessionWorkerStore {
         if let Some(msg) = &self.always_error {
             return Err(DbErr::Custom(msg.clone()));
         }
-        Ok(self
-            .inner
-            .lock()
-            .expect("lock")
-            .plugin_names_by_id
-            .get(&plugin_id)
-            .cloned())
+        let inner = self.inner.lock().expect("lock");
+        if let Some(msg) = &inner.resolve_plugin_name_error {
+            return Err(DbErr::Custom(msg.clone()));
+        }
+        Ok(inner.plugin_names_by_id.get(&plugin_id).cloned())
     }
 }
