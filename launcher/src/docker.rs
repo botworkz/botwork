@@ -811,4 +811,273 @@ mod tests {
 
         assert!(matches!(err, LauncherError::BadRequest(_)));
     }
+
+    // --------------- parse_memory_limit ---------------
+
+    #[test]
+    fn parse_memory_limit_valid_m() {
+        assert_eq!(parse_memory_limit("512m").expect("valid"), 536_870_912);
+    }
+
+    #[test]
+    fn parse_memory_limit_valid_g() {
+        assert_eq!(parse_memory_limit("1g").expect("valid"), 1_073_741_824);
+    }
+
+    #[test]
+    fn parse_memory_limit_valid_k() {
+        assert_eq!(parse_memory_limit("1024k").expect("valid"), 1_048_576);
+    }
+
+    #[test]
+    fn parse_memory_limit_valid_b_suffix() {
+        assert_eq!(parse_memory_limit("1b").expect("valid"), 1);
+    }
+
+    #[test]
+    fn parse_memory_limit_valid_no_suffix() {
+        assert_eq!(parse_memory_limit("1").expect("valid"), 1);
+    }
+
+    #[test]
+    fn parse_memory_limit_valid_two_char_suffixes() {
+        assert_eq!(parse_memory_limit("1kb").expect("kb"), 1_024);
+        assert_eq!(parse_memory_limit("1mb").expect("mb"), 1_048_576);
+        assert_eq!(parse_memory_limit("1gb").expect("gb"), 1_073_741_824);
+        assert_eq!(parse_memory_limit("1tb").expect("tb"), 1_099_511_627_776);
+        assert_eq!(
+            parse_memory_limit("1pb").expect("pb"),
+            1_125_899_906_842_624
+        );
+    }
+
+    #[test]
+    fn parse_memory_limit_case_insensitive() {
+        assert_eq!(
+            parse_memory_limit("512M").expect("uppercase M"),
+            536_870_912
+        );
+    }
+
+    #[test]
+    fn parse_memory_limit_fails_empty() {
+        assert!(matches!(
+            parse_memory_limit("").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn parse_memory_limit_fails_bad_suffix() {
+        assert!(matches!(
+            parse_memory_limit("512x").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn parse_memory_limit_fails_non_numeric() {
+        assert!(matches!(
+            parse_memory_limit("abc").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn parse_memory_limit_fails_zero() {
+        assert!(matches!(
+            parse_memory_limit("0").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn parse_memory_limit_fails_negative() {
+        assert!(matches!(
+            parse_memory_limit("-5m").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn parse_memory_limit_fails_overflow() {
+        // 9_999_999_999 GiB exceeds i64::MAX
+        assert!(matches!(
+            parse_memory_limit("9999999999g").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    // --------------- parse_cpu_limit ---------------
+
+    #[test]
+    fn parse_cpu_limit_valid_one() {
+        assert_eq!(parse_cpu_limit("1.0").expect("valid"), 1_000_000_000);
+    }
+
+    #[test]
+    fn parse_cpu_limit_valid_half() {
+        assert_eq!(parse_cpu_limit("0.5").expect("valid"), 500_000_000);
+    }
+
+    #[test]
+    fn parse_cpu_limit_valid_integer() {
+        assert_eq!(parse_cpu_limit("2").expect("valid"), 2_000_000_000);
+    }
+
+    #[test]
+    fn parse_cpu_limit_fails_non_numeric() {
+        assert!(matches!(
+            parse_cpu_limit("abc").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn parse_cpu_limit_fails_zero() {
+        assert!(matches!(
+            parse_cpu_limit("0").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn parse_cpu_limit_fails_negative() {
+        assert!(matches!(
+            parse_cpu_limit("-1").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn parse_cpu_limit_fails_overflow() {
+        // 1_000_000_000_000 CPUs * 1_000_000_000 nano/CPU exceeds i64::MAX
+        assert!(matches!(
+            parse_cpu_limit("1e12").unwrap_err(),
+            LauncherError::Internal(_)
+        ));
+    }
+
+    // --------------- inspect_container_ip missing-network paths ---------------
+
+    #[test]
+    fn inspect_container_ip_fails_when_no_network_settings() {
+        let inspect = ContainerInspectResponse {
+            network_settings: None,
+            ..Default::default()
+        };
+        let err = inspect_container_ip(&inspect, "botwork", "test-container").unwrap_err();
+        assert!(matches!(err, LauncherError::Internal(_)));
+    }
+
+    #[test]
+    fn inspect_container_ip_fails_when_network_key_absent() {
+        let mut networks = HashMap::new();
+        networks.insert(
+            "other-net".to_string(),
+            EndpointSettings {
+                ip_address: Some("10.0.0.1".to_string()),
+                ..Default::default()
+            },
+        );
+        let inspect = ContainerInspectResponse {
+            network_settings: Some(NetworkSettings {
+                networks: Some(networks),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = inspect_container_ip(&inspect, "botwork", "test-container").unwrap_err();
+        assert!(matches!(err, LauncherError::Internal(_)));
+    }
+
+    // --------------- is_running edge cases ---------------
+
+    #[test]
+    fn is_running_returns_true_when_running_field_true_and_status_none() {
+        let inspect = ContainerInspectResponse {
+            state: Some(ContainerState {
+                status: None,
+                running: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(is_running(&inspect));
+    }
+
+    #[test]
+    fn is_running_returns_false_when_state_none() {
+        let inspect = ContainerInspectResponse {
+            state: None,
+            ..Default::default()
+        };
+        assert!(!is_running(&inspect));
+    }
+
+    // --------------- stopped-container path in ensure_container_impl ---------------
+
+    fn inspect_stopped() -> ContainerInspectResponse {
+        ContainerInspectResponse {
+            state: Some(ContainerState {
+                status: Some(ContainerStateStatusEnum::EXITED),
+                running: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_container_removes_stopped_and_starts_fresh() {
+        let validators =
+            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
+        let launch = minimal_launch("mcp_session_aabbccddeeff", &[], &[]);
+
+        let fake = FakeDocker::default()
+            .with_inspect(vec![
+                Ok(inspect_stopped()),
+                Ok(inspect_running("10.0.0.9", "botwork")),
+            ])
+            .with_remove(vec![Ok(())])
+            .with_create(vec![Ok(())])
+            .with_start(vec![Ok(())]);
+
+        let outcome = ensure_container_impl(&launch, &validators, &fake)
+            .await
+            .expect("outcome");
+
+        assert_eq!(outcome.status, "started");
+        assert_eq!(outcome.container_ip, "10.0.0.9");
+    }
+
+    // --------------- teardown non-404 server error is non-fatal ---------------
+
+    #[tokio::test]
+    async fn teardown_succeeds_when_remove_returns_server_error() {
+        let validators =
+            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
+        let fake =
+            FakeDocker::default().with_remove(vec![Err(BollardError::DockerResponseServerError {
+                status_code: 500,
+                message: "internal server error".to_string(),
+            })]);
+
+        let result = teardown_impl(
+            "mcp_session_aabbccddeeff",
+            "/var/lib/botwork/tenants/acme/staging/aabbccddeeff",
+            &validators,
+            &fake,
+            |_| {
+                Ok(CommandOutput {
+                    returncode: 1,
+                    stdout: String::new(),
+                    stderr: "not mounted".to_string(),
+                })
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
 }
