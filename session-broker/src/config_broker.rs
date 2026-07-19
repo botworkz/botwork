@@ -473,4 +473,32 @@ mod tests {
         assert!(matches!(err, ConfigBrokerError::BadResponse(_)));
         assert_eq!(err.status_code(), 502);
     }
+
+    // ── additional coverage for uncovered branches ──────────────────
+
+    #[test]
+    fn error_envelope_maps_503_unavailable() {
+        // Line 317: `(503, Some((_, message))) => ConfigBrokerError::Unavailable(message)`
+        let body = br#"{"error":"service_unavailable","message":"downstream timeout"}"#;
+        let err = error_from_envelope(503, body);
+        assert!(
+            matches!(err, ConfigBrokerError::Unavailable(ref msg) if msg == "downstream timeout"),
+            "expected Unavailable(\"downstream timeout\"), got {err:?}"
+        );
+        assert_eq!(err.status_code(), 502);
+    }
+
+    #[test]
+    fn error_envelope_bad_response_with_parseable_detail_formats_code_and_msg() {
+        // The catch-all arm (line 321-326) with a parseable envelope:
+        //   `detail.map(|(code, msg)| format!("{code}: {msg}"))` closure fires.
+        // An unknown status (e.g. 422) with a valid JSON body triggers this.
+        let body = br#"{"error":"unprocessable","message":"constraint violated"}"#;
+        let err = error_from_envelope(422, body);
+        assert!(
+            matches!(err, ConfigBrokerError::BadResponse(ref s) if s.contains("unprocessable") && s.contains("constraint violated")),
+            "expected BadResponse with code+msg, got {err:?}"
+        );
+        assert_eq!(err.status_code(), 502);
+    }
 }
