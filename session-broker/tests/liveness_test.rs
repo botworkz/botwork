@@ -18,7 +18,7 @@ use botwork_session_broker::ext_proc::{
     seed_startup_liveness, ExternalProcessorService, PerStreamState,
 };
 use botwork_session_broker::test_support::{liveness_drop, start_log_capture, take_log_capture};
-use botwork_session_broker::{AppState, TransportState};
+use botwork_session_broker::{AppState, TransportState, COLD_START_TIMEOUT};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use envoy_proto::envoy::service::ext_proc::v3::HttpHeaders;
 use tokio::sync::Mutex;
@@ -59,6 +59,7 @@ fn make_state_with_grace(disconnect_grace: Duration) -> AppState {
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
         disconnect_grace,
+        cold_start_timeout: COLD_START_TIMEOUT,
         // RFE #105 PR2 / round-3: production wires three DB-bound
         // handles via `run()`. Liveness tests drive the grace state
         // machine against an in-memory `transport_sessions` map only,

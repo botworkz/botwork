@@ -29,9 +29,8 @@ use crate::docker::is_container_running;
 use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_ready, LauncherError};
 use crate::secrets;
 use crate::{
-    log_info, redact_token, AppState, PendingInit, SessionLiveness, TransportState,
-    COLD_START_TIMEOUT, LIVENESS_TTL, TENANT_RE, TENANT_WORKSPACE_PLUGIN_PATH_RE, TOMBSTONE_TTL,
-    WORKSPACE_RE,
+    log_info, redact_token, AppState, PendingInit, SessionLiveness, TransportState, LIVENESS_TTL,
+    TENANT_RE, TENANT_WORKSPACE_PLUGIN_PATH_RE, TOMBSTONE_TTL, WORKSPACE_RE,
 };
 
 /// `chrono::Utc::now()` formatted to the `%Y-%m-%dT%H:%M:%SZ` wire
@@ -1009,7 +1008,7 @@ async fn spawn_new_container(
         log_info(&format!("launcher response: {serialized}"));
     }
     let elapsed = start.elapsed();
-    let remaining = COLD_START_TIMEOUT.saturating_sub(elapsed);
+    let remaining = state.cold_start_timeout.saturating_sub(elapsed);
     if remaining.is_zero()
         || !probe_ready(
             &container_ip,
@@ -2035,6 +2034,7 @@ mod tests {
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_liveness: Arc::new(Mutex::new(HashMap::new())),
             disconnect_grace: std::time::Duration::from_secs(300),
+            cold_start_timeout: crate::COLD_START_TIMEOUT,
             // The ext_proc unit tests live within the crate and don't
             // touch the agent_session write-through path. Production
             // sets this via `run()`; tests pass `None` so they don't

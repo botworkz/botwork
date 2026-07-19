@@ -513,6 +513,7 @@ mod tests {
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_liveness: Arc::new(Mutex::new(HashMap::new())),
             disconnect_grace: std::time::Duration::from_secs(30),
+            cold_start_timeout: crate::COLD_START_TIMEOUT,
             agent_session_writer: None,
             session_worker_writer: writer,
             db: None,

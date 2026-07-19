@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 use axum::body::Body;
 use botwork_session_broker::admin::build_router;
 use botwork_session_broker::config_broker::UpstreamAuth;
-use botwork_session_broker::{AppState, TransportState};
+use botwork_session_broker::{AppState, TransportState, COLD_START_TIMEOUT};
 use http::Request;
 use tower::ServiceExt;
 
@@ -41,6 +41,7 @@ fn app_state_for_admin_tests() -> AppState {
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
         disconnect_grace: Duration::from_secs(300),
+        cold_start_timeout: COLD_START_TIMEOUT,
         // RFE #105 PR2 / round-3: admin-endpoint tests render from
         // `transport_sessions` only. Production wires three DB-bound
         // handles via `run()`; tests pass `None` to stay hermetic
