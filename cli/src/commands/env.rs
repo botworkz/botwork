@@ -60,7 +60,8 @@ fn format_export(token_env: &str, bearer: &str) -> String {
 mod tests {
     use super::*;
     use crate::keyring_store::{KeyringEntry, KeyringStore};
-    use std::sync::MutexGuard;
+    use botwork_test_support::EnvGuard;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     #[test]
@@ -69,10 +70,6 @@ mod tests {
             format_export("BOTWORK_BEARER", "ABCDEF0123456789"),
             "export BOTWORK_BEARER='ABCDEF0123456789'"
         );
-    }
-
-    fn lock_env() -> MutexGuard<'static, ()> {
-        crate::test_env_lock::lock_env()
     }
 
     fn fixture_entry(expires_at: chrono::DateTime<Utc>) -> KeyringEntry {
@@ -95,10 +92,11 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn run_uses_explicit_token_env_override() {
-        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
-        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+        let keyring_dir = dir.path().to_string_lossy().into_owned();
+        let _env = EnvGuard::apply(&[("BOTWORK_LOGIN_KEYRING_DIR", Some(&keyring_dir))]);
         KeyringStore::new()
             .write(
                 "phlax",
@@ -112,18 +110,20 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(output, "export CUSTOM_TOKEN='ABCDEF0123456789'");
-
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
     }
 
     #[test]
+    #[serial(env)]
     fn run_reads_token_env_from_config_when_not_overridden() {
-        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
         let config = dir.path().join("config.toml");
         std::fs::write(&config, "token_env = \"ALT_TOKEN\"\n").unwrap();
-        std::env::set_var("BOTWORK_LOGIN_CONFIG", &config);
-        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path().join("keyring"));
+        let config_path = config.to_string_lossy().into_owned();
+        let keyring_dir = dir.path().join("keyring").to_string_lossy().into_owned();
+        let _env = EnvGuard::apply(&[
+            ("BOTWORK_LOGIN_CONFIG", Some(&config_path)),
+            ("BOTWORK_LOGIN_KEYRING_DIR", Some(&keyring_dir)),
+        ]);
         KeyringStore::new()
             .write(
                 "phlax",
@@ -137,16 +137,14 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(output, "export ALT_TOKEN='ABCDEF0123456789'");
-
-        std::env::remove_var("BOTWORK_LOGIN_CONFIG");
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
     }
 
     #[test]
+    #[serial(env)]
     fn run_errors_for_missing_or_expired_lease() {
-        let _lock = lock_env();
         let dir = TempDir::new().unwrap();
-        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+        let keyring_dir = dir.path().to_string_lossy().into_owned();
+        let _env = EnvGuard::apply(&[("BOTWORK_LOGIN_KEYRING_DIR", Some(&keyring_dir))]);
 
         let missing = run_async(run(EnvArgs {
             tenant: "phlax".into(),
@@ -169,7 +167,5 @@ mod tests {
         assert!(
             matches!(expired, LoginError::LeaseExpired { ref tenant, .. } if tenant == "phlax")
         );
-
-        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
     }
 }
