@@ -1,0 +1,12 @@
+[package]
+name = "botwork-test-support"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "botwork_test_support"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

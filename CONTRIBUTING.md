@@ -71,6 +71,18 @@ SQL correctness checks (joins/filters/constraints/FK behaviour) in the
 integration tier; use unit tests for handler control flow, auth/header
 gates, parse/validation branches, and error mapping.
 
+### Env-mutation tests (interim pattern)
+
+When a test must mutate process-global env vars (`std::env::set_var` /
+`remove_var`), use both:
+
+- `#[serial(env)]` from `serial_test` to serialize env-mutating tests.
+- `botwork_test_support::EnvGuard::apply(...)` to snapshot + restore env
+  on drop.
+
+`serial_test` does **not** restore env values by itself; always pair it
+with `EnvGuard` for panic/assertion-safe cleanup.
+
 ### Fail-under policy
 
 **No coverage floor is enforced yet.** This run establishes the
