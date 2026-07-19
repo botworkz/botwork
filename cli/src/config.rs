@@ -110,6 +110,35 @@ impl Config {
         }
     }
 
+    /// Pure resolver for the broker URL — extracted so tests can inject
+    /// the env value directly without mutating the process-global
+    /// environment.
+    ///
+    /// Order: CLI flag > `env_server` > `server` in the config file >
+    /// built-in [`DEFAULT_SERVER`].
+    fn resolve_server_with(
+        &self,
+        env_server: Option<&str>,
+        cli_flag: Option<&str>,
+    ) -> Result<Url, LoginError> {
+        let raw = if let Some(value) = cli_flag {
+            value.trim().to_string()
+        } else if let Some(value) = env_server {
+            if !value.is_empty() {
+                value.to_string()
+            } else {
+                self.server
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_SERVER.to_string())
+            }
+        } else {
+            self.server
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SERVER.to_string())
+        };
+        validate_server_url(&raw)
+    }
+
     /// Resolve and validate the broker URL.
     ///
     /// Order: CLI flag > `BOTWORK_LOGIN_SERVER` > `server` in the
@@ -122,22 +151,7 @@ impl Config {
     /// no scheme is ever prepended. Only `http` and `https` are
     /// accepted; any other scheme is also rejected.
     pub fn resolve_server(&self, cli_value: Option<&str>) -> Result<Url, LoginError> {
-        let raw = if let Some(value) = cli_value {
-            value.trim().to_string()
-        } else if let Ok(value) = std::env::var(ENV_SERVER) {
-            if !value.is_empty() {
-                value
-            } else {
-                self.server
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_SERVER.to_string())
-            }
-        } else {
-            self.server
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SERVER.to_string())
-        };
-        validate_server_url(&raw)
+        self.resolve_server_with(std::env::var(ENV_SERVER).ok().as_deref(), cli_value)
     }
 
     /// Resolve the env var name `bw env` emits.
@@ -293,30 +307,12 @@ mod tests {
     use super::*;
     use botwork_test_support::EnvGuard;
     use serial_test::serial;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    /// Returns the `Mutex` that gates BOTWORK_LOGIN_SERVER mutation
-    /// inside this test module. Spelt as a function so a future
-    /// addition can move it without churning every call site.
-    fn config_env_lock() -> &'static Mutex<()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        &LOCK
-    }
-
-    /// Acquire the env-mutation lock, recovering from a poisoned mutex
-    /// so that a panicking test doesn't cascade failures into every
-    /// subsequent test that touches BOTWORK_LOGIN_SERVER.
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        config_env_lock().lock().unwrap_or_else(|p| p.into_inner())
-    }
 
     #[test]
     fn empty_config_resolves_to_built_in_defaults() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
-        let url = cfg.resolve_server(None).unwrap();
+        let url = cfg.resolve_server_with(None, None).unwrap();
         // Check components rather than the full string to be
         // independent of url-crate trailing-slash normalisation.
         assert_eq!(url.scheme(), "http");
@@ -332,14 +328,14 @@ mod tests {
 
     #[test]
     fn cli_flag_overrides_env_and_file() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config {
             server: Some("http://from-file:9100".into()),
             ..Config::default()
         };
         // CLI flag wins over file even with env unset.
-        let url = cfg.resolve_server(Some("http://from-cli:9100")).unwrap();
+        let url = cfg
+            .resolve_server_with(None, Some("http://from-cli:9100"))
+            .unwrap();
         assert_eq!(url.scheme(), "http");
         assert_eq!(url.host_str(), Some("from-cli"));
         assert_eq!(url.port(), Some(9100));
@@ -347,35 +343,26 @@ mod tests {
 
     #[test]
     fn env_var_overrides_file() {
-        // SAFETY: we set + clear within the test, gated on a
-        // per-process mutex shared with every other test in this
-        // file that mutates BOTWORK_LOGIN_SERVER. tests in the
-        // keyring_store module use a separate mutex because the
-        // env vars don't overlap.
-        let _lock = lock_env();
-        std::env::set_var(ENV_SERVER, "http://from-env:9100");
         let cfg = Config {
             server: Some("http://from-file:9100".into()),
             ..Config::default()
         };
-        let url = cfg.resolve_server(None).unwrap();
+        let url = cfg
+            .resolve_server_with(Some("http://from-env:9100"), None)
+            .unwrap();
         assert_eq!(url.scheme(), "http");
         assert_eq!(url.host_str(), Some("from-env"));
         assert_eq!(url.port(), Some(9100));
-        std::env::remove_var(ENV_SERVER);
     }
 
     #[test]
     fn empty_env_server_falls_back_to_file_value() {
-        let _lock = lock_env();
-        std::env::set_var(ENV_SERVER, "");
         let cfg = Config {
             server: Some("http://from-file:9100".into()),
             ..Config::default()
         };
-        let url = cfg.resolve_server(None).unwrap();
+        let url = cfg.resolve_server_with(Some(""), None).unwrap();
         assert_eq!(url.host_str(), Some("from-file"));
-        std::env::remove_var(ENV_SERVER);
     }
 
     #[test]
@@ -457,10 +444,10 @@ mod tests {
     /// rewritten.
     #[test]
     fn schemeless_host_port_80_is_rejected() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
-        let err = cfg.resolve_server(Some("127.0.0.1:80")).unwrap_err();
+        let err = cfg
+            .resolve_server_with(None, Some("127.0.0.1:80"))
+            .unwrap_err();
         assert!(
             matches!(err, LoginError::InvalidServer { ref value, .. } if value == "127.0.0.1:80"),
             "expected InvalidServer with value '127.0.0.1:80', got {err:?}"
@@ -474,10 +461,10 @@ mod tests {
     /// Scheme-less host:port 9100 via CLI flag is rejected.
     #[test]
     fn schemeless_host_port_9100_is_rejected() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
-        let err = cfg.resolve_server(Some("127.0.0.1:9100")).unwrap_err();
+        let err = cfg
+            .resolve_server_with(None, Some("127.0.0.1:9100"))
+            .unwrap_err();
         assert!(
             matches!(err, LoginError::InvalidServer { ref value, .. } if value == "127.0.0.1:9100"),
             "expected InvalidServer, got {err:?}"
@@ -487,10 +474,10 @@ mod tests {
     /// Bare host with no port and no scheme is rejected.
     #[test]
     fn schemeless_bare_host_is_rejected() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
-        let err = cfg.resolve_server(Some("example.com")).unwrap_err();
+        let err = cfg
+            .resolve_server_with(None, Some("example.com"))
+            .unwrap_err();
         assert!(
             matches!(err, LoginError::InvalidServer { ref value, .. } if value == "example.com"),
             "expected InvalidServer, got {err:?}"
@@ -504,10 +491,8 @@ mod tests {
     /// Non-http(s) scheme is rejected with the "only http and https" message.
     #[test]
     fn ftp_scheme_is_rejected() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
-        let err = cfg.resolve_server(Some("ftp://x")).unwrap_err();
+        let err = cfg.resolve_server_with(None, Some("ftp://x")).unwrap_err();
         assert!(
             matches!(err, LoginError::InvalidServer { ref value, .. } if value == "ftp://x"),
             "expected InvalidServer, got {err:?}"
@@ -521,10 +506,10 @@ mod tests {
     /// Valid http URL is accepted and the parsed URL preserves scheme/host/port.
     #[test]
     fn http_url_is_accepted() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
-        let url = cfg.resolve_server(Some("http://127.0.0.1:9100")).unwrap();
+        let url = cfg
+            .resolve_server_with(None, Some("http://127.0.0.1:9100"))
+            .unwrap();
         assert_eq!(url.scheme(), "http");
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert_eq!(url.port(), Some(9100));
@@ -533,11 +518,9 @@ mod tests {
     /// Valid https URL is accepted.
     #[test]
     fn https_url_is_accepted() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
         let url = cfg
-            .resolve_server(Some("https://broker.example:9100"))
+            .resolve_server_with(None, Some("https://broker.example:9100"))
             .unwrap();
         assert_eq!(url.scheme(), "https");
         assert_eq!(url.host_str(), Some("broker.example"));
@@ -547,11 +530,9 @@ mod tests {
     /// The built-in DEFAULT_SERVER is accepted without modification.
     #[test]
     fn default_server_is_accepted() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
         // DEFAULT_SERVER = "http://127.0.0.1:9100"
-        let url = cfg.resolve_server(None).unwrap();
+        let url = cfg.resolve_server_with(None, None).unwrap();
         assert_eq!(url.scheme(), "http");
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert_eq!(url.port(), Some(9100));
@@ -560,27 +541,24 @@ mod tests {
     /// Scheme-less value in BOTWORK_LOGIN_SERVER env var is rejected.
     #[test]
     fn schemeless_env_var_is_rejected() {
-        let _lock = lock_env();
-        std::env::set_var(ENV_SERVER, "127.0.0.1:9100");
         let cfg = Config::default();
-        let err = cfg.resolve_server(None).unwrap_err();
+        let err = cfg
+            .resolve_server_with(Some("127.0.0.1:9100"), None)
+            .unwrap_err();
         assert!(
             matches!(err, LoginError::InvalidServer { ref value, .. } if value == "127.0.0.1:9100"),
             "expected InvalidServer from env var, got {err:?}"
         );
-        std::env::remove_var(ENV_SERVER);
     }
 
     /// Scheme-less value in the config file's `server` field is rejected.
     #[test]
     fn schemeless_config_file_server_is_rejected() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config {
             server: Some("192.168.1.50:9100".into()),
             ..Config::default()
         };
-        let err = cfg.resolve_server(None).unwrap_err();
+        let err = cfg.resolve_server_with(None, None).unwrap_err();
         assert!(
             matches!(err, LoginError::InvalidServer { .. }),
             "expected InvalidServer from config file value, got {err:?}"
@@ -629,11 +607,9 @@ mod tests {
 
     #[test]
     fn malformed_absolute_url_surfaces_parse_error() {
-        let _lock = lock_env();
-        std::env::remove_var(ENV_SERVER);
         let cfg = Config::default();
         let err = cfg
-            .resolve_server(Some("http://example.com::9100"))
+            .resolve_server_with(None, Some("http://example.com::9100"))
             .unwrap_err();
         assert!(
             matches!(err, LoginError::InvalidServer { ref value, .. } if value == "http://example.com::9100"),
