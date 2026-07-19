@@ -299,7 +299,7 @@ mod tests {
     /// [`Config::from_map`] in tests. Equivalent to the `std::env::var`
     /// getter used in production but hermetic.
     fn map_get<'a>(map: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
-        move |name| map.get(name).map(|v| (*v).to_string())
+        move |name| map.get(name).map(|&v| v.to_string())
     }
 
     #[test]
