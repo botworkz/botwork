@@ -254,8 +254,8 @@ fn sanitize_segment(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{start_log_capture, take_log_capture};
-    use std::sync::{Arc, OnceLock};
+    use crate::test_support::{log_capture_guard, start_log_capture, take_log_capture};
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
@@ -267,11 +267,6 @@ mod tests {
             kind: "api-key".to_string(),
             value: value.to_vec(),
         }
-    }
-
-    fn log_capture_lock() -> &'static Mutex<()> {
-        static LOG_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOG_CAPTURE_LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -344,8 +339,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn fetch_secrets_decodes_value_b64() {
-        let _guard = log_capture_lock().lock().await;
+        let _guard = log_capture_guard();
         let captured_cap = Arc::new(Mutex::new(None));
         let url = spawn_http_server(
             200,
@@ -394,8 +390,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn fetch_secrets_returns_unauthorized_for_401() {
-        let _guard = log_capture_lock().lock().await;
+        let _guard = log_capture_guard();
         let url = spawn_http_server(401, "{}", Arc::new(Mutex::new(None))).await;
         start_log_capture();
         let err = fetch_secrets(&url, "cap", Duration::from_secs(2))
@@ -410,8 +407,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn fetch_secrets_returns_bad_response_for_non_json() {
-        let _guard = log_capture_lock().lock().await;
+        let _guard = log_capture_guard();
         let url = spawn_http_server(200, "not-json", Arc::new(Mutex::new(None))).await;
         start_log_capture();
         let err = fetch_secrets(&url, "cap", Duration::from_secs(2))
@@ -426,8 +424,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn fetch_secrets_returns_transport_for_unreachable_url() {
-        let _guard = log_capture_lock().lock().await;
+        let _guard = log_capture_guard();
         start_log_capture();
         let err = fetch_secrets("http://127.0.0.1:1", "cap", Duration::from_secs(1))
             .await
