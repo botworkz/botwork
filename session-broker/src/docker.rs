@@ -1,12 +1,16 @@
-//! Bollard-based Docker liveness check used by the broker's hot path.
+//! Bollard-based Docker API used by the broker's hot path and recovery.
 //!
 //! The `DockerApi` trait provides a seam for offline testing.  The only
 //! production-unreachable parts are `impl DockerApi for Docker` (the thin
 //! bollard wrapper) and `connect_docker` (requires the docker socket).
 
+use std::collections::HashMap;
+
 use bollard::errors::Error as BollardError;
-use bollard::models::{ContainerInspectResponse, ContainerStateStatusEnum};
-use bollard::query_parameters::InspectContainerOptionsBuilder;
+use bollard::models::{ContainerInspectResponse, ContainerStateStatusEnum, ContainerSummary};
+use bollard::query_parameters::{
+    InspectContainerOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
+};
 use bollard::Docker;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
@@ -22,6 +26,13 @@ pub(crate) trait DockerApi {
         &'a self,
         name: &'a str,
     ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>>;
+
+    fn list_containers<'a>(
+        &'a self,
+        filters: HashMap<String, Vec<String>>,
+    ) -> BoxFuture<'a, Result<Vec<ContainerSummary>, BollardError>>;
+
+    fn remove_container<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), BollardError>>;
 }
 
 /// Production implementation — connects over the local docker socket.
@@ -33,6 +44,23 @@ impl DockerApi for Docker {
     ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>> {
         let options = Some(InspectContainerOptionsBuilder::new().size(false).build());
         Docker::inspect_container(self, name, options).boxed()
+    }
+
+    fn list_containers<'a>(
+        &'a self,
+        filters: HashMap<String, Vec<String>>,
+    ) -> BoxFuture<'a, Result<Vec<ContainerSummary>, BollardError>> {
+        let options = Some(
+            ListContainersOptionsBuilder::new()
+                .filters(&filters)
+                .build(),
+        );
+        Docker::list_containers(self, options).boxed()
+    }
+
+    fn remove_container<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<(), BollardError>> {
+        let options = Some(RemoveContainerOptionsBuilder::new().force(true).build());
+        Docker::remove_container(self, name, options).boxed()
     }
 }
 
@@ -131,6 +159,20 @@ mod tests {
                     .expect("missing inspect result")
             }
             .boxed()
+        }
+
+        fn list_containers<'a>(
+            &'a self,
+            _filters: HashMap<String, Vec<String>>,
+        ) -> BoxFuture<'a, Result<Vec<ContainerSummary>, BollardError>> {
+            unimplemented!("list_containers not used in docker.rs tests")
+        }
+
+        fn remove_container<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> BoxFuture<'a, Result<(), BollardError>> {
+            unimplemented!("remove_container not used in docker.rs tests")
         }
     }
 
