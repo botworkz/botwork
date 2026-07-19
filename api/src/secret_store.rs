@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn from_env_recognizes_all_truthy_disable_values() {
+    fn from_parts_recognizes_all_truthy_disable_values() {
         for truthy in &["true", "TRUE", "yes", "YES"] {
             let client = SecretStoreClient::from_parts(None, Some((*truthy).to_string()));
             assert!(
