@@ -1,0 +1,231 @@
+[package]
+name = "botwork-auth-broker"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "botwork_auth_broker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "botwork-auth-broker"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.7"
+base64 = "0.22"
+blake2 = "0.10"
+botwork-opaque-handshake = { path = "../opaque-handshake" }
+botwork-version = { path = "../version" }
+# Direct dep so the broker can stamp the OPAQUE
+# `SUITE_VERSION` into the `wrapped_export_key` response shape and
+# refuse stale leases via the structured 401 taxonomy. `SUITE_VERSION`
+# is the round-1b binding that links the OPAQUE login round-trip to
+# the vault v4 master-key derivation — see
+# `vault/src/kdf.rs::derive_master_key`.
+botwork-vault = { path = "../vault", features = ["test-support"] }
+# RFE #123 round 1a (issue #133): pull in `botwork-entity` to back the
+# OPAQUE `opaque_password_file` + `lease` tables. The entities live in
+# the workspace member `db/entity` (package `botwork-entity`) and landed
+# in botworkz/botwork#142. Now that this crate lives inside
+# `botworkz/botwork` proper, this is a plain in-workspace path dep —
+# no git/tag indirection needed.
+botwork-entity = { path = "../db/entity" }
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+hkdf = "0.12"
+rand = "0.8"
+regex = "1"
+# SeaORM with the same shape every other DB-touching crate uses in
+# `botworkz/botwork`. The runtime is rustls-tokio so we don't drag in
+# openssl; `with-uuid`, `with-chrono`, `with-json` match the column
+# types `lease` / `opaque_password_file` declare.
+sea-orm = { version = "1.1.20", default-features = false, features = [
+    "macros",
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+# Direct dep so secret-bearing buffers in this crate (bearer tokens
+# extracted from the Authorization header, base64-encoded secret values
+# in the /secrets/fetch response) can be wrapped in `Zeroizing<…>` /
+# implement `Zeroize` + `ZeroizeOnDrop`. `zeroize` is already in the
+# resolved graph via `botwork-vault` and `botwork-opaque-handshake`, so
+# naming it here doesn't widen the dep closure — it just gives the
+# broker a stable API to call.
+zeroize = { version = "1", features = ["derive"] }
+# Direct dep for the offline-mode boot path (`offline_database_pool`
+# in `src/main.rs`): when `BOTWORK_DATABASE_URL` is unset we build a
+# lazy postgres pool by hand so the broker still boots and serves
+# structured 401s for misconfigured-bearer paths. `sqlx` is already
+# transitively pulled in via `sea-orm`'s `sqlx-postgres` feature, so
+# naming it here doesn't widen the dep closure — it just exposes
+# the `PgPoolOptions::connect_lazy` API the offline path needs.
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
+
+[features]
+test-support = []
+
+# Round-1a #133 tests. The full e2e exercises a real postgres via
+# testcontainers; the legacy-path / pending / wrapping tests are
+# in-process only and don't need docker.
+# Round-1a wrap-up (#138): cap-mint lease_id refactor. The
+# `evict_caps_for_lease` cohort helper is exercised in-process via
+# the `with_locked_caps` / `insert_cap_for_test` introspection hooks
+# on `AppState`. No docker dependency.
+[[test]]
+name = "lease_store_unit"
+required-features = ["test-support"]
+
+[[test]]
+name = "cap_lease_cohort"
+required-features = ["test-support"]
+
+[[test]]
+name = "opaque_dummy"
+required-features = ["test-support"]
+
+[[test]]
+name = "opaque_e2e"
+required-features = ["test-support"]
+
+# Round-1b ports of the deleted pre-cutover test files (see PR #147
+# review). Each is `required-features = ["test-support"]` because
+# the offline harness reaches for `AppState::insert_cache_entry_for_test`
+# / `AppState::insert_cap_for_test` / `UnlockedMasterKey::from_master_bytes_for_test`
+# which are all `cfg(any(test, feature = "test-support"))`-gated.
+
+[[test]]
+name = "structured_401"
+required-features = ["test-support"]
+
+[[test]]
+name = "basic"
+required-features = ["test-support"]
+
+[[test]]
+name = "cache"
+required-features = ["test-support"]
+
+[[test]]
+name = "integration"
+required-features = ["test-support"]
+
+[[test]]
+name = "log_redaction"
+required-features = ["test-support"]
+
+[[test]]
+name = "zeroize_audit"
+required-features = ["test-support"]
+
+[[test]]
+name = "ttl_config"
+required-features = ["test-support"]
+
+[[test]]
+name = "secrets_fetch"
+required-features = ["test-support"]
+
+# Issue #213: TTL eviction for `AuthState.lease_export_keys`. The
+# offline harness (`tests/common`) reaches for the same
+# `test-support`-gated introspection hooks as the other in-process
+# ports, so this test must build with the feature enabled too.
+[[test]]
+name = "lease_export_key_ttl"
+required-features = ["test-support"]
+
+[[test]]
+name = "bearer_kek_round_trip"
+required-features = ["test-support"]
+
+[[test]]
+name = "restart_preserves_leases"
+required-features = ["test-support"]
+
+[[test]]
+name = "remote_secrets"
+required-features = ["test-support"]
+
+[[test]]
+name = "admin_revoke"
+required-features = ["test-support"]
+
+# Issue #215 / rate-limiting hardening: token-bucket per (tenant, IP) on
+# the four OPAQUE auth endpoints.  Uses the offline harness (mock stores)
+# so no docker is required; rate-limit fires before any store call.
+[[test]]
+name = "rate_limit"
+required-features = ["test-support"]
+
+[[test]]
+name = "opaque_error_arms"
+required-features = ["test-support"]
+
+# Issue (PR #235 + phase-0 seam): drive the real SeaOrm*Store
+# implementations via sea_orm::MockDatabase so the DB-layer control-flow
+# and error-mapping in lease.rs / opaque.rs are unit-testable offline.
+[[test]]
+name = "sea_orm_mock_unit"
+required-features = ["test-support"]
+
+[[test]]
+name = "handler_lease_paths"
+required-features = ["test-support"]
+
+# Internal write endpoints (POST /secrets, DELETE /secrets/:service/:name)
+# plus the resolve_active_lease helper. Uses mock stores and a real on-disk
+# vault; no Docker or live Postgres required.
+[[test]]
+name = "secrets_write"
+required-features = ["test-support"]
+
+[dev-dependencies]
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Enable sea-orm's MockDatabase for the DB-layer unit tests.  Adding this
+# in dev-dependencies means the `mock` feature is compiled into tests but
+# NOT into the production binary (Cargo resolves dev-dependency features
+# separately from the main dependency graph).
+sea-orm = { version = "1.1.20", default-features = false, features = ["mock"] }
+tempfile = "3"
+# Real postgres for the OPAQUE e2e + dummy-flow integration tests.
+# Same pin both the `botwork` admin-api + session-broker crates use,
+# so the testcontainers image cache is shared if a future move
+# combines the workspaces.
+testcontainers = "0.27.3"
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+tokio = { version = "1", features = ["test-util"] }
+tower = { version = "0.4", features = ["util"] }
+# Only the ported integration tests reach for sqlx directly (to
+# build a lazy/offline `DatabaseConnection` without going through
+# sea-orm's connect path). Listed here, not in `[dependencies]`,
+# so the broker binary doesn't grow a direct sqlx surface — it's
+# already transitively pulled in via sea-orm-postgres anyway.
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
+# Brought along by the entity dep but listed explicitly so
+# the test fixtures can call `Migrator::up` directly without leaking
+# the migration crate's transitive features into the runtime build.
+# Now that this crate lives in `botworkz/botwork`, this resolves via
+# the in-workspace path dep — no git/tag pin needed.
+sea-orm-migration = { version = "1.1.20", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+] }
+botwork-migration = { path = "../db/migration" }
+
+[lints]
+workspace = true

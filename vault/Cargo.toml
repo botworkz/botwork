@@ -1,0 +1,73 @@
+[package]
+name = "botwork-vault"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "botwork_vault"
+path = "src/lib.rs"
+
+[[bin]]
+name = "botwork-vault"
+path = "src/bin/botwork_vault.rs"
+
+[dependencies]
+# Vault file shape: per-entry DEK indirection sealed under a
+# master key that's HKDF-derived from the OPAQUE `export_key`. We
+# no longer derive the master key with Argon2id (the OPAQUE
+# handshake itself runs Argon2id over the password at the
+# client side, so re-deriving here would be redundant work over
+# already-uniformly-distributed bytes). HKDF-SHA-512 matches the
+# 64-byte output the OPAQUE crate hands us and keeps the same hash
+# family from PAKE through to master-key derivation.
+botwork-opaque-handshake = { path = "../opaque-handshake" }
+botwork-version = { path = "../version" }
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+hkdf = "0.12"
+postcard = { version = "1", features = ["alloc"] }
+rand = "0.8"
+# reqwest pulled in here so `botwork-vault init` and
+# the other CLI subcommands can fetch the wrapped export_key from
+# the auth-broker without dragging a custom HTTP client through
+# the rest of the workspace. rustls-tls explicitly, no openssl,
+# so the binary stays distroless-friendly.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[features]
+# Mirrors the same `test-support` gate the rest of the workspace
+# uses. Today its only effect is to expose
+# `UnlockedMasterKey::from_master_bytes_for_test`, used by the
+# auth-broker test harness (`auth-broker/tests/common`)
+# to install a real-shape `CacheEntry` without a live OPAQUE
+# round-trip. Production binaries are built without the feature
+# so the constructor is genuinely unreachable from the binary
+# crate even at compile time.
+test-support = []
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+proptest = "1"
+tempfile = "3"
+
+[[test]]
+name = "log_redaction"
+required-features = ["test-support"]
+
+[lints]
+workspace = true
