@@ -24,6 +24,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
+const EXPECTED_LAUNCHER_CALLS_WITH_TEARDOWN: usize = 2;
+const TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(20);
+
 /// Routing-of-known-sessions builder: pre-existing tests pass a launcher
 /// socket path (and sometimes an auth URL); after the cutover the builder no
 /// longer seeds a plugin registry — the test seeds a `TransportState`
@@ -2785,7 +2788,7 @@ async fn spawn_launcher_success_with_teardown_capture(
 ) -> tokio::task::JoinHandle<()> {
     let listener = UnixListener::bind(socket_path).expect("bind launcher socket");
     tokio::spawn(async move {
-        for _ in 0..2 {
+        for _ in 0..EXPECTED_LAUNCHER_CALLS_WITH_TEARDOWN {
             let (mut stream, _) = listener.accept().await.expect("accept launcher request");
             let request = read_unix_http_request(&mut stream).await;
             let request_line = request.lines().next().unwrap_or_default().to_string();
@@ -3278,7 +3281,7 @@ async fn spawn_probe_timeout_tears_down_unannounced_container() {
         config_url,
         "http://127.0.0.1:1".to_string(),
         None,
-        Duration::from_millis(20),
+        TEST_PROBE_TIMEOUT,
     );
 
     let mut stream = PerStreamState::default();
@@ -3301,7 +3304,11 @@ async fn spawn_probe_timeout_tears_down_unannounced_container() {
 
     assert_eq!(immediate_status(&response), Some(504));
     let paths = captured_paths.lock().await.clone();
-    assert_eq!(paths.len(), 2, "expected launch + teardown calls");
+    assert_eq!(
+        paths.len(),
+        EXPECTED_LAUNCHER_CALLS_WITH_TEARDOWN,
+        "expected launch + teardown calls"
+    );
     assert!(paths.iter().any(|line| line.contains("/launch")));
     assert!(paths.iter().any(|line| line.contains("/teardown")));
 }
