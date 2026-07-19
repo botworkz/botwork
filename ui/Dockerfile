@@ -77,6 +77,7 @@ COPY launcher/ ./launcher/
 COPY opaque-handshake/ ./opaque-handshake/
 COPY session-broker/ ./session-broker/
 COPY ctl/ ./ctl/
+COPY test-support/ ./test-support/
 COPY version/ ./version/
 COPY VERSION ./VERSION
 COPY Cargo.toml Cargo.lock ./
