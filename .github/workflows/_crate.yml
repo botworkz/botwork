@@ -386,12 +386,25 @@ jobs:
           --ignore "db/entity/src/*"
           --ignore "db/migration/src/*"
           --ignore "*/main.rs"
+          --ignore "*/tests/*"
           --ignore "ui/wasm/src/*"
         )
+        # Container crates build under /work (the bind-mount of
+        # GITHUB_WORKSPACE), so DWARF debug info and profraw source paths use
+        # /work/... prefixes.  Strip /work to make SF: paths repo-relative
+        # (e.g. config-broker/src/lib.rs), matching --keep-only and the
+        # aggregate merge expectation.  Host crates (artifact=none/binary)
+        # compile with ${GITHUB_WORKSPACE}/... paths, so they keep the
+        # default prefix-dir of ${GITHUB_WORKSPACE}.
+        if [ "${ARTIFACT}" = "container" ]; then
+          prefix_dir="/work"
+        else
+          prefix_dir="${GITHUB_WORKSPACE}"
+        fi
         grcov ".ci-coverage/${CRATE_SLUG}/raw" \
           --binary-path ".ci-coverage/${CRATE_SLUG}/binaries" \
           --source-dir . \
-          --prefix-dir "${GITHUB_WORKSPACE}" \
+          --prefix-dir "${prefix_dir}" \
           --branch \
           --ignore-not-existing \
           "${ignore_args[@]}" \
@@ -407,7 +420,11 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.CRATE_SLUG }}-coverage
-        path: .ci-coverage/${{ env.CRATE_SLUG }}/
+        # Upload only the small lcov.info, not raw profraw or binaries.
+        # Those are build intermediates consumed by grcov in the same job and
+        # do not need to persist.  Shipping only lcov.info keeps each
+        # coverage artifact to a few KB rather than hundreds of MB.
+        path: .ci-coverage/${{ env.CRATE_SLUG }}/lcov.info
         if-no-files-found: error
 
     # ── Per-crate coverage report ────────────────────────────────────────────
