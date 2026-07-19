@@ -10,8 +10,10 @@
 #      artifact, none -> gates + coverage only.
 #
 #   2. `coverage-aggregate` — downloads every per-crate `<crate>-coverage`
-#      artifact and runs grcov to produce one repository-level lcov + html
-#      report. No threshold gate yet; this is the baseline run.
+#      artifact (each contains only a small lcov.info; raw profraw and test
+#      binaries are consumed and discarded by the per-crate job) and merges
+#      them with `lcov` into one repository-level lcov + html report.
+#      No threshold gate yet; this is the baseline run.
 #
 #   3. `publish` — runs on `push` to main (or workflow_dispatch) with a
 #      clean (non-`-dev`) VERSION. `needs: [crates]`, then
