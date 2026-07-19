@@ -171,10 +171,14 @@ pub async fn signal_evict(client: &SessionBrokerClient, tenant: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
         endpoint: Option<String>,
@@ -207,6 +211,7 @@ mod tests {
 
     #[test]
     fn from_env_honors_default_and_disable_flag() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::capture();
         std::env::remove_var(ENDPOINT_ENV);
         std::env::remove_var(DISABLE_ENV);
@@ -222,6 +227,7 @@ mod tests {
 
     #[test]
     fn from_env_honors_endpoint_override_and_true_spellings() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::capture();
         std::env::set_var(ENDPOINT_ENV, "http://broker.example:9002");
         std::env::set_var(DISABLE_ENV, "TRUE");
