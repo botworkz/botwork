@@ -386,6 +386,7 @@ jobs:
           --ignore "db/entity/src/*"
           --ignore "db/migration/src/*"
           --ignore "*/main.rs"
+          --ignore "*/tests/*"
           --ignore "ui/wasm/src/*"
         )
         # Container crates build under /work (the bind-mount of

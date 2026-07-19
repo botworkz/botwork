@@ -191,8 +191,9 @@ jobs:
         # Collect per-crate lcov.info files downloaded by download-artifact@v4.
         # Layout: .ci-coverage/<crate-slug>-coverage/lcov.info (one per crate).
         # Each lcov is already scoped to that crate's own source (--keep-only in
-        # _crate.yml) and paths are repo-relative (--prefix-dir in _crate.yml),
-        # so no crate can be credited for coverage produced by another crate's tests.
+        # _crate.yml), excludes crate/tests/* upstream via grcov --ignore there,
+        # and uses repo-relative paths (--prefix-dir in _crate.yml), so no crate
+        # can be credited for coverage produced by another crate's tests.
         tracefile_args=()
         shopt -s nullglob
         for f in .ci-coverage/*-coverage/lcov.info; do
