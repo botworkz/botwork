@@ -18,8 +18,14 @@ make coverage
 DOCKER_HOST=unix:///nonexistent cargo tarpaulin
 ```
 
-Both commands pick up `tarpaulin.toml` automatically and write Lcov and
-Xml reports into a `coverage/` directory.
+Both commands pick up `tarpaulin.toml` automatically and write an Lcov
+report into a `coverage/` directory.
+
+> **Local vs CI:** local coverage uses `cargo tarpaulin` (reads
+> `tarpaulin.toml`). CI uses `grcov` over LLVM profraw data. The
+> exclusion lists in the two tools must be kept in sync — see
+> `tarpaulin.toml` and the grcov `--ignore` blocks in
+> `.github/workflows/_crate.yml` and `.github/workflows/ci.yml`.
 
 ### What is measured
 
@@ -38,12 +44,12 @@ so they do not inflate (or deflate) the reported percentage:
 |---|---|
 | `db/entity/src/*` | SeaORM `#[derive(DeriveEntityModel)]` generated entity models — macro-expanded glue with no meaningful branch logic. |
 | `db/migration/src/*` | Migration definitions (`lib.rs`, `main.rs`, every `m2026*.rs`) — these run only against a live database via the migration runner and are exercised by integration/CI steps, not unit tests. |
-| `*/main.rs` | Process-bootstrap entry points across every workspace binary (api, session-broker, control-plane, config-broker, botwork-cli, launcher, tools, ui/server) — arg-parsing shell, tokio-runtime setup, and server bind/serve wiring that is not meaningfully unit-testable. |
+| `*/main.rs` | Process-bootstrap entry points across every workspace binary (api, session-broker, control-plane, config-broker, botwork-cli, launcher, ui/server) — arg-parsing shell, tokio-runtime setup, and server bind/serve wiring that is not meaningfully unit-testable. |
 
 To update this list, edit `tarpaulin.toml` (`exclude-files`) and update
-this table.  Do **not** add exclusions for files that contain real branch
-logic — only generated code, database-only migration runners, and
-process-bootstrap entry points qualify.
+this table, **and** update the matching `--ignore` args in
+`.github/workflows/_crate.yml` and `.github/workflows/ci.yml` to keep
+the CI grcov exclusions in sync.
 
 ### Two test tiers
 
