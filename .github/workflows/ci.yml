@@ -92,6 +92,13 @@ jobs:
           package: botwork-api-core
           binary: ''
           artifact: none
+        - crate: auth-broker
+          service: auth-broker
+          package: botwork-auth-broker
+          binary: botwork-auth-broker
+          artifact: container
+          needs-docker: true
+          features: test-support
         - crate: bootstrap
           service: bootstrap
           package: botwork-bootstrap
@@ -158,6 +165,12 @@ jobs:
           package: botwork-version
           binary: ''
           artifact: none
+        - crate: vault
+          service: vault
+          package: botwork-vault
+          binary: botwork-vault
+          artifact: binary
+          features: test-support
     uses: ./.github/workflows/_crate.yml
     with:
       crate: ${{ matrix.crate }}
@@ -168,6 +181,7 @@ jobs:
       needs-db-migrate: ${{ matrix.needs-db-migrate || false }}
       needs-docker: ${{ matrix.needs-docker || false }}
       wasm-target-check: ${{ matrix.wasm-target-check || false }}
+      features: ${{ matrix.features || '' }}
 
   coverage-aggregate:
     name: coverage-aggregate
