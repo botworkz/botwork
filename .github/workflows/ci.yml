@@ -181,29 +181,44 @@ jobs:
       run: |
         set -euo pipefail
         mkdir -p coverage/html
+        # Build --binary-path args for each crate's instrumented-binary dir.
+        # download-artifact@v4 with pattern '*-coverage' and path .ci-coverage
+        # lays out each artifact as .ci-coverage/<crate-slug>-coverage/
+        # with binaries/ nested inside. Pass one --binary-path per crate so
+        # grcov can locate the instrumented test executables that produced
+        # the profraw data.
+        binary_path_args=()
+        for d in .ci-coverage/*/binaries; do
+          [ -d "$d" ] && binary_path_args+=(--binary-path "$d")
+        done
+        # Keep parity with tarpaulin.toml exclude-files (local coverage path).
+        # CI uses grcov --ignore; local uses tarpaulin exclude-files. Both lists
+        # must be kept in sync — see tarpaulin.toml for the canonical rationale
+        # for each exclusion. Note: tarpaulin.toml lists ui/wasm/src/api.rs and
+        # ui/wasm/src/pages/mod.rs individually because the whole botwork-ui-wasm
+        # crate is excluded via `exclude = ["botwork-ui-wasm"]` there; here we
+        # use the broader ui/wasm/src/* which subsumes those specific files.
         ignore_args=(
           --ignore "db/entity/src/*"
           --ignore "db/migration/src/*"
           --ignore "*/main.rs"
           --ignore "ui/wasm/src/*"
-          --ignore "ui/wasm/src/api.rs"
-          --ignore "ui/wasm/src/pages/mod.rs"
         )
         # Baseline-only run: no fail-under threshold yet. Maintainer will
         # ratchet a floor in a dedicated follow-up once the baseline is stable.
         grcov .ci-coverage \
-          --binary-path .ci-coverage \
           --source-dir . \
           --branch \
           --ignore-not-existing \
+          "${binary_path_args[@]}" \
           "${ignore_args[@]}" \
           --output-type lcov \
           --output-path coverage/lcov.info
         grcov .ci-coverage \
-          --binary-path .ci-coverage \
           --source-dir . \
           --branch \
           --ignore-not-existing \
+          "${binary_path_args[@]}" \
           "${ignore_args[@]}" \
           --output-type html \
           --output-path coverage/html

@@ -200,11 +200,17 @@ jobs:
         set -euo pipefail
         package='${{ inputs.package }}'
         mkdir -p ".ci-coverage/${CRATE_SLUG}/raw"
-        export RUSTFLAGS="-Cinstrument-coverage"
-        export LLVM_PROFILE_FILE="${GITHUB_WORKSPACE}/.ci-coverage/${CRATE_SLUG}/raw/${package}-%p-%m.profraw"
+        # fmt and clippy run with a clean env — no coverage instrumentation needed.
         cargo fmt -p "${package}" -- --check
         cargo clippy -p "${package}" --all-targets --locked -- -D warnings
-        cargo test -p "${package}" --locked
+        # Coverage instrumentation is scoped to cargo test ONLY via inline env.
+        # The release build below (artifact=binary) runs as a separate step with
+        # no RUSTFLAGS inherited — guaranteeing the shipped binary is never built
+        # with -Cinstrument-coverage (especially important with [profile.release]
+        # panic = "abort").
+        RUSTFLAGS="-Cinstrument-coverage" \
+          LLVM_PROFILE_FILE="${GITHUB_WORKSPACE}/.ci-coverage/${CRATE_SLUG}/raw/${package}-%p-%m.profraw" \
+          cargo test -p "${package}" --locked
         if [ "${{ inputs.wasm-target-check }}" = "true" ]; then
           cargo build -p "${package}" --target wasm32-unknown-unknown --locked
         fi
@@ -307,9 +313,17 @@ jobs:
             package=\${PACKAGE}
             ${trunk_prefix}cargo fmt -p \${package} -- --check
             cargo clippy -p \${package} --all-targets --locked -- -D warnings
-            export RUSTFLAGS='-Cinstrument-coverage'
-            export LLVM_PROFILE_FILE="/work/.ci-coverage/${CRATE_SLUG}/raw/\${package}-%p-%m.profraw"
-            cargo test -p \${package} --locked
+            # Coverage instrumentation is scoped to cargo test ONLY.
+            # The release build below runs with NO RUSTFLAGS so the binary
+            # staged to .ci-prebuilt/ and baked into the shipped container
+            # image is never coverage-instrumented. Shipping an instrumented
+            # binary is wrong: it inflates binary size and combines poorly
+            # with [profile.release] panic = 'abort'.
+            RUSTFLAGS='-Cinstrument-coverage' \
+              LLVM_PROFILE_FILE='/work/.ci-coverage/'\${CRATE_SLUG}'/raw/'\${package}'-%p-%m.profraw' \
+              cargo test -p \${package} --locked
+            # Release build: clean env — no RUSTFLAGS, no LLVM_PROFILE_FILE.
+            # These are the bytes that will be staged and shipped.
             cargo build -p \${package} --release --locked
           "
 
@@ -325,10 +339,13 @@ jobs:
           echo "::error::no .profraw files produced for ${PACKAGE}"
           exit 1
         fi
-        # Keep parity with prior tarpaulin exclusions:
-        #   * db/entity/src/* and db/migration/src/* (generated/schema-only),
-        #   * */main.rs (entrypoint shells),
-        #   * ui/wasm/src/* (wasm-only crate currently excluded from denominator).
+        # Keep parity with tarpaulin.toml exclude-files (local coverage path).
+        # CI uses grcov --ignore; local uses tarpaulin exclude-files. Both lists
+        # must be kept in sync — see tarpaulin.toml for the canonical rationale
+        # for each exclusion. Note: tarpaulin.toml lists ui/wasm/src/api.rs and
+        # ui/wasm/src/pages/mod.rs individually because the whole botwork-ui-wasm
+        # crate is excluded via `exclude = ["botwork-ui-wasm"]` there; here we
+        # use the broader ui/wasm/src/* which subsumes those specific files.
         grcov ".ci-coverage/${CRATE_SLUG}/raw" \
           --binary-path ".ci-coverage/${CRATE_SLUG}/binaries" \
           --source-dir . \
@@ -338,8 +355,6 @@ jobs:
           --ignore "db/migration/src/*" \
           --ignore "*/main.rs" \
           --ignore "ui/wasm/src/*" \
-          --ignore "ui/wasm/src/api.rs" \
-          --ignore "ui/wasm/src/pages/mod.rs" \
           --output-type lcov \
           --output-path ".ci-coverage/${CRATE_SLUG}/lcov.info"
 
