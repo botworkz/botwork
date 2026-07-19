@@ -6,7 +6,7 @@
 # Dockerfile (see also config-broker, control-plane, bootstrap,
 # api, db/migration, ui — same shape across the workspace):
 #
-#   BINARY_SOURCE=source   (default; local `earthly +session-broker-image`,
+#   BINARY_SOURCE=source   (default; local `docker buildx build ...`,
 #                           and any bare `docker build`) — cargo build
 #                           runs inside the image via `build-source`.
 #                           Cache mounts on registry / git / target let

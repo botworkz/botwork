@@ -7,25 +7,18 @@
 #      `_crate.yml`. Every crate gets its own runner. All run the same
 #      fmt/clippy/test gates; artifact tails differ by `artifact` type:
 #      container -> existing image/smoke path, binary -> release binary
-#      artifact, none -> no publish artifact.
+#      artifact, none -> gates + coverage only.
 #
-#   2. `release-binaries` — builds the launcher + tools release binaries
-#      that ride into the GitHub Release. Same rust-cache key as
-#      `rust.yml` is fine; separate job because release-profile builds
-#      live under a different `target/` subdirectory.
+#   2. `coverage-aggregate` — downloads every per-crate `<crate>-coverage`
+#      artifact and runs grcov to produce one repository-level lcov + html
+#      report. No threshold gate yet; this is the baseline run.
 #
 #   3. `publish` — runs on `push` to main (or workflow_dispatch) with a
-#      clean (non-`-dev`) VERSION. `needs: [crates, release-binaries]`,
-#      then `download-artifact` → `docker load` → retag :VERSION + :latest
+#      clean (non-`-dev`) VERSION. `needs: [crates]`, then
+#      `download-artifact` → `docker load` → retag :VERSION + :latest
 #      → `docker push` for the images, and `download-artifact` →
-#      action-gh-release for the binaries. No cargo. No earthly. No
-#      `--no-cache`. The bytes pushed to GHCR are the bytes CI smoke-
-#      tested.
-#
-# Workspace-only crates that are not yet wired into per-crate CI here
-# (api-core, db/entity, launcher, tools, ui/wasm) stay covered by the
-# workspace-wide `rust.yml`; the explicit wasm32 build for
-# `botwork-ui-wasm` lives there too.
+#      action-gh-release for the binaries. No rebuilds in publish: the
+#      bytes shipped are the bytes crate jobs already tested.
 #
 # The bump-VERSION-after-release job has split into its own
 # `bump.yml` (triggered by `release: [published]`) so this workflow's
@@ -67,8 +60,12 @@ jobs:
       fail-fast: false
       matrix:
         # `crate` is the workspace-relative directory that owns the
-        # Dockerfile + smoke.sh; `service` is the image suffix
-        # (`botwork/<service>:local`) and the Earthfile target name.
+        # Dockerfile + smoke.sh for container artifacts.
+        # `service` is the image suffix (`botwork/<service>:local`) and
+        # the matrix job / check display name. Keep it BARE (no botwork-
+        # prefix) so job names read `api-core`, `ctl`, ... consistent
+        # with the original per-crate pipelines. The botwork/ prefix
+        # lives in the image tag path, not here.
         # `package`/`binary` are the cargo names. For the simple cases
         # the four collapse, but we declare them explicitly so the
         # divergences for `db/migration` (image is `db-migrate`,
@@ -114,14 +111,50 @@ jobs:
           binary: botwork-ui-server
           artifact: container
         - crate: cli
-          service: botwork-cli
+          service: cli
           package: botwork-cli
           binary: bw
           artifact: binary
+        - crate: launcher
+          service: launcher
+          package: botwork-launcher
+          binary: botwork-launcher
+          artifact: binary
+        - crate: ctl
+          service: ctl
+          package: botwork-ctl
+          binary: botctl
+          artifact: binary
+        - crate: api-core
+          service: api-core
+          package: botwork-api-core
+          binary: ''
+          artifact: none
+        - crate: db/entity
+          service: entity
+          package: botwork-entity
+          binary: ''
+          artifact: none
+        - crate: version
+          service: version
+          package: botwork-version
+          binary: ''
+          artifact: none
+        - crate: ui/wasm
+          service: ui-wasm
+          package: botwork-ui-wasm
+          binary: ''
+          artifact: none
+          wasm-target-check: true
+        - crate: bootstrap
+          service: bootstrap
+          package: botwork-bootstrap
+          binary: ''
+          artifact: none
         - crate: opaque-handshake
           # Keep `service` populated for a uniform matrix/job-display shape
           # across artifact types; artifact=none skips all image behavior.
-          service: botwork-opaque-handshake
+          service: opaque-handshake
           package: botwork-opaque-handshake
           binary: ''
           artifact: none
@@ -134,59 +167,102 @@ jobs:
       artifact: ${{ matrix.artifact }}
       needs-db-migrate: ${{ matrix.needs-db-migrate || false }}
       needs-docker: ${{ matrix.needs-docker || false }}
+      wasm-target-check: ${{ matrix.wasm-target-check || false }}
 
-  release-binaries:
-    # `botwork-launcher` and `botctl` ride into the GitHub Release
-    # as binary assets. Today they are recompiled inside `release.yml`'s
-    # publish job on every release push; this PR moves the build into CI
-    # so the binaries attached to the Release are the same bytes that the
-    # `cargo test` here exercised.
-    #
-    # `bw` (botwork-cli) is built by the `crates` job above, which
-    # uploads it as the `botwork-cli-binary` artifact. The `publish` job
-    # downloads both artifacts and attaches all three to the GitHub Release.
-    #
-    # Separate job from `rust.yml` rather than inline because:
-    #
-    #   * `rust.yml` runs `cargo test --workspace --all-targets` in dev
-    #     profile; this is release profile. Different `target/` subdirs,
-    #     cleaner to keep them apart so dev-profile builds don't
-    #     invalidate release-profile artifacts.
-    #
-    #   * `publish` does `needs: [crates, release-binaries]` —
-    #     all have to live in the same workflow file for `needs:` to reach them.
-    name: release-binaries
+  coverage-aggregate:
+    name: coverage-aggregate
+    needs: [crates]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@stable
-    - uses: Swatinem/rust-cache@v2
-    - name: Build launcher + tools (release)
-      env:
-        BOTWORK_GIT_SHA: ${{ github.sha }}
+    - name: Install lcov
+      run: sudo apt-get install -y --no-install-recommends lcov
+    - name: Download per-crate coverage artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: '*-coverage'
+        path: .ci-coverage
+    - name: Merge per-crate lcov files
       run: |
         set -euo pipefail
-        cargo build --release --locked -p botwork-launcher -p botwork-ctl
-
-    - name: Upload release binaries
+        mkdir -p coverage/html
+        # Collect per-crate lcov.info files downloaded by download-artifact@v4.
+        # Layout: .ci-coverage/<crate-slug>-coverage/lcov.info (one per crate).
+        # Each lcov is already scoped to that crate's own source (--keep-only in
+        # _crate.yml) and paths are repo-relative (--prefix-dir in _crate.yml),
+        # so no crate can be credited for coverage produced by another crate's tests.
+        tracefile_args=()
+        shopt -s nullglob
+        for f in .ci-coverage/*-coverage/lcov.info; do
+          tracefile_args+=(--add-tracefile "$f")
+        done
+        shopt -u nullglob
+        if [ "${#tracefile_args[@]}" -eq 0 ]; then
+          echo "::error::no per-crate lcov.info files were downloaded"
+          exit 1
+        fi
+        # Merge all per-crate lcovs into one repo-level report.
+        # No fail-under threshold yet (baseline run). Maintainer will ratchet
+        # a floor in a dedicated follow-up once the baseline is stable.
+        lcov "${tracefile_args[@]}" --output-file coverage/lcov.info
+        if [ ! -s coverage/lcov.info ]; then
+          echo "::error::aggregate coverage/lcov.info missing or empty"
+          exit 1
+        fi
+        genhtml coverage/lcov.info --output-directory coverage/html
+    - name: Report aggregate coverage
+      run: |
+        set -euo pipefail
+        # Max file rows shown in the aggregate table before truncating.
+        MAX_TABLE_FILES=60
+        LCOV=coverage/lcov.info
+        report="$(awk \
+          -v max_rows="${MAX_TABLE_FILES}" \
+          'BEGIN { n=0; tlf=0; tlh=0 }
+          /^SF:/ { f=substr($0,4); clf=0; clh=0 }
+          /^LF:/ { clf=substr($0,4)+0 }
+          /^LH:/ { clh=substr($0,4)+0 }
+          /^end_of_record/ {
+            if (clf>0) {
+              nm[n]=f; lf[n]=clf; lh[n]=clh
+              tlf+=clf; tlh+=clh; n++
+            }
+          }
+          END {
+            pct=(tlf>0)?(tlh*100.0/tlf):0
+            print "## Aggregate Coverage"
+            print ""
+            printf "**Total: %d/%d lines (%.1f%%)**\n\n",tlh,tlf,pct
+            print "> Full HTML report is in the uploaded `coverage` artifact."
+            print ""
+            print "| File | Covered | Total | % |"
+            print "|------|---------|-------|---|"
+            rows=(n>max_rows)?max_rows:n
+            for (i=0;i<rows;i++) {
+              fp=(lf[i]>0)?(lh[i]*100.0/lf[i]):0
+              printf "| %s | %d | %d | %.1f%% |\n",nm[i],lh[i],lf[i],fp
+            }
+            if (n>max_rows) {
+              printf "\n_%d more files - download the `coverage` artifact._\n",n-max_rows
+            }
+          }' "${LCOV}")"
+        echo "${report}"
+        printf '%s\n' "${report}" >> "${GITHUB_STEP_SUMMARY}"
+    - name: Upload aggregate coverage artifact
       uses: actions/upload-artifact@v4
       with:
-        name: release-binaries
-        path: |
-          target/release/botwork-launcher
-          target/release/botctl
+        name: coverage
+        path: coverage/
         if-no-files-found: error
 
   publish:
     # Runs only on `push` to main (or manual workflow_dispatch). On
-    # pull_request this job is skipped entirely (the matrix + release-
-    # binaries still run, so PR feedback covers everything except the
-    # publish push).
+    # pull_request this job is skipped entirely (crate + coverage jobs
+    # still run, so PR feedback covers everything except the publish push).
     #
-    # `needs:` ensures every container's smoke passed, the release
-    # binaries are present on disk, and the crate builds (including
-    # the `bw` binary artifact from botwork-cli) have completed before
-    # we even read VERSION. The internal `is_release` gate then
+    # `needs:` ensures every crate has passed its own gates and uploaded
+    # publish artifacts before we even read VERSION. The internal
+    # `is_release` gate then
     # short-circuits the actual GHCR push and gh-release publication
     # when VERSION ends in `-dev`.
     #
@@ -200,7 +276,7 @@ jobs:
     # `--build-arg GIT_SHA=${GITHUB_SHA}`; we just don't re-verify it
     # because we never rebuild.
     name: publish
-    needs: [crates, release-binaries]
+    needs: [crates]
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
         || github.event_name == 'workflow_dispatch'
@@ -265,7 +341,7 @@ jobs:
 
     # ── docker load → retag → docker push, one image at a time ──────────────
     # We discover services from the filesystem so the matrix in
-    # `containers` stays the single source of truth — adding a service
+    # `crates` stays the single source of truth — adding a service
     # to the matrix is the only edit needed; this step picks it up
     # automatically.
     - name: docker load, retag, push
@@ -296,17 +372,21 @@ jobs:
           echo "::endgroup::"
         done
 
-    # ── Binaries: ride the same-run release-binaries and crates artifacts ─
-    - name: Download release binaries
+    # ── Binaries: consume the prebuilt per-crate binary artifacts ───────────
+    - name: Download launcher binary
       if: steps.version.outputs.is_release == 'true'
       uses: actions/download-artifact@v4
       with:
-        name: release-binaries
+        name: botwork-launcher-binary
         path: .ci-binaries
 
-    # `bw` is built by the `crates / botwork-cli` job and uploaded as
-    # the `botwork-cli-binary` artifact. Download it alongside the other
-    # release binaries so all three ship as a single `files:` block below.
+    - name: Download botctl binary
+      if: steps.version.outputs.is_release == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: botwork-ctl-binary
+        path: .ci-binaries
+
     - name: Download bw binary
       if: steps.version.outputs.is_release == 'true'
       uses: actions/download-artifact@v4
