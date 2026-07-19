@@ -498,10 +498,14 @@ mod tests {
     #[test]
     fn safe_staging_path_second_check_rejects_when_normalize_escapes_base() {
         // Use a trailing-slash staging_base so that:
-        //   • the regex encodes a double-slash (base + "/" in the format string)
-        //   • a path that matches (double-slash) normalizes to a single-slash
-        //     path that no longer starts_with the double-slash prefix
-        // → the SECOND error branch (lines 145-148) fires.
+        //   • the regex embeds `{base}/` — with a trailing-slash base that
+        //     becomes `{base}//` — so a double-slash path like
+        //     `/tmp/staging_trailing//acme/staging/aabbccddeeff` matches the
+        //     regex (regex::escape does not change `/`).
+        //   • normalize_path collapses the double slash to a single slash,
+        //     yielding `/tmp/staging_trailing/acme/staging/aabbccddeeff`.
+        //   • The second guard checks `safe.starts_with("/tmp/staging_trailing//")`,
+        //     which is now FALSE — so the second error branch fires.
         let trailing = "/tmp/staging_trailing/";
         let validators = Validators::new_with_bases(
             r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$",
@@ -511,6 +515,8 @@ mod tests {
         .expect("validators");
 
         // Double-slash path passes the regex (which embeds the trailing slash)
+        // but fails the second starts_with check after normalization removes
+        // the extra slash.
         let double_slash_path = "/tmp/staging_trailing//acme/staging/aabbccddeeff";
         let result = validators.safe_staging_path(double_slash_path);
         assert!(
@@ -521,7 +527,10 @@ mod tests {
 
     #[test]
     fn safe_agent_dir_second_check_rejects_when_normalize_escapes_base() {
-        // Same trick for agents_base (lines 157-160 in safe_agent_dir).
+        // Same trick for agents_base: trailing-slash base embeds a double-slash
+        // in the regex, a double-slash path matches the regex, but
+        // normalize_path collapses it to a single-slash path that no longer
+        // starts_with the double-slash prefix — so the second error branch fires.
         let trailing = "/tmp/agents_trailing/";
         let validators = Validators::new_with_bases(
             r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$",
@@ -530,7 +539,8 @@ mod tests {
         )
         .expect("validators");
 
-        // The agent_dir_re encodes trailing + "/" → double slash.
+        // Double-slash path passes the regex but fails the second starts_with
+        // check after normalization removes the extra slash.
         let double_slash_path = "/tmp/agents_trailing//acme/workspaces/mcp/agents/agent-abc123";
         let result = validators.safe_agent_dir(double_slash_path);
         assert!(

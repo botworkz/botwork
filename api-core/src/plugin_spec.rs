@@ -1224,18 +1224,13 @@ mod tests {
             yaml_type_name(&serde_yaml::Value::Mapping(serde_yaml::Mapping::new())),
             "mapping"
         );
-        // Tagged values are constructed via from_str with a YAML tag.
-        let tagged: serde_yaml::Value = serde_yaml::from_str("!!python/object:mymodule.MyClass {}")
-            .unwrap_or(
-                // If the tag isn't parseable as tagged, just construct directly.
-                serde_yaml::Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
-                    tag: serde_yaml::value::Tag::new("tagged"),
-                    value: serde_yaml::Value::Null,
-                })),
-            );
-        if matches!(tagged, serde_yaml::Value::Tagged(_)) {
-            assert_eq!(yaml_type_name(&tagged), "tagged");
-        }
+        // Construct a Tagged value directly — we are testing yaml_type_name, not
+        // the YAML parser, so we don't need to go through a text-to-Value round-trip.
+        let tagged = serde_yaml::Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
+            tag: serde_yaml::value::Tag::new("tagged"),
+            value: serde_yaml::Value::Null,
+        }));
+        assert_eq!(yaml_type_name(&tagged), "tagged");
 
         // json_type_name: cover Null, Number, String, Array
         assert_eq!(json_type_name(&serde_json::Value::Null), "null");
