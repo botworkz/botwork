@@ -852,4 +852,100 @@ mod tests {
             LoginError::UnexpectedStatus { status: 418, .. }
         ));
     }
+
+    #[tokio::test]
+    async fn post_json_helpers_map_transport_errors() {
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({"ignored": true});
+        let unreachable = "http://127.0.0.1:1";
+
+        let err = post_json_and_parse::<Tiny>(&client, unreachable, &body)
+            .await
+            .expect_err("transport error should map");
+        assert!(matches!(err, LoginError::Network { ref url, .. } if url == unreachable));
+
+        let err =
+            post_json_and_parse_with_tenant_arms::<Tiny>(&client, unreachable, &body, "phlax")
+                .await
+                .expect_err("transport error should map");
+        assert!(matches!(err, LoginError::Network { ref url, .. } if url == unreachable));
+    }
+
+    #[tokio::test]
+    async fn run_register_maps_status_and_decode_failures() {
+        let unknown_base = spawn_one_shot_http("404 Not Found", "missing", "text/plain").await;
+        let err = run_register(
+            &Url::parse(&unknown_base).unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            None,
+        )
+        .await
+        .expect_err("404 should map to unknown tenant");
+        assert!(matches!(err, LoginError::UnknownTenant(ref t) if t == "phlax"));
+
+        let conflict_base = spawn_one_shot_http("409 Conflict", "exists", "text/plain").await;
+        let err = run_register(
+            &Url::parse(&conflict_base).unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            None,
+        )
+        .await
+        .expect_err("409 should map to already registered");
+        assert!(matches!(err, LoginError::AlreadyRegistered(ref t) if t == "phlax"));
+
+        let malformed = serde_json::json!({"registration_response":"%%%"});
+        let malformed_base =
+            spawn_one_shot_http("200 OK", &malformed.to_string(), "application/json").await;
+        let err = run_register(
+            &Url::parse(&malformed_base).unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            None,
+        )
+        .await
+        .expect_err("invalid base64 should fail");
+        assert!(matches!(err, LoginError::MalformedResponse { .. }));
+    }
+
+    #[tokio::test]
+    async fn run_login_maps_transport_and_decode_failures() {
+        let err = run_login(
+            &Url::parse("http://127.0.0.1:1").unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            60,
+            None,
+        )
+        .await
+        .expect_err("unreachable server should fail");
+        assert!(matches!(
+            err,
+            LoginError::Network { ref url, .. } if url.ends_with("/auth/login/start")
+        ));
+
+        let malformed = serde_json::json!({
+            "handshake_id": Uuid::new_v4(),
+            "login_response": "%%%",
+            "expires_in_seconds": 60,
+        });
+        let malformed_base =
+            spawn_one_shot_http("200 OK", &malformed.to_string(), "application/json").await;
+        let err = run_login(
+            &Url::parse(&malformed_base).unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            60,
+            None,
+        )
+        .await
+        .expect_err("invalid base64 should fail");
+        assert!(matches!(err, LoginError::MalformedResponse { .. }));
+    }
 }
