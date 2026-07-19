@@ -79,9 +79,47 @@ pub fn redact_token(value: &str) -> String {
 pub mod test_support {
     #[cfg(test)]
     use std::sync::Arc;
-    use std::sync::{Mutex as StdMutex, OnceLock};
+    use std::sync::{Mutex as StdMutex, MutexGuard, OnceLock};
 
     static LOG_CAPTURE: OnceLock<StdMutex<Option<Vec<String>>>> = OnceLock::new();
+
+    /// Process-wide serialization lock for log-capture tests.
+    ///
+    /// All tests that call [`start_log_capture`] / [`take_log_capture`] **must**
+    /// hold this guard for their entire `start … take` window.  Because
+    /// [`LOG_CAPTURE`] is a process-global buffer shared by every parallel test
+    /// thread, acquiring this single mutex ensures only one test's capture
+    /// window is live at a time, preventing interleaving that would cause
+    /// intermittent failures.
+    ///
+    /// Usage (sync tests):
+    /// ```ignore
+    /// let _guard = crate::test_support::log_capture_guard();
+    /// start_log_capture();
+    /// // … exercise code …
+    /// let logs = take_log_capture();
+    /// ```
+    ///
+    /// Usage (async tests — note the `allow` attribute is required when the
+    /// guard is held across `.await` points):
+    /// ```ignore
+    /// #[allow(clippy::await_holding_lock)]
+    /// async fn my_test() {
+    ///     let _guard = botwork_session_broker::test_support::log_capture_guard();
+    ///     start_log_capture();
+    ///     some_async_fn().await;
+    ///     let logs = take_log_capture();
+    /// }
+    /// ```
+    pub fn log_capture_guard() -> MutexGuard<'static, ()> {
+        static LOG_CAPTURE_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOG_CAPTURE_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            // Recover from poisoning: if a prior test panicked while holding
+            // this lock, the data (a unit `()`) is still valid and safe to use.
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     pub(crate) fn log_capture() -> &'static StdMutex<Option<Vec<String>>> {
         LOG_CAPTURE.get_or_init(|| StdMutex::new(None))

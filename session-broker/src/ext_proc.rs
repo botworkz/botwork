@@ -2013,9 +2013,9 @@ pub async fn serve_grpc(state: AppState, addr: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{start_log_capture, take_log_capture};
+    use crate::test_support::{log_capture_guard, start_log_capture, take_log_capture};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock};
+    use std::sync::Arc;
     use tokio::sync::Mutex;
 
     fn test_app_state(_plugin_name: &str, _upstream_auth: UpstreamAuth) -> AppState {
@@ -2058,16 +2058,6 @@ mod tests {
             kind: "api-key".to_string(),
             value: value.to_vec(),
         }
-    }
-
-    fn log_capture_guard() -> MutexGuard<'static, ()> {
-        static LOG_CAPTURE_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-        LOG_CAPTURE_LOCK
-            .get_or_init(|| StdMutex::new(()))
-            .lock()
-            // Recover from poisoning: if a prior test panicked while holding
-            // this lock, the data (a unit `()`) is still valid and safe to use.
-            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]

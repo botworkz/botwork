@@ -17,7 +17,9 @@ use botwork_session_broker::config_broker::UpstreamAuth;
 use botwork_session_broker::ext_proc::{
     seed_startup_liveness, ExternalProcessorService, PerStreamState,
 };
-use botwork_session_broker::test_support::{liveness_drop, start_log_capture, take_log_capture};
+use botwork_session_broker::test_support::{
+    liveness_drop, log_capture_guard, start_log_capture, take_log_capture,
+};
 use botwork_session_broker::{AppState, TransportState};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use envoy_proto::envoy::service::ext_proc::v3::HttpHeaders;
@@ -334,10 +336,12 @@ async fn grace_timer_arms_when_last_stream_closes() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn reconnect_within_grace_cancels_timer() {
     let state = make_state();
     insert_transport(&state, "sess-reconnect", "mcp_session_reconn").await;
 
+    let _guard = log_capture_guard();
     start_log_capture();
 
     // First GET — bumps counter to 1

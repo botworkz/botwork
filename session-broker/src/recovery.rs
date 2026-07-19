@@ -556,6 +556,7 @@ mod tests {
         let path = tmp.path().join("sessions.json");
         let content = r#"{"container":"mcp_session_abc"}"#;
         std::fs::write(&path, content).expect("write");
+        let _guard = crate::test_support::log_capture_guard();
         crate::test_support::start_log_capture();
         migrate_legacy_sessions_json(path.to_str().expect("utf8 path"));
         let logs = crate::test_support::take_log_capture().join("\n");
@@ -938,6 +939,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn recover_with_seam_skips_empty_mcp_session_id() {
         // Container present + DB row + plugin resolved + inspect succeeds,
         // but mcp_session_id is empty (spawn-to-init-response window) →
@@ -948,6 +950,7 @@ mod tests {
                 .with_plugin(pid, "mcp-bash")
                 .with_live_worker("mcp_session_z", "10.0.0.4", "", pid),
         )));
+        let _guard = crate::test_support::log_capture_guard();
         crate::test_support::start_log_capture();
 
         recover_live_workers_with(
@@ -973,6 +976,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn recover_with_seam_logs_ip_drift() {
         // IP in DB row differs from inspect result → log the drift.
         let pid = Uuid::new_v4();
@@ -983,6 +987,7 @@ mod tests {
                 .with_plugin(pid, "mcp-bash")
                 .with_live_worker("mcp_session_drift", "10.0.0.99", "sess-drift", pid),
         )));
+        let _guard = crate::test_support::log_capture_guard();
         crate::test_support::start_log_capture();
 
         recover_live_workers_with(
