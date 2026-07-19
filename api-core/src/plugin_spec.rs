@@ -1102,7 +1102,6 @@ mod tests {
         assert_eq!(json_type_name(&serde_json::json!({})), "object");
     }
 
-<<<<<<< HEAD
     // ── Tier 1.5 fault-injection / edge tests ──────────────────────
 
     #[test]
@@ -1134,7 +1133,9 @@ mod tests {
         assert!(
             msg.contains("tagged") || msg.contains("all") || msg.contains("none"),
             "{msg}"
-=======
+        );
+    }
+
     // ── additional coverage for uncovered branches ──────────────────
 
     #[test]
@@ -1147,12 +1148,10 @@ mod tests {
         assert!(
             matches!(err, ValidationError::PluginInvalid { .. }),
             "{err}"
->>>>>>> origin/main
         );
     }
 
     #[test]
-<<<<<<< HEAD
     fn validate_egress_allow_rejects_mapping_value_with_type_in_message() {
         // yaml_type_name Mapping arm: allow_val is a mapping, not a sequence
         let r = raw(
@@ -1172,6 +1171,20 @@ mod tests {
             "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - true\n",
         );
         assert!(validate_one(&r).is_err());
+    }
+
+    #[test]
+    fn allow_entry_non_mapping_is_rejected() {
+        // A string element in the `allow:` sequence should be rejected.
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - \"example.com\"\n",
+        );
+        let err = validate_one(&r).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::PluginInvalid { .. }),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1204,18 +1217,8 @@ mod tests {
         let r = raw(
             "p",
             "image: ghcr.io/example/p:1.0\negress: all\nenv:\n  '': value\n",
-=======
-    fn allow_entry_non_mapping_is_rejected() {
-        // A string element in the `allow:` sequence should be rejected.
-        let r = raw(
-            "p",
-            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - \"example.com\"\n",
         );
-        let err = validate_one(&r).unwrap_err();
-        assert!(
-            matches!(err, ValidationError::PluginInvalid { .. }),
-            "{err}"
-        );
+        assert!(validate_one(&r).is_err());
     }
 
     #[test]
@@ -1293,13 +1296,11 @@ mod tests {
         let r = raw(
             "p",
             "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  1: foo\n",
->>>>>>> origin/main
         );
         assert!(validate_one(&r).is_err());
     }
 
     #[test]
-<<<<<<< HEAD
     fn valid_env_name_rejects_key_with_invalid_subsequent_char() {
         // valid_env_name: bytes.iter().skip(1) arm — starts uppercase, has lowercase
         let r = raw(
@@ -1327,7 +1328,9 @@ mod tests {
             "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  1: value\n",
         );
         assert!(validate_one(&r).is_err());
-=======
+    }
+
+    #[test]
     fn validate_workspace_plugin_config_returns_some_for_valid_nonempty_map() {
         let raw_val: serde_yaml::Value = serde_yaml::from_str("key: value").expect("parse yaml");
         let result = validate_workspace_plugin_config("tenant/ws/plugin", Some(&raw_val)).unwrap();
@@ -1387,6 +1390,5 @@ mod tests {
         assert!(!tool_re.is_match("_tool")); // underscore start not allowed
         assert!(!tool_re.is_match("Tool")); // uppercase not allowed
         assert!(!tool_re.is_match("")); // empty not allowed
->>>>>>> origin/main
     }
 }
