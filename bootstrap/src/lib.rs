@@ -15,7 +15,7 @@
 //!   2. botwork#vm-side replaced `botwork-bootstrap.service`
 //!      with `botwork-import.service` (a host-side oneshot
 //!      calling `botctl bootstrap`).
-//!   3. This PR drops the container, the binary, the Earthfile
+//!   3. This PR drops the container, the binary, and the image-build
 //!      target, and the CI plumbing that built them.
 //!
 //! What survives is this crate's library API — the
