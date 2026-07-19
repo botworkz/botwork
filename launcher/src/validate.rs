@@ -501,7 +501,8 @@ mod tests {
         //   • the regex embeds `{base}/` — with a trailing-slash base that
         //     becomes `{base}//` — so a double-slash path like
         //     `/tmp/staging_trailing//acme/staging/aabbccddeeff` matches the
-        //     regex (regex::escape does not change `/`).
+        //     regex (regex::escape does not change `/`; this is stable behavior
+        //     since forward-slash is not a regex metacharacter).
         //   • normalize_path collapses the double slash to a single slash,
         //     yielding `/tmp/staging_trailing/acme/staging/aabbccddeeff`.
         //   • The second guard checks `safe.starts_with("/tmp/staging_trailing//")`,

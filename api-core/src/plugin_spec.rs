@@ -1160,16 +1160,16 @@ mod tests {
         let raw_val: serde_yaml::Value =
             serde_yaml::from_str("image: ghcr.io/example/p:1.0\negress: all\nenv:\n  1: foo\n")
                 .expect("parse yaml");
-        let entry: RawPluginEntry = serde_yaml::from_value(raw_val).expect("deserialise entry");
+        let entry: RawPluginEntry = serde_yaml::from_value(raw_val).expect("deserialize entry");
         let mut r = entry;
         r.name = "p".to_string();
         // Numeric keys in YAML may round-trip as strings in some
-        // serialisers; only assert that validate_one errors, not the
-        // specific message, since the exact behaviour depends on the
+        // serializers; only assert that validate_one errors, not the
+        // specific message, since the exact behavior depends on the
         // serde_yaml version.
         //
         // If serde_yaml converts the integer key to the string "1" during
-        // deserialisation (which is valid behaviour), the key won't match
+        // deserialization (which is valid behavior), the key won't match
         // `[A-Z_][A-Z0-9_]*` and the "invalid name" error fires instead.
         // Either way, validation fails.
         assert!(validate_one(&r).is_err());
