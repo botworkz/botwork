@@ -29,6 +29,9 @@
 #     db/migration, botwork-cli, launcher, ui/server).  These
 #     files contain only arg-parsing shell, tokio-runtime setup, and
 #     server bind/serve wiring that is not meaningfully unit-testable.
+#   * */tests/* — Rust integration tests are executed to produce coverage
+#     for product code, but are not themselves counted in the denominator;
+#     they can be #[ignore]d, feature-gated, or platform-conditional.
 #
 # CI coverage path uses grcov with --ignore flags instead of tarpaulin.
 # The two exclusion lists MUST be kept in sync. The grcov --ignore list
@@ -51,6 +54,7 @@ exclude-files = [
   "db/entity/src/*",
   "db/migration/src/*",
   "*/main.rs",
+  "*/tests/*",
   "ui/wasm/src/api.rs",
   "ui/wasm/src/pages/mod.rs",
 ]

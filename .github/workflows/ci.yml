@@ -10,8 +10,10 @@
 #      artifact, none -> gates + coverage only.
 #
 #   2. `coverage-aggregate` — downloads every per-crate `<crate>-coverage`
-#      artifact and runs grcov to produce one repository-level lcov + html
-#      report. No threshold gate yet; this is the baseline run.
+#      artifact (each contains only a small lcov.info; raw profraw and test
+#      binaries are consumed and discarded by the per-crate job) and merges
+#      them with `lcov` into one repository-level lcov + html report.
+#      No threshold gate yet; this is the baseline run.
 #
 #   3. `publish` — runs on `push` to main (or workflow_dispatch) with a
 #      clean (non-`-dev`) VERSION. `needs: [crates]`, then
@@ -78,11 +80,28 @@ jobs:
         # the per-crate runner builds db-migrate from source as a
         # fixture in that case.
         include:
-        - crate: session-broker
-          service: session-broker
-          package: botwork-session-broker
-          binary: botwork-session-broker
+        - crate: api
+          service: api
+          package: botwork-api
+          binary: botwork-api
           artifact: container
+          needs-db-migrate: true
+          needs-docker: true
+        - crate: api-core
+          service: api-core
+          package: botwork-api-core
+          binary: ''
+          artifact: none
+        - crate: bootstrap
+          service: bootstrap
+          package: botwork-bootstrap
+          binary: ''
+          artifact: none
+        - crate: cli
+          service: cli
+          package: botwork-cli
+          binary: bw
+          artifact: binary
         - crate: config-broker
           service: config-broker
           package: botwork-config-broker
@@ -93,69 +112,50 @@ jobs:
           package: botwork-control-plane
           binary: botwork-control-plane
           artifact: container
-        - crate: db/migration
-          service: db-migrate
-          package: botwork-migration
-          binary: botwork-migration
-          artifact: container
-        - crate: api
-          service: api
-          package: botwork-api
-          binary: botwork-api
-          artifact: container
-          needs-db-migrate: true
-          needs-docker: true
-        - crate: ui
-          service: ui
-          package: botwork-ui-server
-          binary: botwork-ui-server
-          artifact: container
-        - crate: cli
-          service: cli
-          package: botwork-cli
-          binary: bw
-          artifact: binary
-        - crate: launcher
-          service: launcher
-          package: botwork-launcher
-          binary: botwork-launcher
-          artifact: binary
         - crate: ctl
           service: ctl
           package: botwork-ctl
           binary: botctl
           artifact: binary
-        - crate: api-core
-          service: api-core
-          package: botwork-api-core
-          binary: ''
-          artifact: none
         - crate: db/entity
           service: entity
           package: botwork-entity
           binary: ''
           artifact: none
-        - crate: version
-          service: version
-          package: botwork-version
+        - crate: db/migration
+          service: db-migrate
+          package: botwork-migration
+          binary: botwork-migration
+          artifact: container
+        - crate: launcher
+          service: launcher
+          package: botwork-launcher
+          binary: botwork-launcher
+          artifact: binary
+        - crate: opaque-handshake
+          service: opaque-handshake
+          package: botwork-opaque-handshake
           binary: ''
           artifact: none
+        - crate: session-broker
+          service: session-broker
+          package: botwork-session-broker
+          binary: botwork-session-broker
+          artifact: container
+        - crate: ui
+          service: ui
+          package: botwork-ui-server
+          binary: botwork-ui-server
+          artifact: container
         - crate: ui/wasm
           service: ui-wasm
           package: botwork-ui-wasm
           binary: ''
           artifact: none
           wasm-target-check: true
-        - crate: bootstrap
-          service: bootstrap
-          package: botwork-bootstrap
-          binary: ''
-          artifact: none
-        - crate: opaque-handshake
-          # Keep `service` populated for a uniform matrix/job-display shape
-          # across artifact types; artifact=none skips all image behavior.
-          service: opaque-handshake
-          package: botwork-opaque-handshake
+        - crate: version
+          service: version
+          package: botwork-version
           binary: ''
           artifact: none
     uses: ./.github/workflows/_crate.yml
@@ -189,8 +189,9 @@ jobs:
         # Collect per-crate lcov.info files downloaded by download-artifact@v4.
         # Layout: .ci-coverage/<crate-slug>-coverage/lcov.info (one per crate).
         # Each lcov is already scoped to that crate's own source (--keep-only in
-        # _crate.yml) and paths are repo-relative (--prefix-dir in _crate.yml),
-        # so no crate can be credited for coverage produced by another crate's tests.
+        # _crate.yml), excludes crate/tests/* upstream via grcov --ignore there,
+        # and uses repo-relative paths (--prefix-dir in _crate.yml), so no crate
+        # can be credited for coverage produced by another crate's tests.
         tracefile_args=()
         shopt -s nullglob
         for f in .ci-coverage/*-coverage/lcov.info; do
