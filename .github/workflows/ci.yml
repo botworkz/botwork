@@ -117,16 +117,16 @@ jobs:
           package: botwork-ctl
           binary: botctl
           artifact: binary
-        - crate: db/entity
-          service: entity
-          package: botwork-entity
-          binary: ''
-          artifact: none
         - crate: db/migration
           service: db-migrate
           package: botwork-migration
           binary: botwork-migration
           artifact: container
+        - crate: db/entity
+          service: entity
+          package: botwork-entity
+          binary: ''
+          artifact: none
         - crate: launcher
           service: launcher
           package: botwork-launcher
