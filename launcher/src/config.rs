@@ -469,4 +469,96 @@ mod tests {
         let err = validate_egress_proxy("http://egress_envoy:3128/proxy").expect_err("path");
         assert!(err.contains("path"), "{err}");
     }
+
+    #[test]
+    fn parse_bool_env_rejects_invalid_value() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_TEST_BOOL_ENV", "definitely-not-bool");
+        let err = parse_bool_env("BOTWORK_TEST_BOOL_ENV").expect_err("must reject");
+        assert!(err.contains("expected one of"), "{err}");
+        std::env::remove_var("BOTWORK_TEST_BOOL_ENV");
+    }
+
+    #[test]
+    fn from_env_honors_read_only_rootfs_and_peer_overrides() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        std::env::set_var("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS", "true");
+        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_UID", "1234");
+        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_GID", "4321");
+
+        let config = Config::from_env().expect("config");
+        assert!(config.container_read_only_rootfs);
+        assert_eq!(config.allowed_peer_uid, Some(1234));
+        assert_eq!(config.allowed_peer_gid, Some(4321));
+
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+        std::env::remove_var("BOTWORK_LAUNCHER_READ_ONLY_ROOTFS");
+        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_UID");
+        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_GID");
+    }
+
+    #[test]
+    fn from_env_rejects_empty_memory_limit() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_MEMORY_LIMIT", " ");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        let err = Config::from_env().expect_err("empty memory limit should fail");
+        assert_eq!(
+            err,
+            "invalid BOTWORK_LAUNCHER_MEMORY_LIMIT: must not be empty"
+        );
+        std::env::remove_var("BOTWORK_LAUNCHER_MEMORY_LIMIT");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_allowed_uid_and_gid() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_UID", "not-a-number");
+        let err = Config::from_env().expect_err("invalid uid should fail");
+        assert!(
+            err.contains("invalid BOTWORK_LAUNCHER_ALLOWED_UID"),
+            "{err}"
+        );
+        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_UID");
+
+        std::env::set_var("BOTWORK_LAUNCHER_ALLOWED_GID", "not-a-number");
+        let err = Config::from_env().expect_err("invalid gid should fail");
+        assert!(
+            err.contains("invalid BOTWORK_LAUNCHER_ALLOWED_GID"),
+            "{err}"
+        );
+        std::env::remove_var("BOTWORK_LAUNCHER_ALLOWED_GID");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_plugin_uid_gid_and_pids_limit() {
+        let _guard = env_lock().lock().expect("env lock");
+        std::env::set_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK", "botwork-plugin");
+        std::env::set_var("BOTWORK_PLUGIN_UID", "abc");
+        let err = Config::from_env().expect_err("invalid plugin uid should fail");
+        assert!(err.contains("invalid BOTWORK_PLUGIN_UID"), "{err}");
+        std::env::remove_var("BOTWORK_PLUGIN_UID");
+
+        std::env::set_var("BOTWORK_PLUGIN_GID", "abc");
+        let err = Config::from_env().expect_err("invalid plugin gid should fail");
+        assert!(err.contains("invalid BOTWORK_PLUGIN_GID"), "{err}");
+        std::env::remove_var("BOTWORK_PLUGIN_GID");
+
+        std::env::set_var("BOTWORK_LAUNCHER_PIDS_LIMIT", "abc");
+        let err = Config::from_env().expect_err("invalid pids limit should fail");
+        assert!(err.contains("invalid BOTWORK_LAUNCHER_PIDS_LIMIT"), "{err}");
+        std::env::remove_var("BOTWORK_LAUNCHER_PIDS_LIMIT");
+        std::env::remove_var("BOTWORK_LAUNCHER_DEFAULT_NETWORK");
+    }
+
+    #[test]
+    fn resolve_group_spec_rejects_unknown_group_name() {
+        let missing = format!("botwork-group-does-not-exist-{}", std::process::id());
+        let err = resolve_group_spec(&missing).expect_err("missing group should fail");
+        assert!(err.contains("no such group"), "{err}");
+    }
 }

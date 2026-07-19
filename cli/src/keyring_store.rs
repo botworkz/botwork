@@ -380,4 +380,86 @@ mod tests {
             std::env::set_var("HOME", v);
         }
     }
+
+    #[test]
+    fn keyring_dir_falls_back_from_xdg_to_home() {
+        let _lock = env_lock().lock().unwrap();
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
+        std::env::set_var("HOME", "/tmp/home-dir");
+        assert_eq!(
+            keyring_dir().unwrap(),
+            PathBuf::from("/tmp/xdg-config-home")
+                .join("botspace")
+                .join("keyring")
+        );
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(
+            keyring_dir().unwrap(),
+            PathBuf::from("/tmp/home-dir")
+                .join(".config")
+                .join("botspace")
+                .join("keyring")
+        );
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn malformed_json_payload_is_shaped_as_keyring_error() {
+        let err = parse_entry("{not-json").unwrap_err();
+        assert!(matches!(err, LoginError::Keyring(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn read_and_delete_are_noops_when_backend_cannot_be_resolved() {
+        let _lock = env_lock().lock().unwrap();
+        let saved_keyring = std::env::var("BOTWORK_LOGIN_KEYRING_DIR").ok();
+        let saved_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let saved_home = std::env::var("HOME").ok();
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
+
+        let store = KeyringStore::new();
+        assert!(store.read("phlax").unwrap().is_none());
+        assert!(!store.delete("phlax").unwrap());
+
+        if let Some(v) = saved_keyring {
+            std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", v);
+        }
+        if let Some(v) = saved_xdg {
+            std::env::set_var("XDG_CONFIG_HOME", v);
+        }
+        if let Some(v) = saved_home {
+            std::env::set_var("HOME", v);
+        }
+    }
+
+    #[test]
+    fn read_and_delete_surface_non_notfound_fs_errors() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+
+        // Create a directory where the tenant file should be so read_to_string/remove_file
+        // both fail with a non-NotFound error path.
+        let tenant_path = dir.path().join("phlax.json");
+        std::fs::create_dir_all(&tenant_path).unwrap();
+
+        let store = KeyringStore::new();
+        let read_err = store.read("phlax").unwrap_err();
+        assert!(
+            matches!(read_err, LoginError::Keyring(_)),
+            "got {read_err:?}"
+        );
+
+        let delete_err = store.delete("phlax").unwrap_err();
+        assert!(
+            matches!(delete_err, LoginError::Keyring(_)),
+            "got {delete_err:?}"
+        );
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+    }
 }

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use botwork_session_broker::config_broker::UpstreamAuth;
 use botwork_session_broker::exit_listener::handle_container_exit;
 use botwork_session_broker::store::mock::MockSessionWorkerStore;
-use botwork_session_broker::{AppState, TransportState};
+use botwork_session_broker::{AppState, TransportState, COLD_START_TIMEOUT};
 use tokio::sync::Mutex;
 
 fn make_state() -> AppState {
@@ -26,6 +26,7 @@ fn make_state_with_worker(
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
         disconnect_grace: Duration::from_secs(300),
+        cold_start_timeout: COLD_START_TIMEOUT,
         // RFE #105 PR2 / round-3: production wires three DB-bound
         // handles via `run()`. The container-exit path only touches
         // the in-memory `transport_sessions` map, so passing `None`

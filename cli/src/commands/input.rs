@@ -158,6 +158,7 @@ mod tests {
     fn trim_password_line_removes_only_trailing_newlines() {
         assert_eq!(trim_password_line("secret\r\n".to_string()), "secret");
         assert_eq!(trim_password_line("secret\n".to_string()), "secret");
+        assert_eq!(trim_password_line("secret\r\n\r\n".to_string()), "secret");
         assert_eq!(
             trim_password_line(" secret value ".to_string()),
             " secret value "

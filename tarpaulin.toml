@@ -40,6 +40,8 @@ exclude-files = [
   "db/entity/src/*",
   "db/migration/src/*",
   "*/main.rs",
+  "ui/wasm/src/api.rs",
+  "ui/wasm/src/pages/mod.rs",
 ]
 out = ["Lcov", "Xml"]
 output-dir = "coverage"

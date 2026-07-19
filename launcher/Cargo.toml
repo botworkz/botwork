@@ -13,8 +13,10 @@ name = "botwork-launcher"
 path = "src/main.rs"
 
 [dependencies]
+bollard = "0.20.2"
 botwork-version = { path = "../version" }
 bytes = "1"
+futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

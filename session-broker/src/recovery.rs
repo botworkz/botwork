@@ -41,6 +41,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::warn;
 
@@ -129,20 +130,27 @@ fn force_remove_container(container_name: &str) {
 /// Idempotent — re-running has no effect once steady state is reached.
 /// Called once at startup from `run()`.
 pub async fn recover_live_workers(state: &AppState) {
+    let endpoint = state.config_broker_endpoint.clone();
     recover_live_workers_with(
         state,
         list_running_session_containers,
         inspect_container_for_recovery,
+        move |tenant: String, workspace: String, plugin: String| {
+            let ep = endpoint.clone();
+            async move {
+                config_broker::resolve(&ep, &tenant, &workspace, &plugin, Duration::from_secs(5))
+                    .await
+            }
+        },
     )
     .await;
 }
 
 /// Testable variant of [`recover_live_workers`] that accepts injectable
-/// seams for the two docker CLI calls.  Production calls the public
+/// seams for the three external calls. Production calls the public
 /// `recover_live_workers` which wires the real implementations;
-/// unit tests inject closures that return synthetic container sets /
-/// inspect results so the reconciliation logic can be exercised
-/// without a running docker daemon.
+/// unit tests inject closures so the reconciliation logic can be exercised
+/// without a running docker daemon or config-broker.
 ///
 /// - `lister`: replaces `list_running_session_containers()`.  Returns
 ///   `None` to signal docker-unavailable (skip recovery); `Some(set)`
@@ -150,10 +158,21 @@ pub async fn recover_live_workers(state: &AppState) {
 /// - `inspector`: replaces `inspect_container_for_recovery()`.  Returns
 ///   `None` to simulate a failed inspect (container already gone or
 ///   docker error); `Some(InspectResult)` with the parsed labels + IP.
-pub(crate) async fn recover_live_workers_with<L, I>(state: &AppState, lister: L, inspector: I)
-where
+/// - `resolver`: replaces `config_broker::resolve(...)`.  Receives the
+///   plugin's `(tenant, workspace, plugin_name)` as owned `String`s and
+///   returns a `Future` with the same `Result` shape as the real call.
+pub(crate) async fn recover_live_workers_with<L, I, RF, Fut>(
+    state: &AppState,
+    lister: L,
+    inspector: I,
+    resolver: RF,
+) where
     L: Fn() -> Option<HashSet<String>>,
     I: Fn(&str) -> Option<InspectResult>,
+    RF: Fn(String, String, String) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<config_broker::PluginDescriptor, config_broker::ConfigBrokerError>,
+    >,
 {
     // Production always wires both. Tests use `None` for either; in
     // both cases we have nothing to do here. (Pre-PR2 tests + the
@@ -289,12 +308,10 @@ where
 
         // Resolve the plugin descriptor so we can populate the
         // static routing fields on TransportState.
-        let descriptor = match config_broker::resolve(
-            &state.config_broker_endpoint,
-            &inspect.tenant,
-            &inspect.workspace,
-            &plugin_name,
-            std::time::Duration::from_secs(5),
+        let descriptor = match resolver(
+            inspect.tenant.clone(),
+            inspect.workspace.clone(),
+            plugin_name.clone(),
         )
         .await
         {
@@ -513,6 +530,7 @@ mod tests {
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_liveness: Arc::new(Mutex::new(HashMap::new())),
             disconnect_grace: std::time::Duration::from_secs(30),
+            cold_start_timeout: crate::COLD_START_TIMEOUT,
             agent_session_writer: None,
             session_worker_writer: writer,
             db: None,
@@ -827,13 +845,28 @@ mod tests {
 
     // ── recover_live_workers_with (seam-driven tests) ────────────────────────
 
+    /// Resolver that always returns a config-broker error. Used in tests whose
+    /// code paths should never reach the resolver — if they do, the error still
+    /// keeps assertions clean (no session seeded) while making it obvious that
+    /// the resolver ran unexpectedly.
+    fn err_resolver(
+        _t: String,
+        _w: String,
+        _p: String,
+    ) -> std::future::Ready<Result<config_broker::PluginDescriptor, config_broker::ConfigBrokerError>>
+    {
+        std::future::ready(Err(config_broker::ConfigBrokerError::Transport(
+            "unreachable-in-test".to_string(),
+        )))
+    }
+
     #[tokio::test]
     async fn recover_with_seam_noops_when_lister_returns_none() {
         let writer: Arc<dyn crate::store::SessionWorkerStore> =
             Arc::new(MockSessionWorkerStore::new());
         let state = app_state_with_writer(Some(writer));
 
-        recover_live_workers_with(&state, || None, |_| None).await;
+        recover_live_workers_with(&state, || None, |_| None, err_resolver).await;
         assert!(state.transport_sessions.lock().await.is_empty());
     }
 
@@ -848,6 +881,7 @@ mod tests {
             &state,
             || Some(HashSet::from(["mcp_session_abc".to_string()])),
             |_| None,
+            err_resolver,
         )
         .await;
         assert!(state.transport_sessions.lock().await.is_empty());
@@ -866,6 +900,7 @@ mod tests {
             &state,
             || Some(HashSet::from(["mcp_session_orphan".to_string()])),
             |_| None,
+            err_resolver,
         )
         .await;
         // Nothing seeded; the orphan container gets force-removed (docker
@@ -887,7 +922,7 @@ mod tests {
         let state = app_state_with_writer(Some(Arc::new(writer.clone())));
 
         // Empty running set → every DB row should be marked reaped.
-        recover_live_workers_with(&state, || Some(HashSet::new()), |_| None).await;
+        recover_live_workers_with(&state, || Some(HashSet::new()), |_| None, err_resolver).await;
         assert!(state.transport_sessions.lock().await.is_empty());
         assert_eq!(
             writer.drain_recorded_reaps().await,
@@ -913,6 +948,7 @@ mod tests {
             &state,
             || Some(HashSet::from(["mcp_session_x".to_string()])),
             |_| None,
+            err_resolver,
         )
         .await;
         assert!(state.transport_sessions.lock().await.is_empty());
@@ -933,6 +969,7 @@ mod tests {
             &state,
             || Some(HashSet::from(["mcp_session_y".to_string()])),
             |_| None, // inspector returns None
+            err_resolver,
         )
         .await;
         assert!(state.transport_sessions.lock().await.is_empty());
@@ -965,6 +1002,7 @@ mod tests {
                     staging_token: None,
                 })
             },
+            err_resolver,
         )
         .await;
         let logs = crate::test_support::take_log_capture().join("\n");
@@ -978,10 +1016,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn recover_with_seam_logs_ip_drift() {
-        // IP in DB row differs from inspect result → log the drift.
+        // IP in DB row differs from inspect result → log the drift, then
+        // resolver returns an error so the intersection is skipped.
         let pid = Uuid::new_v4();
-        // config_broker_endpoint is unreachable (port 1), so config-broker
-        // call will fail → the intersection is skipped after the IP-drift log.
         let state = app_state_with_writer(Some(Arc::new(
             MockSessionWorkerStore::new()
                 .with_plugin(pid, "mcp-bash")
@@ -1002,6 +1039,7 @@ mod tests {
                     staging_token: None,
                 })
             },
+            err_resolver,
         )
         .await;
         let logs = crate::test_support::take_log_capture().join("\n");
@@ -1014,8 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn recover_with_seam_skips_when_config_broker_fails() {
         // Full intersection (container + row + plugin + inspect), but
-        // config-broker is unreachable (port 1 as set in app_state_with_writer)
-        // → config-broker resolve fails, warn + skip.
+        // resolver returns an error → warn + skip, nothing seeded.
         let pid = Uuid::new_v4();
         let state = app_state_with_writer(Some(Arc::new(
             MockSessionWorkerStore::new()
@@ -1027,9 +1064,167 @@ mod tests {
             &state,
             || Some(HashSet::from(["mcp_session_cb_fail".to_string()])),
             |_| Some(synthetic_inspect("10.0.0.5", "acme", "mcp")),
+            err_resolver,
         )
         .await;
-        // config-broker at 127.0.0.1:1 refuses connection → skip; nothing seeded.
         assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    // ── new: previously-uncovered paths ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn recover_with_seam_record_reap_error_is_non_fatal() {
+        // DB has a live row whose record_reap call returns an error.
+        // Recovery should warn and continue — transport_sessions stays empty,
+        // the function does not panic or return early.
+        let pid = Uuid::new_v4();
+        let writer = MockSessionWorkerStore::new()
+            .with_live_worker("mcp_session_reap_err", "10.0.0.1", "sess-r", pid)
+            .with_record_reap_error("mcp_session_reap_err", "db write fail");
+        let state = app_state_with_writer(Some(Arc::new(writer)));
+
+        // Running set is empty → every DB row triggers record_reap.
+        recover_live_workers_with(&state, || Some(HashSet::new()), |_| None, err_resolver).await;
+        // Even though record_reap errored, the function completes normally.
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_resolve_plugin_name_error_skips_row() {
+        // Container in running set + matching DB row, but resolve_plugin_name
+        // returns a DB error → warn + skip, no session seeded.
+        let pid = Uuid::new_v4();
+        let state = app_state_with_writer(Some(Arc::new(
+            MockSessionWorkerStore::new()
+                .with_live_worker("mcp_session_pe", "10.0.0.2", "sess-pe", pid)
+                .with_resolve_plugin_name_error("plugin lookup broke"),
+        )));
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_pe".to_string()])),
+            |_| None,
+            err_resolver,
+        )
+        .await;
+        assert!(state.transport_sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_full_success_seeds_transport_session() {
+        // Full happy-path: container running + DB row + plugin resolved +
+        // inspect succeeds + resolver returns Ok(descriptor) → session seeded
+        // into transport_sessions.
+        let pid = Uuid::new_v4();
+        let state = app_state_with_writer(Some(Arc::new(
+            MockSessionWorkerStore::new()
+                .with_plugin(pid, "mcp-fetch")
+                .with_live_worker("mcp_session_ok", "10.0.0.10", "sess-ok", pid),
+        )));
+
+        let ok_descriptor = config_broker::PluginDescriptor {
+            image: "ghcr.io/example/mcp-fetch:latest".to_string(),
+            port: 8080,
+            path: "/mcp".to_string(),
+            upstream_auth: config_broker::UpstreamAuth::None,
+            resources: Default::default(),
+            env: vec![],
+            config_blob: None,
+            egress: None,
+        };
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_ok".to_string()])),
+            |_| {
+                Some(InspectResult {
+                    container_ip: "10.0.0.10".to_string(),
+                    tenant: "acme".to_string(),
+                    workspace: "mcp".to_string(),
+                    agent_session_label: Some("agent-abc".to_string()),
+                    staging_token: Some("staging-tok".to_string()),
+                })
+            },
+            {
+                let desc = ok_descriptor.clone();
+                move |_t: String, _w: String, _p: String| {
+                    let d = desc.clone();
+                    async move { Ok(d) }
+                }
+            },
+        )
+        .await;
+
+        let sessions = state.transport_sessions.lock().await;
+        assert_eq!(sessions.len(), 1, "one session should be seeded");
+        let transport = sessions.get("sess-ok").expect("keyed by mcp_session_id");
+        assert_eq!(transport.container_name, "mcp_session_ok");
+        assert_eq!(transport.container_ip, "10.0.0.10");
+        assert_eq!(transport.tenant_name, "acme");
+        assert_eq!(transport.workspace, "mcp");
+        assert_eq!(transport.plugin_name, "mcp-fetch");
+        assert_eq!(transport.port, 8080);
+        assert_eq!(transport.path, "/mcp");
+        assert_eq!(transport.staging_token, "staging-tok");
+        assert_eq!(transport.agent_id, Some("agent-abc".to_string()));
+        assert!(transport.upstream_authorization.is_none());
+    }
+
+    #[tokio::test]
+    async fn recover_with_seam_full_success_ip_drift_uses_inspect_ip() {
+        // DB row has a stale IP; inspect returns a different one.
+        // The seeded TransportState must use the inspect IP (the live address).
+        let pid = Uuid::new_v4();
+        let state = app_state_with_writer(Some(Arc::new(
+            MockSessionWorkerStore::new()
+                .with_plugin(pid, "mcp-fetch")
+                // DB row has "10.0.0.99" (stale)
+                .with_live_worker("mcp_session_drift2", "10.0.0.99", "sess-drift2", pid),
+        )));
+
+        let ok_descriptor = config_broker::PluginDescriptor {
+            image: "ghcr.io/example/mcp-fetch:latest".to_string(),
+            port: 9090,
+            path: "/rpc".to_string(),
+            upstream_auth: config_broker::UpstreamAuth::None,
+            resources: Default::default(),
+            env: vec![],
+            config_blob: None,
+            egress: Some(serde_json::json!({"allow": []})),
+        };
+
+        recover_live_workers_with(
+            &state,
+            || Some(HashSet::from(["mcp_session_drift2".to_string()])),
+            |_| {
+                Some(InspectResult {
+                    container_ip: "10.0.0.77".to_string(), // live IP differs
+                    tenant: "org".to_string(),
+                    workspace: "ws1".to_string(),
+                    agent_session_label: None,
+                    staging_token: None,
+                })
+            },
+            {
+                let desc = ok_descriptor.clone();
+                move |_t: String, _w: String, _p: String| {
+                    let d = desc.clone();
+                    async move { Ok(d) }
+                }
+            },
+        )
+        .await;
+
+        let sessions = state.transport_sessions.lock().await;
+        let transport = sessions
+            .get("sess-drift2")
+            .expect("keyed by mcp_session_id");
+        // Must use the inspect (live) IP, not the DB row IP.
+        assert_eq!(transport.container_ip, "10.0.0.77");
+        assert_eq!(transport.port, 9090);
+        assert_eq!(
+            transport.egress_policy,
+            Some(serde_json::json!({"allow": []}))
+        );
     }
 }

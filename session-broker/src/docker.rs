@@ -1,42 +1,234 @@
-//! Thin wrappers around the docker CLI used by the broker's hot path.
+//! Bollard-based Docker liveness check used by the broker's hot path.
 //!
-//! Round-3 cutover (RFE #105 PR2) shrank `session_registry.rs` down to
-//! these two helpers; the rest of that module's docker-CLI surface
-//! lives in `recovery.rs` (cold-start only). This file is just the
-//! per-request hook that `evict_dead_session` uses to confirm a
-//! container is still up before declaring a session dead.
+//! The `DockerApi` trait provides a seam for offline testing.  The only
+//! production-unreachable parts are `impl DockerApi for Docker` (the thin
+//! bollard wrapper) and `connect_docker` (requires the docker socket).
+
+use bollard::errors::Error as BollardError;
+use bollard::models::{ContainerInspectResponse, ContainerStateStatusEnum};
+use bollard::query_parameters::InspectContainerOptionsBuilder;
+use bollard::Docker;
+use futures_util::future::BoxFuture;
+use futures_util::FutureExt;
 
 use crate::log_info;
+
+// ---------------------------------------------------------------------------
+// DockerApi seam
+// ---------------------------------------------------------------------------
+
+pub(crate) trait DockerApi {
+    fn inspect_container<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>>;
+}
+
+/// Production implementation — connects over the local docker socket.
+/// NOT covered by offline unit tests.
+impl DockerApi for Docker {
+    fn inspect_container<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>> {
+        let options = Some(InspectContainerOptionsBuilder::new().size(false).build());
+        Docker::inspect_container(self, name, options).boxed()
+    }
+}
+
+/// Connect to the local docker socket.
+/// NOT covered by offline unit tests.
+pub(crate) fn connect_docker() -> Result<Docker, BollardError> {
+    Docker::connect_with_local_defaults()
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /// Checks whether a specific container is currently running.
 ///
 /// Returns `Some(true)` if running, `Some(false)` if the container
 /// exists but is not running OR does not exist, `None` when the
-/// docker CLI is unavailable. The "unknown" answer is mapped to
-/// "assume alive" upstream so a transient docker hiccup doesn't
-/// cause a false-positive eviction.
-pub fn is_container_running(name: &str) -> Option<bool> {
-    let result = std::process::Command::new("docker")
-        .args(["inspect", "--format", "{{.State.Running}}", name])
-        .output();
-
-    match result {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log_info("docker CLI not available; skipping liveness check");
+/// docker socket is unavailable or an unexpected error occurs. The
+/// "unknown" answer is mapped to "assume alive" upstream so a
+/// transient docker hiccup doesn't cause a false-positive eviction.
+pub async fn is_container_running(name: &str) -> Option<bool> {
+    match connect_docker() {
+        Err(e) => {
+            log_info(&format!(
+                "docker socket unavailable; skipping liveness check: {e}"
+            ));
             None
         }
+        Ok(docker) => is_container_running_impl(name, &docker).await,
+    }
+}
+
+async fn is_container_running_impl<D: DockerApi + ?Sized>(name: &str, docker: &D) -> Option<bool> {
+    match docker.inspect_container(name).await {
+        Ok(inspect) => Some(is_running(&inspect)),
+        Err(BollardError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Some(false),
         Err(e) => {
             log_info(&format!("docker inspect failed for {name}: {e}"));
             None
         }
-        Ok(output) if !output.status.success() => {
-            // Container not known to docker — same outcome as
-            // "exists but stopped". Caller treats both as "evict".
-            Some(false)
+    }
+}
+
+fn is_running(inspect: &ContainerInspectResponse) -> bool {
+    let state = match inspect.state.as_ref() {
+        Some(state) => state,
+        None => return false,
+    };
+    if let Some(ContainerStateStatusEnum::RUNNING) = state.status {
+        return true;
+    }
+    state.running.unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bollard::models::ContainerState;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    // FakeDocker returns pre-canned responses for offline testing.
+    // The production `impl DockerApi for Docker` and `connect_docker` are
+    // the only offline-unreachable parts.
+    #[derive(Default, Clone)]
+    struct FakeDocker {
+        inspect_results: Arc<Mutex<VecDeque<Result<ContainerInspectResponse, BollardError>>>>,
+    }
+
+    impl FakeDocker {
+        fn with_inspect(
+            self,
+            results: Vec<Result<ContainerInspectResponse, BollardError>>,
+        ) -> Self {
+            *self.inspect_results.lock().expect("inspect lock") = VecDeque::from(results);
+            self
         }
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Some(stdout == "true")
+    }
+
+    impl DockerApi for FakeDocker {
+        fn inspect_container<'a>(
+            &'a self,
+            _name: &'a str,
+        ) -> BoxFuture<'a, Result<ContainerInspectResponse, BollardError>> {
+            async move {
+                self.inspect_results
+                    .lock()
+                    .expect("inspect lock")
+                    .pop_front()
+                    .expect("missing inspect result")
+            }
+            .boxed()
         }
+    }
+
+    fn running_inspect() -> ContainerInspectResponse {
+        ContainerInspectResponse {
+            state: Some(ContainerState {
+                status: Some(ContainerStateStatusEnum::RUNNING),
+                running: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn stopped_inspect() -> ContainerInspectResponse {
+        ContainerInspectResponse {
+            state: Some(ContainerState {
+                status: Some(ContainerStateStatusEnum::EXITED),
+                running: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn err_404() -> BollardError {
+        BollardError::DockerResponseServerError {
+            status_code: 404,
+            message: "No such container".into(),
+        }
+    }
+
+    fn err_500() -> BollardError {
+        BollardError::DockerResponseServerError {
+            status_code: 500,
+            message: "Internal server error".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn running_container_returns_some_true() {
+        let docker = FakeDocker::default().with_inspect(vec![Ok(running_inspect())]);
+        let result = is_container_running_impl("mcp_session_abc", &docker).await;
+        assert_eq!(result, Some(true));
+    }
+
+    #[tokio::test]
+    async fn stopped_container_returns_some_false() {
+        let docker = FakeDocker::default().with_inspect(vec![Ok(stopped_inspect())]);
+        let result = is_container_running_impl("mcp_session_abc", &docker).await;
+        assert_eq!(result, Some(false));
+    }
+
+    #[tokio::test]
+    async fn not_found_returns_some_false() {
+        let docker = FakeDocker::default().with_inspect(vec![Err(err_404())]);
+        let result = is_container_running_impl("mcp_session_abc", &docker).await;
+        assert_eq!(result, Some(false));
+    }
+
+    #[tokio::test]
+    async fn api_error_returns_none() {
+        let docker = FakeDocker::default().with_inspect(vec![Err(err_500())]);
+        let result = is_container_running_impl("mcp_session_abc", &docker).await;
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn is_running_with_running_status_returns_true() {
+        let inspect = running_inspect();
+        assert!(is_running(&inspect));
+    }
+
+    #[test]
+    fn is_running_with_exited_status_returns_false() {
+        let inspect = stopped_inspect();
+        assert!(!is_running(&inspect));
+    }
+
+    #[test]
+    fn is_running_with_no_state_returns_false() {
+        let inspect = ContainerInspectResponse {
+            state: None,
+            ..Default::default()
+        };
+        assert!(!is_running(&inspect));
+    }
+
+    #[test]
+    fn is_running_with_running_true_but_no_status_returns_true() {
+        let inspect = ContainerInspectResponse {
+            state: Some(ContainerState {
+                status: None,
+                running: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(is_running(&inspect));
     }
 }

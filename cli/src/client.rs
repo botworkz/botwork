@@ -437,6 +437,8 @@ mod tests {
     use super::*;
     use botwork_opaque_handshake::{client, server, ServerSetup};
     use std::path::Path;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     const SINGLE_CERT_PEM: &[u8] = b"
         -----BEGIN CERTIFICATE-----
@@ -546,6 +548,30 @@ mod tests {
         let finish =
             client::login_finish(login.state, input.as_slice(), response.response).unwrap();
         (request, finish.finalization)
+    }
+
+    async fn spawn_one_shot_http(status: &str, body: &str, content_type: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let body = body.to_string();
+        let status = status.to_string();
+        let content_type = content_type.to_string();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        format!("http://{addr}")
     }
 
     #[test]
@@ -767,5 +793,159 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn post_json_and_parse_covers_success_status_and_decode_failure_paths() {
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({"ignored": true});
+
+        let ok_url = spawn_one_shot_http("200 OK", r#"{"value":9}"#, "application/json").await;
+        let parsed: Tiny = post_json_and_parse(&client, &ok_url, &body)
+            .await
+            .expect("parse ok response");
+        assert_eq!(parsed.value, 9);
+
+        let status_url =
+            spawn_one_shot_http("500 Internal Server Error", "down", "text/plain").await;
+        let err = post_json_and_parse::<Tiny>(&client, &status_url, &body)
+            .await
+            .expect_err("500 should fail");
+        assert!(matches!(
+            err,
+            LoginError::UnexpectedStatus { status: 500, .. }
+        ));
+
+        let malformed_url = spawn_one_shot_http("200 OK", "not-json", "text/plain").await;
+        let err = post_json_and_parse::<Tiny>(&client, &malformed_url, &body)
+            .await
+            .expect_err("malformed body should fail");
+        assert!(matches!(err, LoginError::MalformedResponse { .. }));
+    }
+
+    #[tokio::test]
+    async fn post_json_and_parse_with_tenant_arms_maps_special_statuses() {
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({"ignored": true});
+
+        let missing_url = spawn_one_shot_http("404 Not Found", "missing", "text/plain").await;
+        let err =
+            post_json_and_parse_with_tenant_arms::<Tiny>(&client, &missing_url, &body, "phlax")
+                .await
+                .expect_err("404 should map");
+        assert!(matches!(err, LoginError::UnknownTenant(ref t) if t == "phlax"));
+
+        let conflict_url = spawn_one_shot_http("409 Conflict", "exists", "text/plain").await;
+        let err =
+            post_json_and_parse_with_tenant_arms::<Tiny>(&client, &conflict_url, &body, "phlax")
+                .await
+                .expect_err("409 should map");
+        assert!(matches!(err, LoginError::AlreadyRegistered(ref t) if t == "phlax"));
+
+        let unexpected_url = spawn_one_shot_http("418 I'm a teapot", "teapot", "text/plain").await;
+        let err =
+            post_json_and_parse_with_tenant_arms::<Tiny>(&client, &unexpected_url, &body, "phlax")
+                .await
+                .expect_err("other status should map to unexpected");
+        assert!(matches!(
+            err,
+            LoginError::UnexpectedStatus { status: 418, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn post_json_helpers_map_transport_errors() {
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({"ignored": true});
+        let unreachable = "http://127.0.0.1:1";
+
+        let err = post_json_and_parse::<Tiny>(&client, unreachable, &body)
+            .await
+            .expect_err("transport error should map");
+        assert!(matches!(err, LoginError::Network { ref url, .. } if url == unreachable));
+
+        let err =
+            post_json_and_parse_with_tenant_arms::<Tiny>(&client, unreachable, &body, "phlax")
+                .await
+                .expect_err("transport error should map");
+        assert!(matches!(err, LoginError::Network { ref url, .. } if url == unreachable));
+    }
+
+    #[tokio::test]
+    async fn run_register_maps_status_and_decode_failures() {
+        let unknown_base = spawn_one_shot_http("404 Not Found", "missing", "text/plain").await;
+        let err = run_register(
+            &Url::parse(&unknown_base).unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            None,
+        )
+        .await
+        .expect_err("404 should map to unknown tenant");
+        assert!(matches!(err, LoginError::UnknownTenant(ref t) if t == "phlax"));
+
+        let conflict_base = spawn_one_shot_http("409 Conflict", "exists", "text/plain").await;
+        let err = run_register(
+            &Url::parse(&conflict_base).unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            None,
+        )
+        .await
+        .expect_err("409 should map to already registered");
+        assert!(matches!(err, LoginError::AlreadyRegistered(ref t) if t == "phlax"));
+
+        let malformed = serde_json::json!({"registration_response":"%%%"});
+        let malformed_base =
+            spawn_one_shot_http("200 OK", &malformed.to_string(), "application/json").await;
+        let err = run_register(
+            &Url::parse(&malformed_base).unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            None,
+        )
+        .await
+        .expect_err("invalid base64 should fail");
+        assert!(matches!(err, LoginError::MalformedResponse { .. }));
+    }
+
+    #[tokio::test]
+    async fn run_login_maps_transport_and_decode_failures() {
+        let err = run_login(
+            &Url::parse("http://127.0.0.1:1").unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            60,
+            None,
+        )
+        .await
+        .expect_err("unreachable server should fail");
+        assert!(matches!(
+            err,
+            LoginError::Network { ref url, .. } if url.ends_with("/auth/login/start")
+        ));
+
+        let malformed = serde_json::json!({
+            "handshake_id": Uuid::new_v4(),
+            "login_response": "%%%",
+            "expires_in_seconds": 60,
+        });
+        let malformed_base =
+            spawn_one_shot_http("200 OK", &malformed.to_string(), "application/json").await;
+        let err = run_login(
+            &Url::parse(&malformed_base).unwrap(),
+            "phlax",
+            "phlax@example.com",
+            b"hunter2",
+            60,
+            None,
+        )
+        .await
+        .expect_err("invalid base64 should fail");
+        assert!(matches!(err, LoginError::MalformedResponse { .. }));
     }
 }

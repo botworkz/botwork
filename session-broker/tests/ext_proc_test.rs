@@ -9,10 +9,12 @@ use botwork_session_broker::config_broker::{
 use botwork_session_broker::ext_proc::{
     upstream_header_mutation, ExternalProcessorService, PerStreamState, TeardownInfo,
 };
+use botwork_session_broker::store::mock::MockSessionWorkerStore;
+use botwork_session_broker::store::SessionWorkerStore;
 use botwork_session_broker::test_support::{
     log_capture_guard, start_log_capture, take_log_capture,
 };
-use botwork_session_broker::{AppState, PendingInit, TransportState};
+use botwork_session_broker::{AppState, PendingInit, TransportState, COLD_START_TIMEOUT};
 use envoy_proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use envoy_proto::envoy::service::ext_proc::v3::{
     processing_response, CommonResponse, HeadersResponse, HttpBody, HttpHeaders, ProcessingResponse,
@@ -21,6 +23,9 @@ use tempfile::tempdir;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::Mutex;
+
+const EXPECTED_LAUNCHER_CALLS_WITH_TEARDOWN: usize = 2;
+const TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(20);
 
 /// Routing-of-known-sessions builder: pre-existing tests pass a launcher
 /// socket path (and sometimes an auth URL); after the cutover the builder no
@@ -59,6 +64,7 @@ fn app_state_with_plugins_and_endpoints(
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
         disconnect_grace: Duration::from_secs(300),
+        cold_start_timeout: COLD_START_TIMEOUT,
         // RFE #105 PR2 / round-3: production wires three DB-bound
         // handles via `run()`. ext_proc tests drive the gRPC
         // surface against in-memory `transport_sessions` only, so
@@ -116,6 +122,7 @@ fn app_state_with_empty_plugins(launcher_socket_path: String) -> AppState {
         liveness_cache: Arc::new(Mutex::new(HashMap::new())),
         stream_liveness: Arc::new(Mutex::new(HashMap::new())),
         disconnect_grace: Duration::from_secs(300),
+        cold_start_timeout: COLD_START_TIMEOUT,
         // RFE #105 PR2 / round-3: production wires three DB-bound
         // handles via `run()`. ext_proc tests drive the gRPC
         // surface against in-memory `transport_sessions` only, so
@@ -2736,4 +2743,603 @@ async fn evict_tenant_does_not_affect_other_tenants() {
             .contains_key("sess-beta"),
         "beta session must survive"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Spawn-success path tests — post-launch branches
+//
+// These tests cover the branches PAST the first fake-launcher failure that
+// existing tests stop at.  A real `127.0.0.1:0` `TcpListener` is bound for
+// the probe target, the fake launcher returns 200 + `container_ip="127.0.0.1"`,
+// and the descriptor's `port` field is set to the listener's ephemeral port so
+// `probe_ready` connects successfully without docker.
+//
+// **Behaviour-adjacent change (needs review):** `spawn_new_container` now
+// passes `&container_ip` (the value returned by the launcher) to `probe_ready`
+// instead of `&container_name`.  This makes the probe target the IPv4 address
+// that the launcher advertises — which is what control-plane is also told —
+// and is arguably more correct.  It is also the enabler for offline tests: the
+// fake launcher returns `"127.0.0.1"` so the probe can reach a real loopback
+// listener bound in the test process.
+// ---------------------------------------------------------------------------
+
+/// Fake launcher that returns `200` + `{"container_ip":"127.0.0.1","status":"started"}`.
+/// After the probe-target change, `probe_ready` connects to
+/// `127.0.0.1:<descriptor.port>` so callers only need to bind a real listener
+/// on `127.0.0.1:0` and set the descriptor port accordingly.
+async fn spawn_launcher_success(
+    socket_path: &Path,
+    captured_body: Arc<Mutex<Option<String>>>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_launcher_capture(
+        socket_path,
+        200,
+        r#"{"name":"mcp_session_test","status":"started","container_ip":"127.0.0.1"}"#,
+        captured_body,
+    )
+    .await
+}
+
+/// Fake launcher for tests that need to observe both `/launch` and the
+/// follow-up `/teardown` call.
+async fn spawn_launcher_success_with_teardown_capture(
+    socket_path: &Path,
+    captured_paths: Arc<Mutex<Vec<String>>>,
+) -> tokio::task::JoinHandle<()> {
+    let listener = UnixListener::bind(socket_path).expect("bind launcher socket");
+    tokio::spawn(async move {
+        for _ in 0..EXPECTED_LAUNCHER_CALLS_WITH_TEARDOWN {
+            let (mut stream, _) = listener.accept().await.expect("accept launcher request");
+            let request = read_unix_http_request(&mut stream).await;
+            let request_line = request.lines().next().unwrap_or_default().to_string();
+            captured_paths.lock().await.push(request_line.clone());
+            let (status_code, body) = if request_line.contains("/launch") {
+                (
+                    200_u16,
+                    r#"{"name":"mcp_session_test","status":"started","container_ip":"127.0.0.1"}"#,
+                )
+            } else {
+                (200_u16, r#"{"status":"ok"}"#)
+            };
+            let response = format!(
+                "HTTP/1.1 {status_code} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write launcher response");
+        }
+    })
+}
+
+/// Stand up a fake control-plane HTTP server on `127.0.0.1:0`.
+/// The server accepts one `POST /sessions`, responds with `status_code` +
+/// `body`, and closes.  Returns `(base_url, join_handle)`.
+async fn spawn_control_plane_fake(
+    status_code: u16,
+    body: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake control-plane");
+    let addr = listener.local_addr().expect("addr");
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("accept control-plane request");
+        // Drain the request — we assert on the response, not the request body.
+        let _ = read_tcp_http_request(&mut stream).await;
+        let reason = match status_code {
+            200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
+            404 => "Not Found",
+            409 => "Conflict",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            _ => "OK",
+        };
+        let response = format!(
+            "HTTP/1.1 {status_code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write control-plane response");
+    });
+    (format!("http://{addr}"), task)
+}
+
+/// `AppState` builder that accepts a real `control_plane_endpoint`.
+/// The existing `app_state_for_spawn` helper hard-codes `http://127.0.0.1:1`
+/// (a closed port) for the control-plane; this variant lets spawn-success
+/// tests supply a working endpoint.
+fn app_state_for_spawn_with_control_plane(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+    config_broker_endpoint: String,
+    control_plane_endpoint: String,
+) -> AppState {
+    app_state_for_spawn_with_control_plane_custom(
+        launcher_socket_path,
+        auth_broker_url,
+        config_broker_endpoint,
+        control_plane_endpoint,
+        None,
+        COLD_START_TIMEOUT,
+    )
+}
+
+fn app_state_for_spawn_with_control_plane_custom(
+    launcher_socket_path: String,
+    auth_broker_url: String,
+    config_broker_endpoint: String,
+    control_plane_endpoint: String,
+    session_worker_writer: Option<Arc<dyn SessionWorkerStore>>,
+    cold_start_timeout: Duration,
+) -> AppState {
+    AppState {
+        transport_sessions: Arc::new(Mutex::new(HashMap::new())),
+        pending_init: Arc::new(Mutex::new(HashMap::new())),
+        launcher_socket_path,
+        auth_broker_url,
+        config_broker_endpoint,
+        control_plane_endpoint,
+        tombstones: Arc::new(Mutex::new(HashMap::new())),
+        liveness_cache: Arc::new(Mutex::new(HashMap::new())),
+        stream_liveness: Arc::new(Mutex::new(HashMap::new())),
+        disconnect_grace: Duration::from_secs(300),
+        cold_start_timeout,
+        agent_session_writer: None,
+        session_worker_writer,
+        db: None,
+    }
+}
+
+/// End-to-end spawn-success test:
+///   1. POST (no session) → descriptor resolved → secrets fetched →
+///      launcher 200 → probe OK → control-plane 201
+///   2. `PendingInit` stored at `stream.stream_id`, route response returned.
+///   3. Feed matching response-headers with `mcp-session-id` → `TransportState`
+///      seeded + liveness bumped + `PendingInit` consumed.
+#[tokio::test]
+async fn spawn_success_seeds_pending_init_and_transport() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+
+    // Bind the probe listener first — its port drives the descriptor so
+    // probe_ready connects to a real socket.  Keep the variable alive until
+    // after handle_request_headers returns.
+    let probe_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe listener");
+    let probe_port = probe_listener.local_addr().expect("probe addr").port();
+
+    let launcher_task = spawn_launcher_success(&socket_path, Arc::new(Mutex::new(None))).await;
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let descriptor = PluginDescriptor {
+        port: probe_port,
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let (cp_url, cp_task) = spawn_control_plane_fake(201, r#"{"status":"ok"}"#).await;
+    let state = app_state_for_spawn_with_control_plane(
+        path_to_string(&socket_path),
+        auth_url,
+        config_url,
+        cp_url,
+    );
+
+    let stream_id = "stream-success-1";
+    let mut stream = PerStreamState {
+        stream_id: stream_id.to_string(),
+        ..PerStreamState::default()
+    };
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    // All fake servers must have served their one request.
+    launcher_task.await.unwrap();
+    cp_task.await.unwrap();
+    drop(probe_listener);
+
+    // Spawn-success: route response (not an immediate error).
+    assert_eq!(
+        immediate_status(&response),
+        None,
+        "spawn success must route, not return immediate error"
+    );
+    assert!(
+        extract_upstream_mutation(&response).is_some(),
+        "spawn success must produce upstream mutation"
+    );
+
+    // PendingInit recorded.
+    let pending = state
+        .pending_init
+        .lock()
+        .await
+        .get(stream_id)
+        .cloned()
+        .expect("PendingInit must be stored after successful spawn");
+    assert_eq!(pending.container_ip, "127.0.0.1");
+    assert_eq!(pending.plugin_name, "plugin-a");
+    assert_eq!(pending.tenant_name, "tenant1");
+
+    // Feed response-headers with mcp-session-id → transport seeded.
+    let resp2 = ExternalProcessorService::handle_response_headers(
+        &state,
+        &mut stream,
+        headers(&[(":status", "200"), ("mcp-session-id", "sess-new")]),
+    )
+    .await;
+    assert!(matches!(
+        resp2.response,
+        Some(processing_response::Response::ResponseHeaders(_))
+    ));
+    // PendingInit consumed by response-headers.
+    assert!(state.pending_init.lock().await.get(stream_id).is_none());
+    // TransportState seeded with correct fields.
+    let sessions = state.transport_sessions.lock().await;
+    let transport = sessions
+        .get("sess-new")
+        .expect("TransportState must be seeded after response-headers");
+    assert_eq!(transport.container_ip, "127.0.0.1");
+    assert_eq!(transport.plugin_name, "plugin-a");
+    assert_eq!(transport.port, probe_port);
+    assert_eq!(transport.tenant_name, "tenant1");
+    drop(sessions);
+    // Liveness bumped.
+    assert!(
+        state.stream_liveness.lock().await.contains_key("sess-new"),
+        "liveness must be bumped after response-headers"
+    );
+}
+
+#[tokio::test]
+async fn spawn_success_with_session_worker_writer_records_spawn_and_mcp_backfill() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+
+    let probe_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe listener");
+    let probe_port = probe_listener.local_addr().expect("probe addr").port();
+
+    let launcher_task = spawn_launcher_success(&socket_path, Arc::new(Mutex::new(None))).await;
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let descriptor = PluginDescriptor {
+        port: probe_port,
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let (cp_url, cp_task) = spawn_control_plane_fake(201, r#"{"status":"ok"}"#).await;
+
+    let writer = MockSessionWorkerStore::new().with_plugin(uuid::Uuid::new_v4(), "plugin-a");
+    let state = app_state_for_spawn_with_control_plane_custom(
+        path_to_string(&socket_path),
+        auth_url,
+        config_url,
+        cp_url,
+        Some(Arc::new(writer.clone()) as Arc<dyn SessionWorkerStore>),
+        COLD_START_TIMEOUT,
+    );
+
+    let stream_id = "stream-success-worker";
+    let mut stream = PerStreamState {
+        stream_id: stream_id.to_string(),
+        ..PerStreamState::default()
+    };
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    cp_task.await.unwrap();
+    drop(probe_listener);
+
+    assert_eq!(immediate_status(&response), None);
+
+    let resp2 = ExternalProcessorService::handle_response_headers(
+        &state,
+        &mut stream,
+        headers(&[(":status", "200"), ("mcp-session-id", "sess-writer")]),
+    )
+    .await;
+    assert!(matches!(
+        resp2.response,
+        Some(processing_response::Response::ResponseHeaders(_))
+    ));
+
+    let spawns = writer.drain_recorded_spawns().await;
+    assert_eq!(spawns.len(), 1);
+    assert_eq!(spawns[0].0, "plugin-a");
+    assert_eq!(spawns[0].2, "127.0.0.1");
+    assert!(spawns[0].1.starts_with("mcp_session_"));
+
+    let mcp_backfills = writer.drain_recorded_mcp_backfills().await;
+    assert_eq!(
+        mcp_backfills,
+        vec![(spawns[0].1.clone(), "sess-writer".to_string())]
+    );
+}
+
+/// control-plane gate 4xx → `ControlPlane(InvalidRequest)` → 503 to client.
+/// The container is torn down (best-effort, fire-and-forget).
+#[tokio::test]
+async fn spawn_control_plane_gate_4xx_returns_503() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+
+    let probe_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe listener");
+    let probe_port = probe_listener.local_addr().expect("probe addr").port();
+
+    let launcher_task = spawn_launcher_success(&socket_path, Arc::new(Mutex::new(None))).await;
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let descriptor = PluginDescriptor {
+        port: probe_port,
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let (cp_url, cp_task) =
+        spawn_control_plane_fake(400, r#"{"error":"invalid_request","message":"bad body"}"#).await;
+    let state = app_state_for_spawn_with_control_plane(
+        path_to_string(&socket_path),
+        auth_url,
+        config_url,
+        cp_url,
+    );
+
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    cp_task.await.unwrap();
+    drop(probe_listener);
+
+    assert_eq!(immediate_status(&response), Some(503));
+}
+
+/// control-plane gate 5xx → `ControlPlane(Internal)` → 503 to client.
+#[tokio::test]
+async fn spawn_control_plane_gate_5xx_returns_503() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+
+    let probe_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe listener");
+    let probe_port = probe_listener.local_addr().expect("probe addr").port();
+
+    let launcher_task = spawn_launcher_success(&socket_path, Arc::new(Mutex::new(None))).await;
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let descriptor = PluginDescriptor {
+        port: probe_port,
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let (cp_url, cp_task) =
+        spawn_control_plane_fake(500, r#"{"error":"internal","message":"db down"}"#).await;
+    let state = app_state_for_spawn_with_control_plane(
+        path_to_string(&socket_path),
+        auth_url,
+        config_url,
+        cp_url,
+    );
+
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    cp_task.await.unwrap();
+    drop(probe_listener);
+
+    assert_eq!(immediate_status(&response), Some(503));
+}
+
+/// control-plane transport failure (connection refused on port 1) →
+/// `ControlPlane(Transport)` → 503 to client.
+#[tokio::test]
+async fn spawn_control_plane_transport_failure_returns_503() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+
+    let probe_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe listener");
+    let probe_port = probe_listener.local_addr().expect("probe addr").port();
+
+    let launcher_task = spawn_launcher_success(&socket_path, Arc::new(Mutex::new(None))).await;
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+    let descriptor = PluginDescriptor {
+        port: probe_port,
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    // Point at port 1 — no listener, immediate ECONNREFUSED.
+    let state = app_state_for_spawn_with_control_plane(
+        path_to_string(&socket_path),
+        auth_url,
+        config_url,
+        "http://127.0.0.1:1".to_string(),
+    );
+
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+    launcher_task.await.unwrap();
+    drop(probe_listener);
+
+    assert_eq!(immediate_status(&response), Some(503));
+}
+
+#[tokio::test]
+async fn spawn_probe_timeout_tears_down_unannounced_container() {
+    let temp = tempdir().unwrap();
+    let socket_path = temp.path().join("launcher.sock");
+    let captured_paths = Arc::new(Mutex::new(Vec::new()));
+
+    let launcher_task =
+        spawn_launcher_success_with_teardown_capture(&socket_path, Arc::clone(&captured_paths))
+            .await;
+    let auth_url = spawn_auth_broker_capture(
+        200,
+        r#"{"tenant":"tenant1","plugin":"plugin-a","secrets":[]}"#,
+        Arc::new(Mutex::new(None)),
+    )
+    .await;
+
+    let closed_probe_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind closed probe listener");
+    let closed_probe_port = closed_probe_listener
+        .local_addr()
+        .expect("probe addr")
+        .port();
+    drop(closed_probe_listener);
+
+    let descriptor = PluginDescriptor {
+        port: closed_probe_port,
+        ..descriptor_default()
+    };
+    let config_url = spawn_config_broker_with_descriptor(descriptor).await;
+    let state = app_state_for_spawn_with_control_plane_custom(
+        path_to_string(&socket_path),
+        auth_url,
+        config_url,
+        "http://127.0.0.1:1".to_string(),
+        None,
+        TEST_PROBE_TIMEOUT,
+    );
+
+    let mut stream = PerStreamState::default();
+    let response = ExternalProcessorService::handle_request_headers(
+        &state,
+        &mut stream,
+        headers(&[
+            (":method", "POST"),
+            (":path", "/tenant1/mcp/plugin-a"),
+            ("x-botwork-tenant", "tenant1"),
+            ("x-botwork-cap", "cap-123"),
+        ]),
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(1), launcher_task)
+        .await
+        .expect("launch + teardown requests should complete")
+        .expect("launcher task should succeed");
+
+    assert_eq!(immediate_status(&response), Some(504));
+    let paths = captured_paths.lock().await.clone();
+    assert_eq!(
+        paths.len(),
+        EXPECTED_LAUNCHER_CALLS_WITH_TEARDOWN,
+        "expected launch + teardown calls"
+    );
+    assert!(paths.iter().any(|line| line.contains("/launch")));
+    assert!(paths.iter().any(|line| line.contains("/teardown")));
+}
+
+/// response-headers with a `PendingInit` but no `mcp-session-id` discards
+/// the pending state without seeding a transport.  This hits the
+/// "initialize response missing Mcp-Session-Id" log branch.
+#[tokio::test]
+async fn response_headers_pending_no_session_id_discards_and_does_not_seed_transport() {
+    let state = app_state_with_plugins("/tmp/no-launcher.sock".to_string());
+    let stream_id = "stream-no-sid";
+    insert_pending(
+        &state,
+        stream_id,
+        sample_pending("tenant1", "plugin-a", "mcp_session_abc"),
+    )
+    .await;
+    let mut stream = PerStreamState {
+        stream_id: stream_id.to_string(),
+        ..PerStreamState::default()
+    };
+    let _response = ExternalProcessorService::handle_response_headers(
+        &state,
+        &mut stream,
+        // No mcp-session-id header.
+        headers(&[(":status", "200")]),
+    )
+    .await;
+
+    // PendingInit consumed even without a session-id.
+    assert!(state.pending_init.lock().await.get(stream_id).is_none());
+    // No transport seeded.
+    assert!(state.transport_sessions.lock().await.is_empty());
 }

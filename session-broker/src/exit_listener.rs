@@ -278,6 +278,7 @@ mod tests {
             liveness_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_liveness: Arc::new(Mutex::new(HashMap::new())),
             disconnect_grace: Duration::from_secs(300),
+            cold_start_timeout: crate::COLD_START_TIMEOUT,
             agent_session_writer: None,
             session_worker_writer: None,
             db: None,
@@ -477,6 +478,33 @@ mod tests {
         assert!(
             err.contains("missing 'name'"),
             "expected \"missing 'name'\" in error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_exit_request_defaults_event_and_exit_code_when_omitted() {
+        use http_body_util::Full;
+        let state = bare_state();
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/container-exit")
+            .body(Full::new(Bytes::from_static(
+                br#"{"name":"mcp-session-no-such-container"}"#,
+            )))
+            .expect("build request");
+        let resp = dispatch_exit_request(req, &state).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn json_response_sets_content_type_and_status() {
+        let resp = json_response(StatusCode::ACCEPTED, r#"{"status":"ok"}"#);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
         );
     }
 }

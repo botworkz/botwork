@@ -645,9 +645,11 @@ dependencies = [
 name = "botwork-ctl"
 version = "0.0.0"
 dependencies = [
+ "bollard",
  "botwork-api-core",
  "botwork-version",
  "chrono",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -682,8 +684,10 @@ dependencies = [
 name = "botwork-launcher"
 version = "0.0.0"
 dependencies = [
+ "bollard",
  "botwork-version",
  "bytes",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -735,12 +739,14 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "base64",
+ "bollard",
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
  "botwork-version",
  "chrono",
  "envoy-proto",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper",

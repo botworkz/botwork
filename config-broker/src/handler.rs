@@ -791,4 +791,20 @@ mod tests {
         let json = json_body(response).await;
         assert_eq!(json["error"], "internal");
     }
+
+    #[tokio::test]
+    async fn build_router_rejects_wrong_method() {
+        let app = build_router(empty_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/resolve")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
 }

@@ -215,6 +215,7 @@ fn chown_path(path: &str, uid: u32, gid: u32) -> Result<(), LauncherError> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
     use std::os::unix::fs::MetadataExt;
 
     use tempfile::TempDir;
@@ -651,6 +652,103 @@ mod tests {
                 LauncherError::Internal(_) | LauncherError::BadRequest(_)
             ),
             "expected Internal or BadRequest, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn setup_staging_dir_propagates_run_command_error() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+
+        let err = setup_staging_dir_impl(
+            &staging,
+            &validators,
+            1000,
+            1000,
+            |_args| Err("spawn failed".to_string()),
+            chown_ok,
+        )
+        .unwrap_err();
+        assert!(matches!(err, LauncherError::Internal(msg) if msg == "spawn failed"));
+    }
+
+    #[test]
+    fn bind_agent_propagates_run_command_error() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
+        std::fs::create_dir_all(&staging).expect("mkdir staging");
+
+        let err = bind_agent_impl(
+            &staging,
+            &agent,
+            &validators,
+            1000,
+            1000,
+            |_args| Err("mount command failed".to_string()),
+            chown_ok,
+        )
+        .unwrap_err();
+        assert!(matches!(err, LauncherError::Internal(msg) if msg == "mount command failed"));
+    }
+
+    #[test]
+    fn bind_agent_returns_conflict_when_sibling_targets_staging() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-2");
+        let sibling = format!("{base}/acme/workspaces/ws/agents/agent-1");
+
+        std::fs::create_dir_all(&staging).expect("mkdir staging");
+        std::fs::create_dir_all(format!("{base}/acme/workspaces/ws/agents")).expect("mkdir agents");
+        symlink(&staging, &sibling).expect("create sibling symlink");
+
+        let err = bind_agent_impl(&staging, &agent, &validators, 1000, 1000, run_ok, chown_ok)
+            .unwrap_err();
+        assert!(
+            matches!(err, LauncherError::Conflict(_)),
+            "expected conflict, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_agent_skips_mount_when_agent_already_points_to_staging() {
+        let tmp = TempDir::new().expect("tempdir");
+        let base = tmp.path().to_string_lossy().to_string();
+        let validators = validators_for_base(&base);
+        let staging = format!("{base}/acme/staging/aabbccddeeff");
+        let agent = format!("{base}/acme/workspaces/ws/agents/agent-1");
+
+        std::fs::create_dir_all(&staging).expect("mkdir staging");
+        std::fs::create_dir_all(format!("{base}/acme/workspaces/ws/agents")).expect("mkdir agents");
+        symlink(&staging, &agent).expect("create agent symlink");
+
+        let mut called = false;
+        let result = bind_agent_impl(
+            &staging,
+            &agent,
+            &validators,
+            1000,
+            1000,
+            |_args| {
+                called = true;
+                run_ok(&[])
+            },
+            chown_ok,
+        );
+        assert!(
+            result.is_ok(),
+            "expected ok for already bound agent: {result:?}"
+        );
+        assert!(
+            !called,
+            "mount command should not run for already-bound agent"
         );
     }
 }

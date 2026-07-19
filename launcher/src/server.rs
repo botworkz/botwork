@@ -156,7 +156,8 @@ async fn handle_launch(
             labels: &launch.labels,
         },
         &state.validators,
-    )?;
+    )
+    .await?;
 
     log_info(&format!(
         "launch ok: name={} image={} network={} staging_path={} env_count={} label_count={} ip={}",
@@ -214,7 +215,7 @@ async fn handle_teardown(
     let payload = parse_json_object(request).await?;
     let teardown = parse_teardown_payload(&payload, &state.validators)?;
 
-    docker::teardown(teardown.name, teardown.staging_path, &state.validators)?;
+    docker::teardown(teardown.name, teardown.staging_path, &state.validators).await?;
 
     log_info(&format!(
         "teardown ok: name={} staging_path={}",
@@ -675,14 +676,15 @@ fn render_json_object(fields: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use http_body_util::Full;
-    use hyper::Request;
+    use http_body_util::{BodyExt, Full};
+    use hyper::{Request, StatusCode};
     use serde_json::{Map, Value};
     use tempfile::TempDir;
 
     use super::{
-        inject_proxy_env, parse_bind_agent_payload, parse_json_bytes, parse_json_object,
-        parse_launch_payload, parse_teardown_payload, render_json_object,
+        error_response, inject_proxy_env, json_response, parse_bind_agent_payload,
+        parse_json_bytes, parse_json_object, parse_launch_payload, parse_teardown_payload,
+        render_json_object,
     };
     use crate::error::LauncherError;
     use crate::validate::{Validators, RESERVED_ENV_NAMES};
@@ -1609,5 +1611,84 @@ mod tests {
             matches!(err, LauncherError::BadRequest(_)),
             "expected BadRequest, got {err:?}"
         );
+    }
+
+    #[test]
+    fn parse_bind_agent_payload_success() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let payload = valid_bind_agent_payload(&base);
+        let parsed = parse_bind_agent_payload(&payload, &validators).expect("bind payload");
+        assert_eq!(
+            parsed.staging_path,
+            format!("{base}/acme/staging/aabbccddeeff")
+        );
+        assert_eq!(
+            parsed.agent_dir,
+            format!("{base}/acme/workspaces/ws/agents/agent-1")
+        );
+    }
+
+    #[test]
+    fn parse_teardown_payload_success() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let base = temp_dir.path().to_string_lossy().to_string();
+        let validators =
+            Validators::new_with_bases(r"^botwork/.*$", &base, &base).expect("validators");
+        let payload = valid_teardown_payload(&base);
+        let parsed = parse_teardown_payload(&payload, &validators).expect("teardown payload");
+        assert_eq!(parsed.name, "mcp_session_aabbccddeeff");
+        assert_eq!(
+            parsed.staging_path,
+            format!("{base}/acme/staging/aabbccddeeff")
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_json_object_rejects_non_object_json_values() {
+        let request = Request::builder()
+            .uri("/launch")
+            .body(Full::new(Bytes::from_static(br#"[]"#)))
+            .expect("request");
+        let err = parse_json_object(request)
+            .await
+            .expect_err("array should fail");
+        assert!(
+            matches!(err, LauncherError::BadRequest(msg) if msg == "request body must be a JSON object")
+        );
+    }
+
+    #[tokio::test]
+    async fn error_and_json_response_render_expected_status_and_body() {
+        let response = error_response(LauncherError::BadRequest("bad input".to_string()));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        assert_eq!(body.as_ref(), br#"{"error": "bad input"}"#);
+
+        let response = json_response(StatusCode::CREATED, &["status", "ok"]);
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let len = response
+            .headers()
+            .get("content-length")
+            .expect("content-length")
+            .to_str()
+            .expect("header str")
+            .parse::<usize>()
+            .expect("usize");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        assert_eq!(len, body.len());
+        assert_eq!(body.as_ref(), br#"{"status": "ok"}"#);
     }
 }
