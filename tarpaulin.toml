@@ -26,9 +26,20 @@
 #     not unit tests.
 #   * */main.rs — process-bootstrap entry points across the workspace
 #     binaries (api, session-broker, control-plane, config-broker,
-#     db/migration, botwork-cli, launcher, tools, ui/server).  These
+#     db/migration, botwork-cli, launcher, ui/server).  These
 #     files contain only arg-parsing shell, tokio-runtime setup, and
 #     server bind/serve wiring that is not meaningfully unit-testable.
+#
+# CI coverage path uses grcov with --ignore flags instead of tarpaulin.
+# The two exclusion lists MUST be kept in sync. The grcov --ignore list
+# lives in:
+#   .github/workflows/_crate.yml  (per-crate grcov step)
+#   .github/workflows/ci.yml      (aggregate grcov step)
+# Note: this file lists ui/wasm/src/api.rs and ui/wasm/src/pages/mod.rs
+# individually because botwork-ui-wasm is wholly excluded via the
+# `exclude` key above; the CI grcov lists use the broader ui/wasm/src/*
+# glob which subsumes those specific files — the net excluded set is
+# equivalent.
 
 [default]
 engine = "Llvm"
@@ -43,5 +54,5 @@ exclude-files = [
   "ui/wasm/src/api.rs",
   "ui/wasm/src/pages/mod.rs",
 ]
-out = ["Lcov", "Xml"]
+out = ["Lcov"]
 output-dir = "coverage"

@@ -4,7 +4,8 @@
 #
 # Local reproduction:
 #
-#   earthly +config-broker-image
+#   docker buildx build --platform linux/amd64 --load \
+#     -t botwork/config-broker:local -f config-broker/Dockerfile .
 #   bash config-broker/smoke.sh
 
 set -euo pipefail

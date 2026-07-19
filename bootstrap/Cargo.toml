@@ -11,7 +11,7 @@ publish = false
 # oneshot at boot. That production codepath was retired in RFE #106
 # PR4 (botwork#118 + the vm-side cutover) in favour of
 # `botctl bootstrap` calling api. The container,
-# Earthfile target, and CI plumbing are gone; this crate now only
+# image-build plumbing is gone; this crate now only
 # survives as a fast in-process seed helper for the three integration
 # tests under `api/`, `config-broker/`, and `session-broker/`
 # (going through api in those would cost ~3x setup for no

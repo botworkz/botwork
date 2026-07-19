@@ -4,7 +4,8 @@
 #
 # Local reproduction:
 #
-#   earthly +ui-image
+#   docker buildx build --platform linux/amd64 --load \
+#     -t botwork/ui:local -f ui/Dockerfile .
 #   bash ui/smoke.sh
 
 set -euo pipefail
