@@ -1,0 +1,28 @@
+name: Deny
+
+on:
+  push:
+    branches: [main, botwork-import]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deny-and-lockfile:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Verify Cargo.lock is up to date
+      run: |
+        cargo metadata --locked --format-version 1 >/dev/null || {
+          echo "::error::Cargo.lock is out of date with Cargo.toml." \
+               "Run 'cargo generate-lockfile' or 'cargo update --workspace'" \
+               "locally and commit the result."
+          exit 1
+        }
+    - uses: taiki-e/install-action@cargo-deny
+    - name: cargo deny check
+      run: cargo deny check

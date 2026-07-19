@@ -6,6 +6,7 @@
 #   cargo fmt -p <package> -- --check
 #   cargo clippy -p <package> --all-targets --locked -- -D warnings
 #   cargo test -p <package> --locked
+#   per-crate coverage (llvm profraw + lcov)
 #
 # Artifact behavior is controlled by one input:
 #   - `artifact: none`      -> gates only, publish nothing
@@ -48,9 +49,9 @@
 #                 workspace tree; for `db/migration` and `ui`
 #                 (where the image covers two crates) it's the directory
 #                 that owns the Dockerfile.
-#   * service   — image suffix (`botwork/<service>:local`) and earthly
-#                 target name. Differs from `crate` for `db/migration`
-#                 (`db-migrate`); uniform for the rest.
+#   * service   — image suffix (`botwork/<service>:local`). Differs from
+#                 `crate` for `db/migration` (`db-migrate`); uniform for
+#                 the rest.
 #   * package   — cargo workspace package the image wraps
 #                 (`botwork-session-broker`, …). Passed to `cargo fmt/
 #                 clippy/test/build -p ${package}`.
@@ -84,7 +85,7 @@ on:
         type: string
       service:
         description: >-
-          Image suffix (`botwork/<service>:local`) and earthly target name.
+          Image suffix (`botwork/<service>:local`).
         required: true
         type: string
       package:
@@ -124,6 +125,14 @@ on:
         required: false
         type: boolean
         default: false
+      wasm-target-check:
+        description: >-
+          Also run `cargo build -p <package> --target wasm32-unknown-unknown`.
+          Used by ui/wasm to validate the wasm-only target path in the
+          crate-local pipeline.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -156,6 +165,12 @@ jobs:
           exit 1
         fi
 
+    - name: Derive crate slug for artifact names
+      run: |
+        set -euo pipefail
+        crate='${{ inputs.crate }}'
+        echo "CRATE_SLUG=${crate//\//-}" >> "${GITHUB_ENV}"
+
     # ── Cross-run cargo cache ───────────────────────────────────────────────
     # `Swatinem/rust-cache@v2` keys on `Cargo.lock` + the host rust
     # toolchain, restores `~/.cargo/registry`, `~/.cargo/git`, and
@@ -171,15 +186,34 @@ jobs:
       with:
         components: rustfmt, clippy
 
+    - name: Install wasm32 target
+      if: inputs.artifact != 'container' && inputs.wasm-target-check
+      run: rustup target add wasm32-unknown-unknown
+
+    - uses: taiki-e/install-action@grcov
+
     - name: cargo fmt, clippy, test (host)
       if: inputs.artifact != 'container'
       env:
         BOTWORK_GIT_SHA: ${{ github.sha }}
       run: |
         set -euo pipefail
-        cargo fmt -p "${PACKAGE}" -- --check
-        cargo clippy -p "${PACKAGE}" --all-targets --locked -- -D warnings
-        cargo test -p "${PACKAGE}" --locked
+        package='${{ inputs.package }}'
+        mkdir -p ".ci-coverage/${CRATE_SLUG}/raw"
+        # fmt and clippy run with a clean env — no coverage instrumentation needed.
+        cargo fmt -p "${package}" -- --check
+        cargo clippy -p "${package}" --all-targets --locked -- -D warnings
+        # Coverage instrumentation is scoped to cargo test ONLY via inline env.
+        # The release build below (artifact=binary) runs as a separate step with
+        # no RUSTFLAGS inherited — guaranteeing the shipped binary is never built
+        # with -Cinstrument-coverage (especially important with [profile.release]
+        # panic = "abort").
+        RUSTFLAGS="-Cinstrument-coverage" \
+          LLVM_PROFILE_FILE="${GITHUB_WORKSPACE}/.ci-coverage/${CRATE_SLUG}/raw/${package}-%p-%m.profraw" \
+          cargo test -p "${package}" --locked
+        if [ "${{ inputs.wasm-target-check }}" = "true" ]; then
+          cargo build -p "${package}" --target wasm32-unknown-unknown --locked
+        fi
 
     - name: cargo build (release)
       if: inputs.artifact == 'binary'
@@ -234,7 +268,9 @@ jobs:
         NEEDS_DOCKER: ${{ inputs.needs-docker }}
       run: |
         set -euo pipefail
+        package='${{ inputs.package }}'
         mkdir -p "${HOME}/.cargo" "${RUNNER_TEMP}/container-home"
+        mkdir -p ".ci-coverage/${CRATE_SLUG}/raw"
         trunk_prefix=""
         if [ "${SERVICE}" = "ui" ]; then
           # Trunk needs to land the wasm bundle into ui/wasm/dist/
@@ -265,6 +301,8 @@ jobs:
           -e CARGO_HOME=/cargo-home \
           -e RUSTUP_HOME=/usr/local/rustup \
           -e CARGO_TARGET_DIR=/work/target \
+          -e CRATE_SLUG="${CRATE_SLUG}" \
+          -e PACKAGE="${package}" \
           -v "${HOME}/.cargo:/cargo-home" \
           -v "${RUNNER_TEMP}/container-home:/tmp/home" \
           -v "${GITHUB_WORKSPACE}:/work" \
@@ -272,11 +310,60 @@ jobs:
           "botwork/${SERVICE}:ci-tools" \
           sh -elc "
             export PATH=/usr/local/cargo/bin:\$PATH
-            ${trunk_prefix}cargo fmt -p ${PACKAGE} -- --check
-            cargo clippy -p ${PACKAGE} --all-targets --locked -- -D warnings
-            cargo test -p ${PACKAGE} --locked
-            cargo build -p ${PACKAGE} --release --locked
+            package=\${PACKAGE}
+            ${trunk_prefix}cargo fmt -p \${package} -- --check
+            cargo clippy -p \${package} --all-targets --locked -- -D warnings
+            # Coverage instrumentation is scoped to cargo test ONLY.
+            # The release build below runs with NO RUSTFLAGS so the binary
+            # staged to .ci-prebuilt/ and baked into the shipped container
+            # image is never coverage-instrumented. Shipping an instrumented
+            # binary is wrong: it inflates binary size and combines poorly
+            # with [profile.release] panic = 'abort'.
+            RUSTFLAGS='-Cinstrument-coverage' \
+              LLVM_PROFILE_FILE='/work/.ci-coverage/'\${CRATE_SLUG}'/raw/'\${package}'-%p-%m.profraw' \
+              cargo test -p \${package} --locked
+            # Release build: clean env — no RUSTFLAGS, no LLVM_PROFILE_FILE.
+            # These are the bytes that will be staged and shipped.
+            cargo build -p \${package} --release --locked
           "
+
+    - name: Build per-crate coverage outputs
+      run: |
+        set -euo pipefail
+        mkdir -p ".ci-coverage/${CRATE_SLUG}/binaries"
+        find target/debug -maxdepth 1 -type f -executable \
+          -exec cp {} ".ci-coverage/${CRATE_SLUG}/binaries/" \; 2>/dev/null || true
+        find target/debug/deps -maxdepth 1 -type f -executable \
+          -exec cp {} ".ci-coverage/${CRATE_SLUG}/binaries/" \; 2>/dev/null || true
+        if ! find ".ci-coverage/${CRATE_SLUG}/raw" -type f -name '*.profraw' | grep -q .; then
+          echo "::error::no .profraw files produced for ${PACKAGE}"
+          exit 1
+        fi
+        # Keep parity with tarpaulin.toml exclude-files (local coverage path).
+        # CI uses grcov --ignore; local uses tarpaulin exclude-files. Both lists
+        # must be kept in sync — see tarpaulin.toml for the canonical rationale
+        # for each exclusion. Note: tarpaulin.toml lists ui/wasm/src/api.rs and
+        # ui/wasm/src/pages/mod.rs individually because the whole botwork-ui-wasm
+        # crate is excluded via `exclude = ["botwork-ui-wasm"]` there; here we
+        # use the broader ui/wasm/src/* which subsumes those specific files.
+        grcov ".ci-coverage/${CRATE_SLUG}/raw" \
+          --binary-path ".ci-coverage/${CRATE_SLUG}/binaries" \
+          --source-dir . \
+          --branch \
+          --ignore-not-existing \
+          --ignore "db/entity/src/*" \
+          --ignore "db/migration/src/*" \
+          --ignore "*/main.rs" \
+          --ignore "ui/wasm/src/*" \
+          --output-type lcov \
+          --output-path ".ci-coverage/${CRATE_SLUG}/lcov.info"
+
+    - name: Upload per-crate coverage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.CRATE_SLUG }}-coverage
+        path: .ci-coverage/${{ env.CRATE_SLUG }}/
+        if-no-files-found: error
 
     # ── Per-crate hadolint ──────────────────────────────────────────────────
     # Lint the same Dockerfile we just built `ci-tools` from. A failure
@@ -335,8 +422,7 @@ jobs:
     # ── Build db-migrate as a fixture (api only today) ────────────────
     # The api smoke lands the schema before exercising its own
     # assertion path — the production sequence (db-migrate.service runs
-    # before api.service on the vm). The round-1 workflow built
-    # this via `earthly +db-migrate-image`; we use `docker buildx` with
+    # before api.service on the vm). We use `docker buildx` with
     # `BINARY_SOURCE=source` so the in-Dockerfile cargo cache mounts
     # kick in. Cheap enough on a single runner; the canonical
     # db-migrate image artifact comes from the dedicated db-migrate
