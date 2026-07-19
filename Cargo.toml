@@ -54,6 +54,11 @@ default-members = [
 # this block is a policy gate, not a style sheet.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# tarpaulin_include is the cfg key used by cargo-tarpaulin to identify items
+# annotated with #[cfg(not(tarpaulin_include))] for coverage exclusion.
+# Declaring it here prevents the `unexpected_cfgs` lint from firing in
+# clippy -D warnings runs while keeping the annotation syntax clean.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 
 # Abort on panic in release builds. This removes the stack unwinder and
 # its dependency on libgcc_s.so.1, so the binaries run on distroless

@@ -110,6 +110,7 @@ async fn force_remove_container_impl<D: DockerApi + ?Sized>(container_name: &str
 
 /// Production wrapper: connect to docker and force-remove a container.
 /// NOT covered by offline unit tests (`connect_docker` requires the docker socket).
+#[cfg(not(tarpaulin_include))]
 async fn force_remove_container(container_name: &str) {
     match connect_docker() {
         Err(e) => {
@@ -129,6 +130,7 @@ async fn force_remove_container(container_name: &str) {
 ///
 /// Idempotent — re-running has no effect once steady state is reached.
 /// Called once at startup from `run()`.
+#[cfg(not(tarpaulin_include))]
 pub async fn recover_live_workers(state: &AppState) {
     let endpoint = state.config_broker_endpoint.clone();
 

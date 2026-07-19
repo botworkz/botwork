@@ -55,6 +55,7 @@ pub use xds::AdsServer;
 /// usually override `ack_wait` / `ack_disabled` from env in
 /// `main.rs`. Tests typically use this as-is or via
 /// `AppState::new` directly.
+#[cfg(not(tarpaulin_include))]
 pub fn build_app_state() -> AppState {
     AppState::new(Arc::new(SessionStore::new()))
 }

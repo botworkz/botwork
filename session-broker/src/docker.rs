@@ -37,6 +37,7 @@ pub(crate) trait DockerApi {
 
 /// Production implementation — connects over the local docker socket.
 /// NOT covered by offline unit tests.
+#[cfg(not(tarpaulin_include))]
 impl DockerApi for Docker {
     fn inspect_container<'a>(
         &'a self,
@@ -66,6 +67,7 @@ impl DockerApi for Docker {
 
 /// Connect to the local docker socket.
 /// NOT covered by offline unit tests.
+#[cfg(not(tarpaulin_include))]
 pub(crate) fn connect_docker() -> Result<Docker, BollardError> {
     Docker::connect_with_local_defaults()
 }

@@ -45,6 +45,32 @@ this table.  Do **not** add exclusions for files that contain real branch
 logic — only generated code, database-only migration runners, and
 process-bootstrap entry points qualify.
 
+### Item-level coverage exclusions
+
+For **specific functions or `impl` blocks** within otherwise-covered files,
+annotate with `#[cfg(not(tarpaulin_include))]`.  This is the correct
+mechanism for:
+
+- `impl DockerApi for Docker` production wrappers and `connect_docker()`
+  in each crate's `docker.rs` — thin bollard passthroughs that require a
+  live docker socket; the *logic* is tested via `FakeDocker`/`SpyDocker`.
+- Production socket-wrapper functions in `recovery.rs`
+  (`force_remove_container`, `recover_live_workers`) that call
+  `connect_docker()` directly.
+- Trivial wiring or passthrough functions in crate `lib.rs` files
+  (`build_app_state`, `run`, `version_string`) where there is no branch
+  logic to test.
+
+Rules for item-level exclusions — stricter than file-level:
+- The item must be **either** (a) a documented socket-only production
+  wrapper **or** (b) a genuinely logic-free re-export / passthrough.
+- Do **not** exclude the `*_impl` seam functions, trait definitions, test
+  doubles (`FakeDocker`/`SpyDocker`), or any function with real branches.
+- Because `tarpaulin_include` is an undeclared cfg key, the workspace
+  `Cargo.toml` declares it via
+  `unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }`
+  so `cargo clippy -D warnings` stays green.
+
 ### Two test tiers
 
 - **Unit tier (no docker):** for `botwork-api`, use the store seam

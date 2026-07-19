@@ -29,6 +29,15 @@
 #     db/migration, botwork-cli, launcher, tools, ui/server).  These
 #     files contain only arg-parsing shell, tokio-runtime setup, and
 #     server bind/serve wiring that is not meaningfully unit-testable.
+#
+# Item-level exclusions (inline #[cfg(not(tarpaulin_include))]):
+#   * impl DockerApi for Docker + connect_docker() in each docker.rs —
+#     thin bollard passthroughs; logic is tested via FakeDocker/SpyDocker.
+#   * force_remove_container + recover_live_workers in recovery.rs —
+#     production socket wrappers calling connect_docker() directly.
+#   * build_app_state in control-plane/src/lib.rs — trivial factory wiring.
+#   * run + version_string in ctl/src/lib.rs — process-args wiring /
+#     build-time passthrough.
 
 [default]
 engine = "Llvm"
