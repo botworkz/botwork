@@ -14,6 +14,7 @@ FROM rust-toolchain AS build-source
 WORKDIR /build
 COPY api/ ./api/
 COPY api-core/ ./api-core/
+COPY auth-broker/ ./auth-broker/
 COPY ui/ ./ui/
 COPY bootstrap/ ./bootstrap/
 COPY cli/ ./cli/
@@ -25,6 +26,7 @@ COPY opaque-handshake/ ./opaque-handshake/
 COPY session-broker/ ./session-broker/
 COPY ctl/ ./ctl/
 COPY test-support/ ./test-support/
+COPY vault/ ./vault/
 COPY version/ ./version/
 COPY VERSION ./VERSION
 COPY Cargo.toml Cargo.lock ./
