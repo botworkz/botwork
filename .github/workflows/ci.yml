@@ -61,7 +61,11 @@ jobs:
       matrix:
         # `crate` is the workspace-relative directory that owns the
         # Dockerfile + smoke.sh for container artifacts.
-        # `service` is the image suffix (`botwork/<service>:local`).
+        # `service` is the image suffix (`botwork/<service>:local`) and
+        # the matrix job / check display name. Keep it BARE (no botwork-
+        # prefix) so job names read `api-core`, `ctl`, ... consistent
+        # with the original per-crate pipelines. The botwork/ prefix
+        # lives in the image tag path, not here.
         # `package`/`binary` are the cargo names. For the simple cases
         # the four collapse, but we declare them explicitly so the
         # divergences for `db/migration` (image is `db-migrate`,
@@ -107,50 +111,50 @@ jobs:
           binary: botwork-ui-server
           artifact: container
         - crate: cli
-          service: botwork-cli
+          service: cli
           package: botwork-cli
           binary: bw
           artifact: binary
         - crate: launcher
-          service: botwork-launcher
+          service: launcher
           package: botwork-launcher
           binary: botwork-launcher
           artifact: binary
         - crate: ctl
-          service: botwork-ctl
+          service: ctl
           package: botwork-ctl
           binary: botctl
           artifact: binary
         - crate: api-core
-          service: botwork-api-core
+          service: api-core
           package: botwork-api-core
           binary: ''
           artifact: none
         - crate: db/entity
-          service: botwork-entity
+          service: entity
           package: botwork-entity
           binary: ''
           artifact: none
         - crate: version
-          service: botwork-version
+          service: version
           package: botwork-version
           binary: ''
           artifact: none
         - crate: ui/wasm
-          service: botwork-ui-wasm
+          service: ui-wasm
           package: botwork-ui-wasm
           binary: ''
           artifact: none
           wasm-target-check: true
         - crate: bootstrap
-          service: botwork-bootstrap
+          service: bootstrap
           package: botwork-bootstrap
           binary: ''
           artifact: none
         - crate: opaque-handshake
           # Keep `service` populated for a uniform matrix/job-display shape
           # across artifact types; artifact=none skips all image behavior.
-          service: botwork-opaque-handshake
+          service: opaque-handshake
           package: botwork-opaque-handshake
           binary: ''
           artifact: none
