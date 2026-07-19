@@ -435,4 +435,31 @@ mod tests {
             std::env::set_var("HOME", v);
         }
     }
+
+    #[test]
+    fn read_and_delete_surface_non_notfound_fs_errors() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("BOTWORK_LOGIN_KEYRING_DIR", dir.path());
+
+        // Create a directory where the tenant file should be so read_to_string/remove_file
+        // both fail with a non-NotFound error path.
+        let tenant_path = dir.path().join("phlax.json");
+        std::fs::create_dir_all(&tenant_path).unwrap();
+
+        let store = KeyringStore::new();
+        let read_err = store.read("phlax").unwrap_err();
+        assert!(
+            matches!(read_err, LoginError::Keyring(_)),
+            "got {read_err:?}"
+        );
+
+        let delete_err = store.delete("phlax").unwrap_err();
+        assert!(
+            matches!(delete_err, LoginError::Keyring(_)),
+            "got {delete_err:?}"
+        );
+
+        std::env::remove_var("BOTWORK_LOGIN_KEYRING_DIR");
+    }
 }
