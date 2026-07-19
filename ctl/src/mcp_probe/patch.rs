@@ -1,556 +1,292 @@
-//! Image-label patching: crane fast path, buildx fallback.
+//! Image-label patching via the local docker daemon.
 //!
-//! ## Why two paths
+//! `patch_image` stamps a new label set onto `image_in` and writes the
+//! result to `image_out` by:
 //!
-//! `crane mutate --label k=v <ref>` rewrites only the OCI config
-//! blob — no layer rebuild, ~100ms. It's the production default
-//! because the producer-side want is "attach labels without changing
-//! the binary". The fallback exists for environments where crane
-//! isn't installed (external-plugin wrappers we don't control); it
-//! shells out to `docker buildx build` with a single-line
-//! `FROM <src>` Dockerfile + `--label` flags. Slower (~10s for the
-//! buildx warm-up) but functionally equivalent.
+//! 1. Creating a stopped container from `image_in`.
+//! 2. Committing it with a `ContainerConfig { labels }` override,
+//!    producing a new local image tagged as `image_out`.
+//! 3. Removing the temporary container.
 //!
-//! Both paths produce a byte-identical label set on the resulting
-//! image config — the difference is only in how the config blob
-//! gets there. `verify` runs `docker inspect` afterwards so the
-//! actual on-disk labels are what's compared, not the side-channel
-//! we used to write them.
+//! This is the daemon-native analog of what `crane mutate --tag` did
+//! previously — it rewrites the image config locally without touching
+//! a registry.  The `docker buildx` fallback that existed for
+//! environments where `crane` was absent has been deleted: a bollard
+//! call is a library call and is never "missing".
 
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::collections::HashMap;
 
 use thiserror::Error;
 
-/// Patch `image_in` with the supplied label set, writing the
-/// result to `image_out`. Tries crane first; falls back to buildx
-/// on `crane not found`. Surfaces any non-availability error
-/// verbatim — a crane that exists but fails should NOT silently
-/// fall back to buildx because that masks broken-registry issues.
+use super::docker::{connect_docker, is_socket_missing, DockerApi};
+
+/// Patch `image_in` with the supplied label set, writing the result to
+/// `image_out` in the local daemon image store.
 pub fn patch_image(
     image_in: &str,
     image_out: &str,
     labels: &BTreeMap<String, String>,
 ) -> Result<(), PatchError> {
-    match crane_mutate(image_in, image_out, labels) {
-        Ok(()) => Ok(()),
-        Err(PatchError::CraneMissing) => match buildx_label(image_in, image_out, labels) {
-            // Both image-patch paths are unavailable — surface the
-            // combined missing-tool error rather than only the
-            // buildx-side one, because the operator's fix is "install
-            // either crane or docker buildx", not just buildx. Maps
-            // to exit 7 ("image-patching tool unavailable / failed")
-            // in the CLI exit-code table.
-            Err(PatchError::BuildxMissing) => Err(PatchError::BothMissing),
-            other => other,
-        },
-        Err(other) => Err(other),
-    }
+    let docker = connect_docker().map_err(|e| {
+        if is_socket_missing(&e) {
+            PatchError::DockerMissing
+        } else {
+            PatchError::Patch(e.to_string())
+        }
+    })?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PatchError::Patch(format!("failed to create tokio runtime: {e}")))?;
+    rt.block_on(patch_image_impl(image_in, image_out, labels, &docker))
 }
 
-/// `crane mutate --label k=v --tag <dst> <src>` — config-blob-only
-/// rewrite. The output tag lives locally (we don't push); the
-/// `--tag` arg overrides the target tag in the config so the local
-/// daemon's `docker image inspect <image_out>` sees the labels.
-fn crane_mutate(
+/// Inner async implementation; driven against a [`DockerApi`] seam so
+/// tests can exercise the full label-commit flow without a real daemon.
+async fn patch_image_impl<D: DockerApi + ?Sized>(
     image_in: &str,
     image_out: &str,
     labels: &BTreeMap<String, String>,
+    docker: &D,
 ) -> Result<(), PatchError> {
-    let mut cmd = Command::new("crane");
-    cmd.arg("mutate");
-    for (k, v) in labels {
-        cmd.arg("--label").arg(format!("{k}={v}"));
-    }
-    cmd.arg("--tag").arg(image_out).arg(image_in);
+    use bollard::models::ContainerCreateBody;
 
-    let output = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
-        Ok(o) => o,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PatchError::CraneMissing);
-        }
-        Err(err) => return Err(PatchError::Io(err.to_string())),
+    // Split image_out into repo + tag for CommitContainerOptions.
+    let (repo, tag) = parse_image_ref(image_out);
+
+    // 1. Create a stopped container from image_in (don't start it).
+    let body = ContainerCreateBody {
+        image: Some(image_in.to_string()),
+        ..Default::default()
     };
+    let container_id = docker
+        .create_container(body)
+        .await
+        .map_err(|e| PatchError::Patch(format!("create container from {image_in}: {e}")))?;
 
-    if !output.status.success() {
-        return Err(PatchError::CraneFailed {
-            stderr: String::from_utf8_lossy(&output.stderr)
-                .trim_end()
-                .to_string(),
-        });
-    }
-    Ok(())
+    // 2. Commit the container with the new label set, producing image_out.
+    let label_map: HashMap<String, String> = labels.clone().into_iter().collect();
+    let result = docker
+        .commit_container(&container_id, repo, tag, label_map)
+        .await;
+
+    // 3. Remove the temporary container regardless of commit success.
+    let _ = docker.remove_container(&container_id).await;
+
+    result
+        .map(|_| ())
+        .map_err(|e| PatchError::Patch(format!("commit {image_in} → {image_out}: {e}")))
 }
 
-/// `docker buildx build --label k=v ...` against an inline
-/// `FROM <src>` Dockerfile. Used when crane isn't available.
+/// Split an image reference `repo:tag` into `(repo, tag)`.
 ///
-/// We pipe the Dockerfile via stdin (`-f -`) so we don't have to
-/// create a temp directory; the build context is `.` but the
-/// trivial Dockerfile doesn't COPY anything so the context size
-/// is moot.
-fn buildx_label(
-    image_in: &str,
-    image_out: &str,
-    labels: &BTreeMap<String, String>,
-) -> Result<(), PatchError> {
-    let dockerfile = format!("FROM {image_in}\n");
-
-    let mut cmd = Command::new("docker");
-    cmd.args(["buildx", "build", "--load", "-t", image_out, "-f", "-"]);
-    for (k, v) in labels {
-        cmd.arg("--label").arg(format!("{k}={v}"));
-    }
-    // Use an empty build context — `-` after the flags is a
-    // tar-on-stdin convention buildx accepts but we don't need
-    // since FROM-only has no COPY. Passing `.` from cwd works.
-    cmd.arg(".");
-
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => PatchError::BuildxMissing,
-            _ => PatchError::Io(err.to_string()),
-        })?;
-
-    // Write the inline Dockerfile to the child's stdin. If the child
-    // has already exited (e.g. it failed to parse args, or a stub that
-    // ignores stdin) the write races the closed read end and returns
-    // EPIPE / BrokenPipe. That is NOT the real failure signal — the
-    // authoritative outcome is the child's exit status and stderr,
-    // which we inspect below. Swallow BrokenPipe here so a
-    // fast-exiting docker doesn't masquerade as an I/O error; any
-    // genuine problem still surfaces via BuildxFailed.
-    if let Err(err) = child
-        .stdin
-        .as_mut()
-        .expect("stdin piped")
-        .write_all(dockerfile.as_bytes())
-    {
-        if err.kind() != std::io::ErrorKind::BrokenPipe {
-            return Err(PatchError::Io(err.to_string()));
+/// The tag is the suffix after the **last** `:` that is not followed
+/// by a `/` (which would indicate a registry host:port rather than a
+/// tag separator).  If no tag is found, `"latest"` is returned.
+fn parse_image_ref(image: &str) -> (&str, &str) {
+    if let Some(pos) = image.rfind(':') {
+        let after = &image[pos + 1..];
+        if !after.contains('/') {
+            return (&image[..pos], after);
         }
     }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|err| PatchError::Io(err.to_string()))?;
-
-    if !output.status.success() {
-        return Err(PatchError::BuildxFailed {
-            stderr: String::from_utf8_lossy(&output.stderr)
-                .trim_end()
-                .to_string(),
-        });
-    }
-    Ok(())
+    (image, "latest")
 }
 
 #[derive(Debug, Error)]
 pub enum PatchError {
-    #[error("neither `crane` nor `docker buildx` is available")]
-    BothMissing,
+    /// The docker socket is not reachable.  Maps to exit 7
+    /// ("image-patching tool unavailable / failed") in the CLI
+    /// exit-code table.
+    #[error("docker socket not reachable")]
+    DockerMissing,
 
-    /// Not directly returned from [`patch_image`] — used by
-    /// `crane_mutate` to signal the fallback.
-    #[error("crane not on PATH; falling back to buildx")]
-    CraneMissing,
-
-    #[error("crane mutate failed: {stderr}")]
-    CraneFailed { stderr: String },
-
-    #[error("docker buildx not available on PATH")]
-    BuildxMissing,
-
-    #[error("docker buildx label-patch failed: {stderr}")]
-    BuildxFailed { stderr: String },
-
-    #[error("io error during image patch: {0}")]
-    Io(String),
+    /// A daemon API call failed (create, commit, or remove).
+    #[error("image patch failed: {0}")]
+    Patch(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_probe::docker::test_support::FakeDocker;
 
-    /// Mutex that serialises every test that mutates the process-global
-    /// PATH environment variable. Tests in a single crate share one
-    /// process and run concurrently by default; without this guard
-    /// they race on `set_var`/`remove_var` and flake unpredictably.
-    static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Helper: write a shell script to `dir/<name>` and make it executable.
-    #[cfg(unix)]
-    fn write_fake_bin(dir: &std::path::Path, name: &str, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join(name);
-        std::fs::write(&path, script).expect("write fake binary");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake binary");
-    }
-
-    /// RAII guard that holds `PATH_MUTEX` while also restoring the
-    /// original PATH value on drop.  Always construct via `lock_path`.
-    struct PathGuard(
-        #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
-        Option<std::ffi::OsString>,
-    );
-    impl Drop for PathGuard {
-        fn drop(&mut self) {
-            match self.1.take() {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
-            }
-            // MutexGuard drops after the PATH is restored.
-        }
-    }
-
-    /// Acquire the PATH mutex and return a guard that restores the
-    /// original PATH when dropped.
-    fn lock_path() -> PathGuard {
-        let guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var_os("PATH");
-        PathGuard(guard, prior)
-    }
-
-    fn minimal_labels() -> BTreeMap<String, String> {
-        let mut labels = BTreeMap::new();
-        labels.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
-        labels
-    }
-
-    #[test]
-    fn variants_have_distinct_display_strings() {
-        // Sanity test on the error surface: the operator pages on
-        // these strings, so a future refactor that collapses them
-        // into a single "patch failed" Display string would lose
-        // operator-meaningful detail. Cheap to lock here.
-        let a = format!("{}", PatchError::CraneFailed { stderr: "x".into() });
-        let b = format!("{}", PatchError::BuildxFailed { stderr: "x".into() });
-        let c = format!("{}", PatchError::CraneMissing);
-        let d = format!("{}", PatchError::BuildxMissing);
-        let e = format!("{}", PatchError::BothMissing);
-        for (i, x) in [&a, &b, &c, &d, &e].iter().enumerate() {
-            for (j, y) in [&a, &b, &c, &d, &e].iter().enumerate() {
-                if i != j {
-                    assert_ne!(
-                        x, y,
-                        "PatchError displays at index {i} and {j} are equal: {x}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn io_error_display_includes_message() {
-        let err = PatchError::Io("write failed: disk full".into());
-        let msg = format!("{err}");
-        assert!(msg.contains("write failed"), "{msg}");
-        assert!(msg.contains("disk full"), "{msg}");
-    }
-
-    #[test]
-    fn crane_failed_display_includes_stderr() {
-        let err = PatchError::CraneFailed {
-            stderr: "registry auth failed".into(),
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("registry auth failed"), "{msg}");
-    }
-
-    #[test]
-    fn buildx_failed_display_includes_stderr() {
-        let err = PatchError::BuildxFailed {
-            stderr: "buildx daemon not running".into(),
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("buildx daemon not running"), "{msg}");
-    }
-
-    #[test]
-    fn both_missing_surfaces_when_crane_and_buildx_unavailable() {
-        // Force the fallback chain to traverse a missing crane and
-        // a missing docker by running with a PATH that contains
-        // neither. The fallback in `patch_image` should land on
-        // `PatchError::BothMissing` — that's the operator-actionable
-        // signal "install one of crane or docker buildx".
-        //
-        // We can't easily mock `Command::new` here, so the test
-        // restricts PATH to a directory we control and that holds
-        // neither binary. On the CI runner this is the same
-        // RUNNER_TEMP write we use elsewhere; on dev machines tmp
-        // serves the same purpose. Skip if we can't make a temp
-        // dir (vanishingly rare).
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let err = patch_image("in:tag", "out:tag", &minimal_labels()).unwrap_err();
-        assert!(
-            matches!(err, PatchError::BothMissing),
-            "expected BothMissing, got {err:?}"
-        );
-    }
-
-    // ── crane_mutate: success and failure paths ─────────────────────────────
-
-    #[cfg(unix)]
-    #[test]
-    fn crane_mutate_succeeds_when_crane_exits_zero() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        write_fake_bin(tmp.path(), "crane", "#!/bin/sh\nexit 0\n");
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let result = crane_mutate("in:tag", "out:tag", &minimal_labels());
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn crane_mutate_returns_crane_failed_when_crane_exits_nonzero() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        write_fake_bin(
-            tmp.path(),
-            "crane",
-            "#!/bin/sh\necho 'registry error' >&2\nexit 1\n",
-        );
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let err = crane_mutate("in:tag", "out:tag", &minimal_labels()).unwrap_err();
-        assert!(
-            matches!(err, PatchError::CraneFailed { .. }),
-            "expected CraneFailed, got {err:?}"
-        );
-        let msg = format!("{err}");
-        assert!(msg.contains("registry error"), "{msg}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn crane_mutate_returns_crane_missing_when_not_on_path() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        // Empty tempdir: no crane binary at all
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let err = crane_mutate("in:tag", "out:tag", &minimal_labels()).unwrap_err();
-        assert!(
-            matches!(err, PatchError::CraneMissing),
-            "expected CraneMissing, got {err:?}"
-        );
-    }
-
-    // ── buildx_label: success and failure paths ─────────────────────────────
-
-    #[cfg(unix)]
-    #[test]
-    fn buildx_label_succeeds_when_docker_exits_zero() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        // The buildx_label fn runs `docker buildx build ...` and pipes a
-        // Dockerfile via stdin. The fake docker drains stdin (`cat`) then
-        // exits 0, so it consumes the piped Dockerfile before exiting and
-        // doesn't race the write into an EPIPE.
-        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\ncat >/dev/null\nexit 0\n");
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let result = buildx_label("in:tag", "out:tag", &minimal_labels());
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn buildx_label_returns_buildx_failed_when_docker_exits_nonzero() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        write_fake_bin(
-            tmp.path(),
-            "docker",
-            "#!/bin/sh\ncat >/dev/null\necho 'buildx daemon not running' >&2\nexit 1\n",
-        );
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let err = buildx_label("in:tag", "out:tag", &minimal_labels()).unwrap_err();
-        assert!(
-            matches!(err, PatchError::BuildxFailed { .. }),
-            "expected BuildxFailed, got {err:?}"
-        );
-        let msg = format!("{err}");
-        assert!(msg.contains("buildx daemon not running"), "{msg}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn buildx_label_returns_buildx_missing_when_docker_not_on_path() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        // Empty tempdir: no docker binary
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let err = buildx_label("in:tag", "out:tag", &minimal_labels()).unwrap_err();
-        assert!(
-            matches!(err, PatchError::BuildxMissing),
-            "expected BuildxMissing, got {err:?}"
-        );
-    }
-
-    // ── patch_image: fallback chain ─────────────────────────────────────────
-
-    #[cfg(unix)]
-    #[test]
-    fn patch_image_uses_crane_when_available_and_succeeds() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        write_fake_bin(tmp.path(), "crane", "#!/bin/sh\nexit 0\n");
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let result = patch_image("in:tag", "out:tag", &minimal_labels());
-        assert!(
-            result.is_ok(),
-            "expected Ok when crane succeeds: {result:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn patch_image_falls_back_to_buildx_when_crane_missing() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        // No crane; docker buildx drains stdin then exits 0
-        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\ncat >/dev/null\nexit 0\n");
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let result = patch_image("in:tag", "out:tag", &minimal_labels());
-        assert!(
-            result.is_ok(),
-            "expected Ok via buildx fallback: {result:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn patch_image_surfaces_crane_failure_without_falling_back() {
-        // crane exists but fails → should NOT fall back to buildx, but
-        // surface the crane error directly.
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        write_fake_bin(
-            tmp.path(),
-            "crane",
-            "#!/bin/sh\necho 'push failed' >&2\nexit 1\n",
-        );
-        write_fake_bin(tmp.path(), "docker", "#!/bin/sh\ncat >/dev/null\nexit 0\n");
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let err = patch_image("in:tag", "out:tag", &minimal_labels()).unwrap_err();
-        assert!(
-            matches!(err, PatchError::CraneFailed { .. }),
-            "expected CraneFailed (no fallback to buildx when crane fails), got {err:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn patch_image_buildx_fallback_failure_returns_buildx_failed() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        // No crane; docker buildx fails
-        write_fake_bin(
-            tmp.path(),
-            "docker",
-            "#!/bin/sh\ncat >/dev/null\necho 'daemon error' >&2\nexit 1\n",
-        );
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
-        let err = patch_image("in:tag", "out:tag", &minimal_labels()).unwrap_err();
-        assert!(
-            matches!(err, PatchError::BuildxFailed { .. }),
-            "expected BuildxFailed, got {err:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn crane_mutate_passes_all_labels_as_flag_pairs() {
-        // Verify that for N labels, 2×N `--label k=v` flag pairs appear
-        // in the args the fake crane receives (via its stdin/argv).
-        // The fake crane prints its argv to stdout for inspection.
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        let script_path = tmp.path().join("crane_args.txt");
-        let script_path_str = script_path.to_string_lossy();
-        write_fake_bin(
-            tmp.path(),
-            "crane",
-            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {script_path_str}\nexit 0\n"),
-        );
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
-
+    fn two_labels() -> BTreeMap<String, String> {
         let mut labels = BTreeMap::new();
         labels.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
         labels.insert("org.botwork.mcp.port".to_string(), "8000".to_string());
-        crane_mutate("in:tag", "out:tag", &labels).expect("should succeed");
-
-        let written = std::fs::read_to_string(&script_path).expect("crane_args.txt");
-        assert!(written.contains("--label"), "args must include --label");
-        assert!(
-            written.contains("org.botwork.mcp.name=echo"),
-            "must include name label"
-        );
-        assert!(
-            written.contains("org.botwork.mcp.port=8000"),
-            "must include port label"
-        );
-        assert!(written.contains("--tag"), "args must include --tag out:tag");
+        labels
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn buildx_label_swallow_broken_pipe_and_reports_child_failure() {
-        let Ok(tmp) = tempfile::TempDir::new() else {
-            return;
-        };
-        write_fake_bin(
-            tmp.path(),
-            "docker",
-            "#!/bin/sh\necho 'fast fail' >&2\nexit 1\n",
-        );
-        let _guard = lock_path();
-        std::env::set_var("PATH", tmp.path());
+    // ── parse_image_ref ─────────────────────────────────────────────────────
 
-        let err = buildx_label("in:tag", "out:tag", &minimal_labels()).unwrap_err();
-        assert!(matches!(err, PatchError::BuildxFailed { .. }), "{err:?}");
-        assert!(format!("{err}").contains("fast fail"));
+    #[test]
+    fn parse_image_ref_splits_on_last_colon() {
+        assert_eq!(parse_image_ref("repo/name:tag"), ("repo/name", "tag"));
+        assert_eq!(
+            parse_image_ref("ghcr.io/org/name:1.0.0"),
+            ("ghcr.io/org/name", "1.0.0")
+        );
+        assert_eq!(parse_image_ref("name:latest"), ("name", "latest"));
+    }
+
+    #[test]
+    fn parse_image_ref_defaults_tag_when_no_colon() {
+        assert_eq!(
+            parse_image_ref("registry.io/name"),
+            ("registry.io/name", "latest")
+        );
+        assert_eq!(parse_image_ref("plain-name"), ("plain-name", "latest"));
+    }
+
+    #[test]
+    fn parse_image_ref_treats_host_port_colon_as_repo() {
+        // "ghcr.io:443/org/name" has no tag — defaults to "latest"
+        assert_eq!(
+            parse_image_ref("ghcr.io:443/org/name"),
+            ("ghcr.io:443/org/name", "latest")
+        );
+    }
+
+    // ── patch_image_impl via FakeDocker ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn patch_succeeds_and_commits_labels() {
+        let fake = FakeDocker::default()
+            .with_create_container(Ok("tmp-container-id".to_string()))
+            .with_commit_container(Ok("sha256:newimgid".to_string()))
+            .with_remove_container(Ok(()));
+
+        let labels = two_labels();
+        let result = patch_image_impl("in:latest", "out:labeled", &labels, &fake).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn patch_fails_when_create_fails() {
+        use bollard::errors::Error as BollardError;
+        let fake = FakeDocker::default().with_create_container(Err(
+            BollardError::DockerResponseServerError {
+                status_code: 500,
+                message: "daemon overloaded".into(),
+            },
+        ));
+
+        let err = patch_image_impl("in:latest", "out:labeled", &two_labels(), &fake)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PatchError::Patch(_)), "{err:?}");
+        let msg = format!("{err}");
+        assert!(msg.contains("create container"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn patch_fails_when_commit_fails_and_still_removes_container() {
+        use bollard::errors::Error as BollardError;
+        let fake = FakeDocker::default()
+            .with_create_container(Ok("tmp-id".to_string()))
+            .with_commit_container(Err(BollardError::DockerResponseServerError {
+                status_code: 500,
+                message: "commit error".into(),
+            }))
+            .with_remove_container(Ok(()));
+
+        let err = patch_image_impl("in:latest", "out:labeled", &two_labels(), &fake)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PatchError::Patch(_)), "{err:?}");
+        let msg = format!("{err}");
+        assert!(msg.contains("commit"), "{msg}");
+        // The remove_container result was consumed — confirming it was called.
+    }
+
+    /// Load-bearing contract: every key=value in `labels` is passed to
+    /// `commit_container` as a label on the new image config.
+    #[tokio::test]
+    async fn patch_passes_all_labels_to_commit() {
+        use crate::mcp_probe::docker::DockerApi;
+        use bollard::errors::Error as BollardError;
+        use bollard::models::{ContainerCreateBody, ImageInspect};
+        use futures_util::future::BoxFuture;
+        use futures_util::FutureExt;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        // Spy docker that captures the labels passed to commit_container.
+        #[derive(Default)]
+        struct SpyDocker {
+            committed_labels: Arc<Mutex<Option<HashMap<String, String>>>>,
+        }
+
+        impl DockerApi for SpyDocker {
+            fn inspect_image<'a>(
+                &'a self,
+                _name: &'a str,
+            ) -> BoxFuture<'a, Result<ImageInspect, BollardError>> {
+                async { panic!("unexpected") }.boxed()
+            }
+            fn create_container<'a>(
+                &'a self,
+                _config: ContainerCreateBody,
+            ) -> BoxFuture<'a, Result<String, BollardError>> {
+                async { Ok("spy-container".to_string()) }.boxed()
+            }
+            fn start_container<'a>(
+                &'a self,
+                _id: &'a str,
+            ) -> BoxFuture<'a, Result<(), BollardError>> {
+                async { panic!("unexpected") }.boxed()
+            }
+            fn remove_container<'a>(
+                &'a self,
+                _id: &'a str,
+            ) -> BoxFuture<'a, Result<(), BollardError>> {
+                async { Ok(()) }.boxed()
+            }
+            fn commit_container<'a>(
+                &'a self,
+                _container_id: &'a str,
+                _repo: &'a str,
+                _tag: &'a str,
+                labels: HashMap<String, String>,
+            ) -> BoxFuture<'a, Result<String, BollardError>> {
+                *self.committed_labels.lock().unwrap() = Some(labels);
+                async { Ok("sha256:spy".to_string()) }.boxed()
+            }
+        }
+
+        let spy = SpyDocker::default();
+        let captured = Arc::clone(&spy.committed_labels);
+        let labels = two_labels();
+        patch_image_impl("in:latest", "out:tag", &labels, &spy)
+            .await
+            .expect("ok");
+
+        let got = captured.lock().unwrap().clone().expect("commit was called");
+        assert_eq!(
+            got.get("org.botwork.mcp.name").map(String::as_str),
+            Some("echo")
+        );
+        assert_eq!(
+            got.get("org.botwork.mcp.port").map(String::as_str),
+            Some("8000")
+        );
+        assert_eq!(got.len(), labels.len(), "all labels passed through");
+    }
+
+    // ── PatchError display ───────────────────────────────────────────────────
+
+    #[test]
+    fn docker_missing_display() {
+        let msg = format!("{}", PatchError::DockerMissing);
+        assert!(msg.contains("docker"), "{msg}");
+    }
+
+    #[test]
+    fn patch_error_display_includes_detail() {
+        let err = PatchError::Patch("create container from bad:tag: 500 daemon error".into());
+        let msg = format!("{err}");
+        assert!(msg.contains("daemon error"), "{msg}");
     }
 }

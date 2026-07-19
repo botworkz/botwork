@@ -32,19 +32,22 @@
 //! | 4    | container failed to start / `:port` never accepted         |
 //! | 5    | MCP handshake error (server returned JSON-RPC error, malformed response) |
 //! | 6    | label drift detected (verify only)                         |
-//! | 7    | image-patching tool unavailable / failed (crane + buildx both unusable) |
+//! | 7    | image-patching failed (docker socket unreachable or commit error) |
 //!
 //! ## File layout
 //!
 //! * [`package`] — wraps the [`botwork_api_core::package`] loader
 //!   with a thin io-error layer so the CLI surface stays uniform
 //!   with [`crate::bootstrap`]'s `LoadError`.
-//! * [`probe`] — container lifecycle + MCP handshake.
+//! * [`docker`] — shared `DockerApi` seam (`bollard`) used by `patch`,
+//!   `verify`, and `probe`.
+//! * [`probe`] — container lifecycle (bollard) + MCP handshake.
 //! * [`compose`] — captured catalog + package → label set.
-//! * [`patch`] — crane (fast path) / buildx (fallback) image patching.
-//! * [`verify`] — verify-mode comparison.
+//! * [`patch`] — bollard `commit_container` image-label patching.
+//! * [`verify`] — verify-mode comparison (bollard `inspect_image`).
 
 pub mod compose;
+pub mod docker;
 pub mod package;
 pub mod patch;
 pub mod probe;
@@ -265,7 +268,7 @@ pub fn run(argv: &[String]) -> Result<i32, McpProbeError> {
             // input image and compares against what the probe just
             // produced. Drift surfaces as exit 6, not exit 0 — so
             // CI can wire the action's status straight to a gate.
-            verify::verify(&args.image_in, &args.runtime, &labels)?;
+            verify::verify(&args.image_in, &labels)?;
             info!("{}", verify_success_message(&args.image_in, labels.len()));
             Ok(0)
         }

@@ -1,9 +1,9 @@
 //! Verify-mode label-drift comparison.
 //!
-//! `docker image inspect <ref>` returns the OCI config including
-//! `.Config.Labels`. We extract every key starting with the v1
+//! `bollard::Docker::inspect_image` returns the typed OCI config for a
+//! local image.  We extract every key starting with the v1
 //! `org.botwork.mcp.` namespace and compare against the freshly
-//! composed label set. Drift on any key — missing, extra, or
+//! composed label set.  Drift on any key — missing, extra, or
 //! value-differs — surfaces as [`VerifyError::Drift`], which maps
 //! to exit code 6 ("label drift detected").
 //!
@@ -16,28 +16,41 @@
 //! else is the operator's territory.
 
 use std::collections::BTreeMap;
-use std::process::{Command, Stdio};
 
-use serde_json::Value as JsonValue;
+use bollard::models::ImageInspect;
 use thiserror::Error;
 
 use crate::mcp_probe::compose::LABEL_NAMESPACE;
+use crate::mcp_probe::docker::{connect_docker, is_not_found, is_socket_missing, DockerApi};
 
-/// Run `<runtime> image inspect <image>` and compare its labels
+/// Inspect `image` via the local docker daemon and compare its labels
 /// (filtered to the v1 namespace) against `expected`.
-pub fn verify(
-    image: &str,
-    runtime: &str,
-    expected: &BTreeMap<String, String>,
-) -> Result<(), VerifyError> {
-    let actual = read_image_labels(runtime, image)?;
+pub fn verify(image: &str, expected: &BTreeMap<String, String>) -> Result<(), VerifyError> {
+    let docker = connect_docker().map_err(|e| {
+        if is_socket_missing(&e) {
+            VerifyError::DockerMissing
+        } else {
+            VerifyError::InspectFailed {
+                image: image.to_string(),
+                stderr: e.to_string(),
+            }
+        }
+    })?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| VerifyError::InspectFailed {
+            image: image.to_string(),
+            stderr: format!("tokio runtime: {e}"),
+        })?;
+    let actual = rt.block_on(read_image_labels_impl(image, &docker))?;
     compare_labels_in_namespace(&actual, expected)
 }
 
 /// Compare `actual` (a raw label map from inspect, possibly containing
 /// non-namespace keys) against `expected` (the re-probed namespace-scoped
 /// label set).  Factored out of [`verify`] so tests can exercise the
-/// comparison/drift logic without spawning a container runtime.
+/// comparison/drift logic without the docker layer.
 pub(crate) fn compare_labels_in_namespace(
     actual: &BTreeMap<String, String>,
     expected: &BTreeMap<String, String>,
@@ -50,66 +63,42 @@ pub(crate) fn compare_labels_in_namespace(
     Err(VerifyError::Drift { drift })
 }
 
-/// `docker image inspect <ref>` and parse `.[0].Config.Labels`.
+/// Call `Docker::inspect_image` and extract `Config.Labels`.
 /// Returns an empty map if the image has no labels (rather than
 /// failing) so an as-yet-unlabeled image diffs cleanly against the
 /// expected set in describe-from-zero scenarios.
-fn read_image_labels(runtime: &str, image: &str) -> Result<BTreeMap<String, String>, VerifyError> {
-    let output = Command::new(runtime)
-        .args(["image", "inspect", image])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => VerifyError::RuntimeMissing(runtime.to_string()),
-            _ => VerifyError::Io(err.to_string()),
-        })?;
-    if !output.status.success() {
-        return Err(VerifyError::InspectFailed {
-            image: image.to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr)
-                .trim_end()
-                .to_string(),
-        });
-    }
-    parse_inspect_output(&output.stdout)
+async fn read_image_labels_impl<D: DockerApi + ?Sized>(
+    image: &str,
+    docker: &D,
+) -> Result<BTreeMap<String, String>, VerifyError> {
+    let inspect = docker.inspect_image(image).await.map_err(|e| {
+        if is_not_found(&e) {
+            VerifyError::InspectFailed {
+                image: image.to_string(),
+                stderr: format!("no such image: {image}"),
+            }
+        } else if is_socket_missing(&e) {
+            VerifyError::DockerMissing
+        } else {
+            VerifyError::InspectFailed {
+                image: image.to_string(),
+                stderr: e.to_string(),
+            }
+        }
+    })?;
+    labels_from_inspect(&inspect)
 }
 
-/// Parse the raw stdout bytes from `<runtime> image inspect <ref>` into a
-/// label map.  Extracted from [`read_image_labels`] so the JSON-parsing
-/// logic is unit-testable against synthetic payloads without invoking a
-/// container runtime.
-pub(crate) fn parse_inspect_output(stdout: &[u8]) -> Result<BTreeMap<String, String>, VerifyError> {
-    let docs: JsonValue = serde_json::from_slice(stdout)
-        .map_err(|err| VerifyError::InspectShape(format!("docker inspect decode: {err}")))?;
-    let first = docs.as_array().and_then(|a| a.first()).ok_or_else(|| {
-        VerifyError::InspectShape("docker inspect returned empty array".to_string())
-    })?;
-    let labels = first
-        .get("Config")
-        .and_then(|c| c.get("Labels"))
-        .cloned()
-        .unwrap_or(JsonValue::Null);
-    let mut out = BTreeMap::new();
-    if labels.is_null() {
-        return Ok(out);
+/// Extract the label map from a typed [`ImageInspect`] response.
+///
+/// Returns an empty map when the image has no labels (Config.Labels is
+/// absent or null) — so an as-yet-unlabeled image diffs cleanly.
+fn labels_from_inspect(inspect: &ImageInspect) -> Result<BTreeMap<String, String>, VerifyError> {
+    let labels = inspect.config.as_ref().and_then(|c| c.labels.as_ref());
+    match labels {
+        None => Ok(BTreeMap::new()),
+        Some(map) => Ok(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
     }
-    let labels = labels
-        .as_object()
-        .ok_or_else(|| VerifyError::InspectShape("Config.Labels is not an object".to_string()))?;
-    for (k, v) in labels {
-        if let Some(s) = v.as_str() {
-            out.insert(k.clone(), s.to_string());
-        } else {
-            // OCI config Labels are spec'd as map<string,string>.
-            // A non-string value would be a producer-side bug;
-            // surface it loudly.
-            return Err(VerifyError::InspectShape(format!(
-                "label {k:?} has non-string value"
-            )));
-        }
-    }
-    Ok(out)
 }
 
 fn filter_namespace(all: &BTreeMap<String, String>) -> BTreeMap<String, String> {
@@ -141,11 +130,10 @@ fn diff(actual: &BTreeMap<String, String>, expected: &BTreeMap<String, String>) 
 
 #[derive(Debug, Error)]
 pub enum VerifyError {
-    #[error("container runtime '{0}' not found on PATH")]
-    RuntimeMissing(String),
-
-    #[error("io error invoking inspect: {0}")]
-    Io(String),
+    /// The docker socket is not reachable.  Maps to exit 7 via the
+    /// catch-all `Verify(_) => 7` arm in McpProbeError::exit_code.
+    #[error("docker socket not reachable")]
+    DockerMissing,
 
     #[error("docker inspect {image} failed: {stderr}")]
     InspectFailed { image: String, stderr: String },
@@ -162,8 +150,9 @@ pub enum VerifyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use crate::mcp_probe::docker::test_support::FakeDocker;
+    use bollard::errors::Error as BollardError;
+    use bollard::models::ImageConfig;
 
     // ── compare_labels_in_namespace ─────────────────────────────────────────
 
@@ -231,12 +220,25 @@ mod tests {
         assert!(compare_labels_in_namespace(&empty, &empty).is_ok());
     }
 
-    // ── parse_inspect_output ────────────────────────────────────────────────
+    // ── labels_from_inspect ─────────────────────────────────────────────────
+
+    fn make_inspect(labels: Option<std::collections::HashMap<String, String>>) -> ImageInspect {
+        ImageInspect {
+            config: Some(ImageConfig {
+                labels,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 
     #[test]
-    fn parse_inspect_output_happy_path() {
-        let json = br#"[{"Config":{"Labels":{"org.botwork.mcp.name":"echo","org.botwork.mcp.port":"8000"}}}]"#;
-        let labels = parse_inspect_output(json).expect("parse");
+    fn labels_from_inspect_happy_path() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
+        map.insert("org.botwork.mcp.port".to_string(), "8000".to_string());
+        let inspect = make_inspect(Some(map));
+        let labels = labels_from_inspect(&inspect).expect("parse");
         assert_eq!(
             labels.get("org.botwork.mcp.name").map(String::as_str),
             Some("echo")
@@ -249,68 +251,91 @@ mod tests {
     }
 
     #[test]
-    fn parse_inspect_output_returns_empty_map_when_labels_is_null() {
-        let json = br#"[{"Config":{"Labels":null}}]"#;
-        let labels = parse_inspect_output(json).expect("parse");
+    fn labels_from_inspect_returns_empty_when_labels_is_none() {
+        let inspect = make_inspect(None);
+        let labels = labels_from_inspect(&inspect).expect("parse");
         assert!(labels.is_empty());
     }
 
     #[test]
-    fn parse_inspect_output_returns_empty_map_when_config_labels_missing() {
-        let json = br#"[{"Config":{}}]"#;
-        let labels = parse_inspect_output(json).expect("parse");
+    fn labels_from_inspect_returns_empty_when_config_missing() {
+        let inspect = ImageInspect {
+            config: None,
+            ..Default::default()
+        };
+        let labels = labels_from_inspect(&inspect).expect("parse");
         assert!(labels.is_empty());
     }
 
     #[test]
-    fn parse_inspect_output_returns_empty_map_when_config_missing() {
-        // An inspect output with no Config key at all should behave like
-        // "no labels" — the value resolves to Null via the chained and_then.
-        let json = br#"[{}]"#;
-        let labels = parse_inspect_output(json).expect("parse");
-        assert!(labels.is_empty());
-    }
-
-    #[test]
-    fn parse_inspect_output_fails_on_invalid_json() {
-        let err = parse_inspect_output(b"not json").unwrap_err();
-        assert!(matches!(err, VerifyError::InspectShape(_)), "{err:?}");
-    }
-
-    #[test]
-    fn parse_inspect_output_fails_on_empty_array() {
-        let err = parse_inspect_output(b"[]").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("empty array"), "{msg}");
-    }
-
-    #[test]
-    fn parse_inspect_output_fails_when_labels_not_an_object() {
-        let json = br#"[{"Config":{"Labels":"should-be-an-object"}}]"#;
-        let err = parse_inspect_output(json).unwrap_err();
-        assert!(matches!(err, VerifyError::InspectShape(_)), "{err:?}");
-    }
-
-    #[test]
-    fn parse_inspect_output_fails_on_non_string_label_value() {
-        let json = br#"[{"Config":{"Labels":{"org.botwork.mcp.port":8000}}}]"#;
-        let err = parse_inspect_output(json).unwrap_err();
-        assert!(matches!(err, VerifyError::InspectShape(_)), "{err:?}");
-        let msg = format!("{err}");
-        assert!(msg.contains("non-string"), "{msg}");
-    }
-
-    #[test]
-    fn parse_inspect_output_handles_multiple_labels() {
-        let json = r#"[{"Config":{"Labels":{
-            "org.botwork.mcp.name":"echo",
-            "org.botwork.mcp.port":"8000",
-            "org.botwork.mcp.schema-version":"1",
-            "org.opencontainers.image.version":"0.1.0"
-        }}}]"#;
-        let labels = parse_inspect_output(json.as_bytes()).expect("parse");
+    fn labels_from_inspect_handles_multiple_labels() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
+        map.insert("org.botwork.mcp.port".to_string(), "8000".to_string());
+        map.insert(
+            "org.botwork.mcp.schema-version".to_string(),
+            "1".to_string(),
+        );
+        map.insert(
+            "org.opencontainers.image.version".to_string(),
+            "0.1.0".to_string(),
+        );
+        let inspect = make_inspect(Some(map));
+        let labels = labels_from_inspect(&inspect).expect("parse");
         assert_eq!(labels.len(), 4);
         assert_eq!(labels["org.botwork.mcp.schema-version"], "1");
+    }
+
+    // ── read_image_labels_impl via FakeDocker ───────────────────────────────
+
+    #[tokio::test]
+    async fn read_labels_returns_map_on_success() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("org.botwork.mcp.name".to_string(), "echo".to_string());
+        let fake = FakeDocker::default().with_inspect_image(Ok(make_inspect(Some(map))));
+        let labels = read_image_labels_impl("image:tag", &fake)
+            .await
+            .expect("ok");
+        assert_eq!(
+            labels.get("org.botwork.mcp.name").map(String::as_str),
+            Some("echo")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_labels_returns_empty_when_image_has_no_labels() {
+        let fake = FakeDocker::default().with_inspect_image(Ok(make_inspect(None)));
+        let labels = read_image_labels_impl("image:tag", &fake)
+            .await
+            .expect("ok");
+        assert!(labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_labels_maps_404_to_inspect_failed() {
+        let fake = FakeDocker::default().with_inspect_image(Err(
+            BollardError::DockerResponseServerError {
+                status_code: 404,
+                message: "no such image: image:tag".into(),
+            },
+        ));
+        let err = read_image_labels_impl("image:tag", &fake)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VerifyError::InspectFailed { .. }), "{err:?}");
+        let msg = format!("{err}");
+        assert!(msg.contains("image:tag"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn read_labels_maps_socket_error_to_docker_missing() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let fake =
+            FakeDocker::default().with_inspect_image(Err(BollardError::IOError { err: io_err }));
+        let err = read_image_labels_impl("image:tag", &fake)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VerifyError::DockerMissing), "{err:?}");
     }
 
     // ── filter_namespace ────────────────────────────────────────────────────
@@ -411,17 +436,10 @@ mod tests {
     // --- VerifyError display for all variants ---
 
     #[test]
-    fn verify_error_runtime_missing_display() {
-        let err = VerifyError::RuntimeMissing("podman".into());
+    fn verify_error_docker_missing_display() {
+        let err = VerifyError::DockerMissing;
         let msg = format!("{err}");
-        assert!(msg.contains("podman"), "{msg}");
-    }
-
-    #[test]
-    fn verify_error_io_display() {
-        let err = VerifyError::Io("connection refused".into());
-        let msg = format!("{err}");
-        assert!(msg.contains("connection refused"), "{msg}");
+        assert!(msg.contains("docker"), "{msg}");
     }
 
     #[test]
@@ -453,35 +471,5 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("missing"), "{msg}");
         assert!(msg.contains("extra"), "{msg}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_reads_runtime_output_and_matches_expected_namespace() {
-        let script = "#!/bin/sh\nprintf '%s' '[{\"Config\":{\"Labels\":{\"org.botwork.mcp.name\":\"echo\",\"org.botwork.mcp.port\":\"8000\",\"org.opencontainers.image.version\":\"1.0\"}}}]'\n";
-        let runtime_dir = tempfile::TempDir::new().expect("tempdir");
-        let runtime = runtime_dir.path().join("runtime");
-        std::fs::write(&runtime, script).expect("write runtime");
-        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let mut expected = BTreeMap::new();
-        expected.insert("org.botwork.mcp.name".into(), "echo".into());
-        expected.insert("org.botwork.mcp.port".into(), "8000".into());
-        verify("example:latest", runtime.to_str().unwrap(), &expected).expect("verify");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_surfaces_runtime_and_inspect_failures() {
-        let expected = BTreeMap::new();
-        let err = verify("example:latest", "/definitely/missing/runtime", &expected).unwrap_err();
-        assert!(matches!(err, VerifyError::RuntimeMissing(_)), "{err:?}");
-
-        let runtime_dir = tempfile::TempDir::new().expect("tempdir");
-        let runtime = runtime_dir.path().join("runtime");
-        std::fs::write(&runtime, "#!/bin/sh\necho 'no such image' >&2\nexit 1\n")
-            .expect("write runtime");
-        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let err = verify("example:latest", runtime.to_str().unwrap(), &expected).unwrap_err();
-        assert!(matches!(err, VerifyError::InspectFailed { .. }), "{err:?}");
     }
 }
