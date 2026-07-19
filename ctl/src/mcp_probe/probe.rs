@@ -157,7 +157,7 @@ pub(crate) fn start_container<D: DockerApi + ?Sized>(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| ProbeError::Io(format!("tokio runtime: {e}")))?;
+        .map_err(|e| ProbeError::Io(format!("failed to initialize async runtime: {e}")))?;
     rt.block_on(start_container_impl(
         docker,
         image,

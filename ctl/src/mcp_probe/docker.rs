@@ -109,6 +109,8 @@ impl DockerApi for Docker {
         };
         async move {
             let result = Docker::commit_container(self, options, config).await?;
+            // The docker daemon's commit endpoint always returns the new image's
+            // SHA256 digest as a non-empty string; we propagate it as-is.
             Ok(result.id)
         }
         .boxed()

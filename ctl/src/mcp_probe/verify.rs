@@ -41,7 +41,7 @@ pub fn verify(image: &str, expected: &BTreeMap<String, String>) -> Result<(), Ve
         .build()
         .map_err(|e| VerifyError::InspectFailed {
             image: image.to_string(),
-            stderr: format!("tokio runtime: {e}"),
+            stderr: format!("failed to initialize async runtime: {e}"),
         })?;
     let actual = rt.block_on(read_image_labels_impl(image, &docker))?;
     compare_labels_in_namespace(&actual, expected)

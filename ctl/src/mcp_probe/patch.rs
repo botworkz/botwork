@@ -66,7 +66,8 @@ async fn patch_image_impl<D: DockerApi + ?Sized>(
         .map_err(|e| PatchError::Patch(format!("create container from {image_in}: {e}")))?;
 
     // 2. Commit the container with the new label set, producing image_out.
-    let label_map: HashMap<String, String> = labels.clone().into_iter().collect();
+    let label_map: HashMap<String, String> =
+        labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let result = docker
         .commit_container(&container_id, repo, tag, label_map)
         .await;
@@ -74,9 +75,15 @@ async fn patch_image_impl<D: DockerApi + ?Sized>(
     // 3. Remove the temporary container regardless of commit success.
     let _ = docker.remove_container(&container_id).await;
 
-    result
-        .map(|_| ())
-        .map_err(|e| PatchError::Patch(format!("commit {image_in} → {image_out}: {e}")))
+    match result {
+        Ok(id) if id.is_empty() => Err(PatchError::Patch(format!(
+            "commit {image_in} → {image_out}: daemon returned empty image ID"
+        ))),
+        Ok(_) => Ok(()),
+        Err(e) => Err(PatchError::Patch(format!(
+            "commit {image_in} → {image_out}: {e}"
+        ))),
+    }
 }
 
 /// Split an image reference `repo:tag` into `(repo, tag)`.
