@@ -2,6 +2,7 @@
 name = "botwork-api-core"
 version = "0.0.0"
 edition = "2021"
+publish = false
 
 [lib]
 name = "botwork_api_core"

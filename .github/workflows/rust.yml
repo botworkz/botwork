@@ -20,15 +20,34 @@ jobs:
         targets: wasm32-unknown-unknown
     - uses: Swatinem/rust-cache@v2
     - run: cargo fmt --all -- --check
+    # Verify Cargo.lock is up to date.  Copies the committed lockfile, runs
+    # `cargo update --workspace` (which regenerates it in-place), then diffs.
+    # If the diff is non-empty the committed lockfile is stale or hand-edited.
+    - name: Verify Cargo.lock is up to date
+      run: |
+        cp Cargo.lock Cargo.lock.orig
+        cargo update --workspace
+        diff -u Cargo.lock.orig Cargo.lock || {
+          echo "Cargo.lock is stale — run 'cargo update --workspace' locally and commit the result."
+          exit 1
+        }
     # `--workspace` covers every member, including ui/wasm.
     # The wasm crate compiles on the host (it's just a normal lib for
     # cargo fmt's purposes) — only its *runtime* needs wasm32.
-    - run: cargo clippy --workspace --all-targets -- -D warnings
-    - run: cargo test --workspace --all-targets
+    - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+    - run: cargo test --locked --workspace --all-targets
     # Explicit wasm32 build for ui/wasm so a regression in the
     # WASM-only dep tree (wasm-bindgen / web-sys / leptos csr) doesn't
     # sneak through the host-targeted checks above.
-    - run: cargo build -p botwork-ui-wasm --target wasm32-unknown-unknown
+    - run: cargo build --locked -p botwork-ui-wasm --target wasm32-unknown-unknown
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: taiki-e/install-action@cargo-deny
+    - name: cargo deny check
+      run: cargo deny check
 
   coverage:
     runs-on: ubuntu-latest

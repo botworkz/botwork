@@ -1,0 +1,94 @@
+# cargo-deny dependency policy for botworkz/botwork.
+#
+# Derived from this repo's actual dependency graph — NOT a verbatim copy of
+# botwork-extra's deny.toml. Run `cargo deny check` to verify the current
+# tree passes.
+#
+# Key differences from botwork-extra:
+#
+#   [sources] allow-git contains only envoy-proto-rs (a tagged git dep used
+#   by control-plane and session-broker — not yet on crates.io). The
+#   botwork-entity / botwork-migration / botwork-version entries that appear
+#   in botwork-extra's allow-git are path members here and need no git allow.
+#
+#   [advisories] ignore list derived empirically from this tree; botwork-extra
+#   entries that are not present in this lockfile are omitted.
+#
+#   [licenses] allow list extended with CC0-1.0 (base16 via leptos/wasm_split)
+#   and BSL-1.0 (xxhash-rust); workspace members are skipped via
+#   private.ignore = true (each member sets publish = false).
+
+[graph]
+all-features = true
+
+# ── Advisory policy ────────────────────────────────────────────────────────────
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Each entry corresponds to an advisory that genuinely fires on this tree with
+# no safe upgrade currently available upstream. Re-run `cargo deny check
+# advisories` after any dependency bump to confirm ignored IDs are still needed.
+ignore = [
+    # paste v1.0.15 — unmaintained (archived by dtolnay). Transitively pulled
+    # in by leptos 0.8.x via either_of / reactive_graph / tachys. No upstream
+    # fix; leptos would need to migrate away from paste.
+    { id = "RUSTSEC-2024-0436", reason = "paste is pulled in by leptos 0.8.x (either_of/tachys/reactive_graph); no upstream fix available until leptos migrates away from it" },
+
+    # proc-macro-error2 v2.0.1 — unmaintained (confirmed by author). Pulled in
+    # by leptos_macro (via leptos), leptos_router_macro, reactive_stores_macro,
+    # sea-bae (via sea-orm-macros), syn_derive (via rstml/leptos_hot_reload).
+    # No upstream fix; all consumers need to migrate to manyhow or similar.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is pulled in by leptos macros and sea-orm-macros; no safe upgrade available until those crates migrate" },
+]
+
+# ── License policy ─────────────────────────────────────────────────────────────
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+
+# Workspace-owned crates (all marked publish = false) are excluded from license
+# checking. Their license is covered by the repo-root LICENSE (GPL-3.0-only).
+private = { ignore = true }
+
+allow = [
+    # Baseline shared with botwork-extra:
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+    # Added for this repo's larger dependency tree:
+    # CC0-1.0 — base16 v0.2.1, via wasm_split_macros → wasm_split_helpers → leptos
+    "CC0-1.0",
+    # BSL-1.0 — xxhash-rust v0.8.x, via sea-orm's internal hashing
+    "BSL-1.0",
+]
+
+# ── Bans policy ────────────────────────────────────────────────────────────────
+
+[bans]
+# Warn (not fail) on duplicates and wildcard deps so the policy is visible in
+# CI without breaking builds over unavoidable cross-platform/workspace dups.
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+# ── Source policy ──────────────────────────────────────────────────────────────
+
+[sources]
+# All crates must come from crates.io or the explicitly listed git repos below.
+unknown-git = "deny"
+allow-git = [
+    # envoy-proto-rs: Envoy protobuf bindings used by control-plane and
+    # session-broker. Tagged release (v0.0.1) but not yet published to
+    # crates.io. Surfaced in PR description per policy.
+    "https://github.com/phlax/envoy-proto-rs",
+]
