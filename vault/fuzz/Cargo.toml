@@ -1,0 +1,40 @@
+[package]
+name = "botwork-vault-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+# Prevent this crate from being included in the parent workspace.
+# cargo-fuzz creates stand-alone fuzz crates by design — the nightly
+# toolchain requirement and the libfuzzer linker flags would break a
+# normal `cargo build --workspace` otherwise.
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "fuzz_open_contents"
+path = "fuzz_targets/fuzz_open_contents.rs"
+test = false
+doc = false
+
+[dependencies]
+botwork-vault = { path = ".." }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+libfuzzer-sys = "0.4"
+postcard = { version = "1", features = ["alloc"] }
+tempfile = "3"
+
+[profile.release]
+# libfuzzer requires unwind for coverage feedback; override the
+# workspace `panic = "abort"` that lives in the parent Cargo.toml.
+# This only affects the fuzz binaries — normal `cargo build` and
+# `cargo test` of `botwork-vault` itself are unaffected because
+# they're built from the parent workspace, not this crate.
+panic = "unwind"
+opt-level = 3
+debug = false
+
+# Separate workspace declaration so the parent workspace does not try
+# to include this crate (the `members` list in the root Cargo.toml
+# does not contain `vault/fuzz`).
+[workspace]
