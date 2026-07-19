@@ -2,6 +2,7 @@
 name = "botwork-ui-wasm"
 version = "0.0.0"
 edition = "2021"
+publish = false
 
 # `cdylib` is required by wasm-bindgen's WASM glue; `rlib` lets the
 # test harness import the crate as a library (currently unused; kept
