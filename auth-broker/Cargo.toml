@@ -2,6 +2,7 @@
 name = "botwork-auth-broker"
 version = "0.0.0"
 edition = "2021"
+publish = false
 
 [lib]
 name = "botwork_auth_broker"
@@ -17,7 +18,7 @@ axum = "0.7"
 base64 = "0.22"
 blake2 = "0.10"
 botwork-opaque-handshake = { path = "../opaque-handshake" }
-botwork-version = { git = "https://github.com/botworkz/botwork", tag = "v0.3.16" }
+botwork-version = { path = "../version" }
 # Direct dep so the broker can stamp the OPAQUE
 # `SUITE_VERSION` into the `wrapped_export_key` response shape and
 # refuse stale leases via the structured 401 taxonomy. `SUITE_VERSION`
@@ -27,17 +28,11 @@ botwork-version = { git = "https://github.com/botworkz/botwork", tag = "v0.3.16"
 botwork-vault = { path = "../vault", features = ["test-support"] }
 # RFE #123 round 1a (issue #133): pull in `botwork-entity` to back the
 # OPAQUE `opaque_password_file` + `lease` tables. The entities live in
-# `botworkz/botwork`'s `db/entity` crate and landed in
-# botworkz/botwork#142; this is the FIRST cross-repo path/git dep this
-# workspace has carried. Pinned to the v0.3.13 release tag (the first
-# tag that includes those entities) rather than `branch = "main"` so
-# the lockfile is reproducible and an upstream rebase can't surprise
-# us with a schema change between two `cargo update` runs in this
-# repo. When this crate moves into `botworkz/botwork` proper, this
-# entry collapses back to a `path = "../db/entity"` line — the
-# git/tag indirection exists *only* because the two repos are
-# currently split.
-botwork-entity = { git = "https://github.com/botworkz/botwork", tag = "v0.3.13" }
+# the workspace member `db/entity` (package `botwork-entity`) and landed
+# in botworkz/botwork#142. Now that this crate lives inside
+# `botworkz/botwork` proper, this is a plain in-workspace path dep —
+# no git/tag indirection needed.
+botwork-entity = { path = "../db/entity" }
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 hkdf = "0.12"
@@ -221,14 +216,16 @@ tower = { version = "0.4", features = ["util"] }
 # so the broker binary doesn't grow a direct sqlx surface — it's
 # already transitively pulled in via sea-orm-postgres anyway.
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
-# Brought along by the cross-repo entity dep but listed explicitly so
+# Brought along by the entity dep but listed explicitly so
 # the test fixtures can call `Migrator::up` directly without leaking
 # the migration crate's transitive features into the runtime build.
+# Now that this crate lives in `botworkz/botwork`, this resolves via
+# the in-workspace path dep — no git/tag pin needed.
 sea-orm-migration = { version = "1.1.20", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",
 ] }
-botwork-migration = { git = "https://github.com/botworkz/botwork", tag = "v0.3.13" }
+botwork-migration = { path = "../db/migration" }
 
 [lints]
 workspace = true

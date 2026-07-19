@@ -133,6 +133,16 @@ on:
         required: false
         type: boolean
         default: false
+      features:
+        description: >-
+          Comma-separated list of cargo features to enable for fmt, clippy,
+          test, and build invocations. Empty string (default) means no
+          `--features` flag is passed. Used by crates whose test targets
+          carry `required-features` (e.g. auth-broker and vault require
+          `test-support`).
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -147,6 +157,7 @@ jobs:
       PACKAGE: ${{ inputs.package }}
       BINARY: ${{ inputs.binary }}
       ARTIFACT: ${{ inputs.artifact }}
+      FEATURES: ${{ inputs.features }}
     steps:
     - uses: actions/checkout@v4
 
@@ -224,10 +235,12 @@ jobs:
       run: |
         set -euo pipefail
         package='${{ inputs.package }}'
+        features_flag="${FEATURES:+--features ${FEATURES}}"
         mkdir -p ".ci-coverage/${CRATE_SLUG}/raw"
         # fmt and clippy run with a clean env — no coverage instrumentation needed.
         cargo fmt -p "${package}" -- --check
-        cargo clippy -p "${package}" --all-targets --locked -- -D warnings
+        # shellcheck disable=SC2086
+        cargo clippy -p "${package}" --all-targets --locked ${features_flag} -- -D warnings
         # Coverage instrumentation is scoped to cargo test ONLY via inline env.
         # The release build below (artifact=binary) runs as a separate step with
         # no RUSTFLAGS inherited — guaranteeing the shipped binary is never built
@@ -235,7 +248,7 @@ jobs:
         # panic = "abort").
         RUSTFLAGS="-Cinstrument-coverage" \
           LLVM_PROFILE_FILE="${GITHUB_WORKSPACE}/.ci-coverage/${CRATE_SLUG}/raw/${package}-%p-%m.profraw" \
-          cargo test -p "${package}" --locked
+          cargo test -p "${package}" --locked ${features_flag}
         if [ "${{ inputs.wasm-target-check }}" = "true" ]; then
           cargo build -p "${package}" --target wasm32-unknown-unknown --locked
         fi
@@ -317,6 +330,9 @@ jobs:
             --group-add ${docker_sock_gid}"
         fi
 
+        # Derive --features flag if the crate declares required-features.
+        features_flag="${FEATURES:+--features ${FEATURES}}"
+
         # shellcheck disable=SC2086
         docker run --rm \
           --platform linux/amd64 \
@@ -330,6 +346,7 @@ jobs:
           -e PACKAGE="${package}" \
           -e COVERAGE_PACKAGE="${package}" \
           -e COVERAGE_RAW_DIR="${coverage_raw_dir}" \
+          -e FEATURES="${FEATURES}" \
           -v "${HOME}/.cargo:/cargo-home" \
           -v "${RUNNER_TEMP}/container-home:/tmp/home" \
           -v "${GITHUB_WORKSPACE}:/work" \
@@ -338,8 +355,9 @@ jobs:
           sh -elc "
             export PATH=/usr/local/cargo/bin:\$PATH
             package=\${PACKAGE}
+            features_flag=\"\${FEATURES:+--features \${FEATURES}}\"
             ${trunk_prefix}cargo fmt -p \${package} -- --check
-            cargo clippy -p \${package} --all-targets --locked -- -D warnings
+            cargo clippy -p \${package} --all-targets --locked \${features_flag} -- -D warnings
             # Coverage instrumentation is scoped to cargo test ONLY.
             # The release build below runs with NO RUSTFLAGS so the binary
             # staged to .ci-prebuilt/ and baked into the shipped container
@@ -349,8 +367,8 @@ jobs:
             mkdir -p \"\${COVERAGE_RAW_DIR}\"
             RUSTFLAGS='-Cinstrument-coverage' \
               LLVM_PROFILE_FILE=\"\${COVERAGE_RAW_DIR}/\${COVERAGE_PACKAGE}-%p-%m.profraw\" \
-              cargo test -p \${package} --locked
-            # Release build: clean env — no RUSTFLAGS, no LLVM_PROFILE_FILE.
+              cargo test -p \${package} --locked \${features_flag}
+            # Release build: clean env -- no RUSTFLAGS, no LLVM_PROFILE_FILE.
             # These are the bytes that will be staged and shipped.
             cargo build -p \${package} --release --locked
           "
