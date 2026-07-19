@@ -184,7 +184,13 @@ jobs:
       if: inputs.artifact != 'container'
       uses: dtolnay/rust-toolchain@stable
       with:
-        components: rustfmt, clippy
+        components: rustfmt, clippy, llvm-tools-preview
+
+    - name: Install Rust toolchain (coverage host tools)
+      if: inputs.artifact == 'container'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
 
     - name: Install wasm32 target
       if: inputs.artifact != 'container' && inputs.wasm-target-check
@@ -269,6 +275,7 @@ jobs:
       run: |
         set -euo pipefail
         package='${{ inputs.package }}'
+        coverage_raw_dir="/work/.ci-coverage/${CRATE_SLUG}/raw"
         mkdir -p "${HOME}/.cargo" "${RUNNER_TEMP}/container-home"
         mkdir -p ".ci-coverage/${CRATE_SLUG}/raw"
         trunk_prefix=""
@@ -301,8 +308,9 @@ jobs:
           -e CARGO_HOME=/cargo-home \
           -e RUSTUP_HOME=/usr/local/rustup \
           -e CARGO_TARGET_DIR=/work/target \
-          -e CRATE_SLUG="${CRATE_SLUG}" \
           -e PACKAGE="${package}" \
+          -e COVERAGE_PACKAGE="${package}" \
+          -e COVERAGE_RAW_DIR="${coverage_raw_dir}" \
           -v "${HOME}/.cargo:/cargo-home" \
           -v "${RUNNER_TEMP}/container-home:/tmp/home" \
           -v "${GITHUB_WORKSPACE}:/work" \
@@ -319,8 +327,9 @@ jobs:
             # image is never coverage-instrumented. Shipping an instrumented
             # binary is wrong: it inflates binary size and combines poorly
             # with [profile.release] panic = 'abort'.
+            mkdir -p \"\${COVERAGE_RAW_DIR}\"
             RUSTFLAGS='-Cinstrument-coverage' \
-              LLVM_PROFILE_FILE='/work/.ci-coverage/'\${CRATE_SLUG}'/raw/'\${package}'-%p-%m.profraw' \
+              LLVM_PROFILE_FILE=\"\${COVERAGE_RAW_DIR}/\${COVERAGE_PACKAGE}-%p-%m.profraw\" \
               cargo test -p \${package} --locked
             # Release build: clean env — no RUSTFLAGS, no LLVM_PROFILE_FILE.
             # These are the bytes that will be staged and shipped.
@@ -330,12 +339,20 @@ jobs:
     - name: Build per-crate coverage outputs
       run: |
         set -euo pipefail
-        mkdir -p ".ci-coverage/${CRATE_SLUG}/binaries"
-        find target/debug -maxdepth 1 -type f -executable \
-          -exec cp {} ".ci-coverage/${CRATE_SLUG}/binaries/" \; 2>/dev/null || true
-        find target/debug/deps -maxdepth 1 -type f -executable \
-          -exec cp {} ".ci-coverage/${CRATE_SLUG}/binaries/" \; 2>/dev/null || true
-        if ! find ".ci-coverage/${CRATE_SLUG}/raw" -type f -name '*.profraw' | grep -q .; then
+        binary_dir=".ci-coverage/${CRATE_SLUG}/binaries"
+        mkdir -p "${binary_dir}"
+        if [ -d target/debug ]; then
+          find target/debug -maxdepth 1 -type f -executable \
+            -exec cp {} "${binary_dir}/" \;
+        fi
+        if [ -d target/debug/deps ]; then
+          find target/debug/deps -maxdepth 1 -type f -executable \
+            -exec cp {} "${binary_dir}/" \;
+        fi
+        profraw_count="$(
+          find ".ci-coverage/${CRATE_SLUG}/raw" -type f -name '*.profraw' | wc -l
+        )"
+        if [ "${profraw_count}" -eq 0 ]; then
           echo "::error::no .profraw files produced for ${PACKAGE}"
           exit 1
         fi
@@ -346,17 +363,24 @@ jobs:
         # ui/wasm/src/pages/mod.rs individually because the whole botwork-ui-wasm
         # crate is excluded via `exclude = ["botwork-ui-wasm"]` there; here we
         # use the broader ui/wasm/src/* which subsumes those specific files.
+        ignore_args=(
+          --ignore "db/entity/src/*"
+          --ignore "db/migration/src/*"
+          --ignore "*/main.rs"
+          --ignore "ui/wasm/src/*"
+        )
         grcov ".ci-coverage/${CRATE_SLUG}/raw" \
           --binary-path ".ci-coverage/${CRATE_SLUG}/binaries" \
           --source-dir . \
           --branch \
           --ignore-not-existing \
-          --ignore "db/entity/src/*" \
-          --ignore "db/migration/src/*" \
-          --ignore "*/main.rs" \
-          --ignore "ui/wasm/src/*" \
+          "${ignore_args[@]}" \
           --output-type lcov \
           --output-path ".ci-coverage/${CRATE_SLUG}/lcov.info"
+        if [ ! -s ".ci-coverage/${CRATE_SLUG}/lcov.info" ]; then
+          echo "::error::per-crate lcov missing or empty for ${PACKAGE}"
+          exit 1
+        fi
 
     - name: Upload per-crate coverage artifact
       uses: actions/upload-artifact@v4

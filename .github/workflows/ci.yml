@@ -171,6 +171,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
     - uses: taiki-e/install-action@grcov
     - name: Download per-crate coverage artifacts
       uses: actions/download-artifact@v4
@@ -181,6 +184,13 @@ jobs:
       run: |
         set -euo pipefail
         mkdir -p coverage/html
+        profraw_count="$(
+          find .ci-coverage -type f -name '*.profraw' | wc -l
+        )"
+        if [ "${profraw_count}" -eq 0 ]; then
+          echo "::error::no per-crate .profraw files were downloaded"
+          exit 1
+        fi
         # Build --binary-path args for each crate's instrumented-binary dir.
         # download-artifact@v4 with pattern '*-coverage' and path .ci-coverage
         # lays out each artifact as .ci-coverage/<crate-slug>-coverage/
@@ -214,6 +224,10 @@ jobs:
           "${ignore_args[@]}" \
           --output-type lcov \
           --output-path coverage/lcov.info
+        if [ ! -s coverage/lcov.info ]; then
+          echo "::error::aggregate coverage/lcov.info missing or empty"
+          exit 1
+        fi
         grcov .ci-coverage \
           --source-dir . \
           --branch \
