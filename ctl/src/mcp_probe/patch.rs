@@ -69,9 +69,11 @@ async fn patch_image_impl<D: DockerApi + ?Sized>(
         .and_then(|config| config.labels.as_ref())
         .cloned()
         .unwrap_or_default();
-    for (key, value) in labels {
-        label_map.insert(key.clone(), value.clone());
-    }
+    label_map.extend(
+        labels
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
 
     // 1. Create a stopped container from image_in (don't start it).
     let body = ContainerCreateBody {
@@ -102,16 +104,14 @@ async fn patch_image_impl<D: DockerApi + ?Sized>(
 /// by a `/` (which would indicate a registry host:port rather than a
 /// tag separator).  If no tag is found, `"latest"` is returned.
 fn parse_image_ref(image: &str) -> (&str, &str) {
-    if let Some((name, _digest)) = image.split_once('@') {
-        return parse_image_ref(name);
-    }
-    if let Some(pos) = image.rfind(':') {
-        let after = &image[pos + 1..];
+    let name = image.split_once('@').map_or(image, |(name, _digest)| name);
+    if let Some(pos) = name.rfind(':') {
+        let after = &name[pos + 1..];
         if !after.contains('/') {
-            return (&image[..pos], after);
+            return (&name[..pos], after);
         }
     }
-    (image, "latest")
+    (name, "latest")
 }
 
 #[derive(Debug, Error)]
