@@ -342,6 +342,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_env_server_falls_back_to_file_value() {
+        let _lock = lock_env();
+        std::env::set_var(ENV_SERVER, "");
+        let cfg = Config {
+            server: Some("http://from-file:9100".into()),
+            ..Config::default()
+        };
+        let url = cfg.resolve_server(None).unwrap();
+        assert_eq!(url.host_str(), Some("from-file"));
+        std::env::remove_var(ENV_SERVER);
+    }
+
+    #[test]
     fn per_tenant_credential_identifier_used_when_present() {
         let mut tenants = BTreeMap::new();
         tenants.insert(
@@ -587,6 +600,15 @@ mod tests {
         );
 
         std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn resolve_config_path_is_none_when_no_candidates_exist() {
+        let _lock = lock_env();
+        std::env::remove_var(ENV_CONFIG_PATH);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("HOME");
+        assert!(resolve_config_path().is_none());
     }
 
     #[test]

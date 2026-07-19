@@ -85,4 +85,20 @@ mod tests {
             matches!(err, LoginError::InvalidServer { ref value, .. } if value == "127.0.0.1:9100")
         );
     }
+
+    #[tokio::test]
+    async fn network_error_is_surfaced_after_resolution() {
+        let err = run(RegisterArgs {
+            tenant: "phlax".into(),
+            server: Some("http://127.0.0.1:1".into()),
+            password: Some(Zeroizing::new(b"hunter2".to_vec())),
+            ..RegisterArgs::default()
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            LoginError::Network { ref url, .. } if url.ends_with("/auth/register/start")
+        ));
+    }
 }
