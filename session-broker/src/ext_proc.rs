@@ -803,8 +803,8 @@ async fn check_container_liveness(state: &AppState, container_name: &str) -> boo
             }
         }
     }
-    // Cache miss or expired — run docker inspect (blocking, but infrequent)
-    let is_running = is_container_running(container_name).unwrap_or(true);
+    // Cache miss or expired — query docker inspect
+    let is_running = is_container_running(container_name).await.unwrap_or(true);
     if is_running {
         let mut cache = state.liveness_cache.lock().await;
         cache.insert(container_name.to_string(), Instant::now() + LIVENESS_TTL);
