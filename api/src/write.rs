@@ -3425,25 +3425,29 @@ mod tests {
         let plugin_id = Uuid::new_v4();
 
         // Bool arm
-        let resp_bool = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
-                .append_query_results([Vec::<workspace_plugin::Model>::new()]),
-        ))
-        .oneshot(tenant_request(
-            "POST",
-            "/api/tenant/phlax/workspace_plugins",
-            "phlax",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "plugin_id": plugin_id,
-                "config": true
-            }),
-        ))
-        .await
-        .expect("response");
-        assert_eq!(resp_bool.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let json = json_body(resp_bool).await;
+        let bool_config_response =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id,
+                    "config": true
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(
+            bool_config_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let json = json_body(bool_config_response).await;
         assert_eq!(json["error"]["code"], "validation_failed");
         assert!(
             json["error"]["message"]
@@ -3454,7 +3458,7 @@ mod tests {
         );
 
         // String arm
-        let resp_string =
+        let string_config_response =
             crate::handler::build_router(crate::test_support::app_state_with_mock_db(
                 MockDatabase::new(DatabaseBackend::Postgres)
                     .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
@@ -3472,8 +3476,11 @@ mod tests {
             ))
             .await
             .expect("response");
-        assert_eq!(resp_string.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let json = json_body(resp_string).await;
+        assert_eq!(
+            string_config_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let json = json_body(string_config_response).await;
         assert_eq!(json["error"]["code"], "validation_failed");
         assert!(
             json["error"]["message"]
@@ -3484,25 +3491,29 @@ mod tests {
         );
 
         // Array arm
-        let resp_array = crate::handler::build_router(crate::test_support::app_state_with_mock_db(
-            MockDatabase::new(DatabaseBackend::Postgres)
-                .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
-                .append_query_results([Vec::<workspace_plugin::Model>::new()]),
-        ))
-        .oneshot(tenant_request(
-            "POST",
-            "/api/tenant/phlax/workspace_plugins",
-            "phlax",
-            serde_json::json!({
-                "workspace_id": workspace_id,
-                "plugin_id": plugin_id,
-                "config": [1, 2, 3]
-            }),
-        ))
-        .await
-        .expect("response");
-        assert_eq!(resp_array.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let json = json_body(resp_array).await;
+        let array_config_response =
+            crate::handler::build_router(crate::test_support::app_state_with_mock_db(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_query_results([vec![triple_row("phlax", "mcp", "mcp-fetch")]])
+                    .append_query_results([Vec::<workspace_plugin::Model>::new()]),
+            ))
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/workspace_plugins",
+                "phlax",
+                serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "plugin_id": plugin_id,
+                    "config": [1, 2, 3]
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(
+            array_config_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let json = json_body(array_config_response).await;
         assert_eq!(json["error"]["code"], "validation_failed");
         assert!(
             json["error"]["message"]
