@@ -384,12 +384,17 @@ mod tests {
     }
 
     // ── read/delete noops when file_for returns NoBackend ─────────────────
-    // Path-traversal names trigger NoBackend before keyring_dir() is
-    // consulted, so the same graceful-noop branches in file_read /
-    // file_delete are exercised without touching env vars.
+    // `file_read` and `file_delete` both match on `NoBackend` and return
+    // `Ok(None)` / `Ok(false)` instead of propagating the error.  The
+    // no-env path (`resolve_keyring_dir(None, None, None)` → `NoBackend`)
+    // is already covered by `missing_dir_env_is_an_error_at_resolve_time`.
+    // Here we verify the graceful-noop branches in `file_read` /
+    // `file_delete` themselves, using a path-traversal tenant name so
+    // `file_for` returns `NoBackend` before `keyring_dir()` is ever called —
+    // no env mutation needed.
 
     #[test]
-    fn read_and_delete_are_noops_when_backend_cannot_be_resolved() {
+    fn read_and_delete_are_noops_when_file_for_returns_no_backend() {
         let store = KeyringStore::new();
         assert!(store.read("../escape").unwrap().is_none());
         assert!(!store.delete("../escape").unwrap());
