@@ -682,6 +682,85 @@ mod tests {
 
     use super::*;
     use crate::mcp_probe::docker::test_support::FakeDocker;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    const TEST_TIMEOUT_SECS: u64 = 5;
+
+    /// Build a JSON-RPC success response template for a fixed id/result pair.
+    fn jsonrpc_result(id: u64, result: JsonValue) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }))
+    }
+
+    /// Build a JSON-RPC error response template for a fixed id/code/message triple.
+    fn jsonrpc_error(id: u64, code: i64, message: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": code,
+                "message": message,
+            }
+        }))
+    }
+
+    /// Mount a POST `/mcp` mock keyed by JSON-RPC method name.
+    async fn mount_mcp_rpc(server: &MockServer, rpc_method: &str, response: ResponseTemplate) {
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .and(body_partial_json(json!({"method": rpc_method})))
+            .respond_with(response)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    /// Run the blocking handshake against the mock server on a worker thread.
+    async fn run_handshake_blocking(server: &MockServer) -> Result<ProbeResult, ProbeError> {
+        let url = format!("{}/mcp", server.uri());
+        tokio::task::spawn_blocking(move || {
+            handshake(
+                &url,
+                Instant::now() + Duration::from_secs(TEST_TIMEOUT_SECS),
+            )
+        })
+        .await
+        .expect("join")
+    }
+
+    /// Extract the JSON-RPC method field from a recorded request body.
+    fn recorded_method(request: &Request) -> String {
+        serde_json::from_slice::<JsonValue>(&request.body)
+            .expect("request body json")
+            .get("method")
+            .and_then(JsonValue::as_str)
+            .expect("method field missing or not a string")
+            .to_string()
+    }
+
+    /// Read a recorded request header as UTF-8 when present.
+    fn recorded_header(request: &Request, name: &str) -> Option<String> {
+        request
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    }
+
+    /// Encode a JSON payload as the first `message` event in an SSE stream.
+    ///
+    /// This test helper intentionally models only the single-event initialize
+    /// response shape the probe consumes.
+    fn sse_event(payload: &JsonValue) -> Vec<u8> {
+        let mut bytes = b"event: message\ndata: ".to_vec();
+        bytes.extend_from_slice(payload.to_string().as_bytes());
+        bytes.extend_from_slice(b"\n\n");
+        bytes
+    }
 
     // ── start_container_impl via FakeDocker ─────────────────────────────────
 
@@ -986,5 +1065,385 @@ mod tests {
         let past = Instant::now() - Duration::from_secs(1);
         let err = check_deadline(past).unwrap_err();
         assert!(matches!(err, ProbeError::HandshakeTimeout));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshake_happy_path_uses_json_responses_and_skips_unadvertised_lists() {
+        let server = MockServer::start().await;
+        mount_mcp_rpc(
+            &server,
+            "initialize",
+            jsonrpc_result(
+                1,
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "fake-mcp", "version": "1.2.3"},
+                }),
+            ),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "notifications/initialized",
+            ResponseTemplate::new(202),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "tools/list",
+            jsonrpc_result(
+                2,
+                json!({
+                    "tools": [{"name": "echo"}],
+                }),
+            ),
+        )
+        .await;
+
+        let probe = run_handshake_blocking(&server).await.expect("handshake ok");
+
+        assert_eq!(probe.server_info.name, "fake-mcp");
+        assert_eq!(probe.server_info.version.as_deref(), Some("1.2.3"));
+        assert_eq!(probe.protocol_version, MCP_PROTOCOL_VERSION);
+        assert_eq!(probe.tools, vec![json!({"name": "echo"})]);
+        assert!(probe.resources.is_empty());
+        assert!(probe.prompts.is_empty());
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let methods: Vec<_> = requests.iter().map(recorded_method).collect();
+        assert_eq!(
+            methods,
+            vec!["initialize", "notifications/initialized", "tools/list"]
+        );
+        assert_eq!(recorded_header(&requests[0], "mcp-protocol-version"), None);
+        assert_eq!(
+            recorded_header(&requests[1], "mcp-protocol-version").as_deref(),
+            Some(MCP_PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            recorded_header(&requests[2], "mcp-protocol-version").as_deref(),
+            Some(MCP_PROTOCOL_VERSION)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshake_parses_sse_initialize_and_propagates_negotiated_headers() {
+        let server = MockServer::start().await;
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "sse-server", "version": "0.9.0"},
+            },
+            "session_id": "sess-42",
+        });
+        mount_mcp_rpc(
+            &server,
+            "initialize",
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_event(&initialize), "text/event-stream")
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "notifications/initialized",
+            ResponseTemplate::new(202),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "tools/list",
+            jsonrpc_result(
+                2,
+                json!({
+                    "tools": [{"name": "echo"}],
+                }),
+            ),
+        )
+        .await;
+
+        let probe = run_handshake_blocking(&server).await.expect("handshake ok");
+
+        assert_eq!(probe.protocol_version, "2024-11-05");
+        assert_eq!(probe.server_info.name, "sse-server");
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(recorded_header(&requests[0], "mcp-protocol-version"), None);
+        for request in &requests[1..] {
+            assert_eq!(
+                recorded_header(request, "mcp-protocol-version").as_deref(),
+                Some("2024-11-05")
+            );
+            assert_eq!(
+                recorded_header(request, "mcp-session-id").as_deref(),
+                Some("sess-42")
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshake_calls_resources_and_prompts_when_capabilities_are_advertised() {
+        let server = MockServer::start().await;
+        mount_mcp_rpc(
+            &server,
+            "initialize",
+            jsonrpc_result(
+                1,
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                    "serverInfo": {"name": "catalog-server"},
+                }),
+            ),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "notifications/initialized",
+            ResponseTemplate::new(202),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "tools/list",
+            jsonrpc_result(2, json!({"tools": [{"name": "echo"}]})),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "resources/list",
+            jsonrpc_result(
+                3,
+                json!({"resources": [{"uri": "file:///tmp/a", "name": "alpha"}]}),
+            ),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "prompts/list",
+            jsonrpc_result(4, json!({"prompts": [{"name": "draft"}]})),
+        )
+        .await;
+
+        let probe = run_handshake_blocking(&server).await.expect("handshake ok");
+
+        assert_eq!(
+            probe.resources,
+            vec![json!({"uri": "file:///tmp/a", "name": "alpha"})]
+        );
+        assert_eq!(probe.prompts, vec![json!({"name": "draft"})]);
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let methods: Vec<_> = requests.iter().map(recorded_method).collect();
+        assert_eq!(
+            methods,
+            vec![
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "resources/list",
+                "prompts/list",
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshake_surfaces_jsonrpc_error_from_tools_list() {
+        let server = MockServer::start().await;
+        mount_mcp_rpc(
+            &server,
+            "initialize",
+            jsonrpc_result(
+                1,
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "jsonrpc-error"},
+                }),
+            ),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "notifications/initialized",
+            ResponseTemplate::new(202),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "tools/list",
+            jsonrpc_error(2, -32001, "tools unavailable"),
+        )
+        .await;
+
+        let err = run_handshake_blocking(&server)
+            .await
+            .expect_err("handshake must fail");
+        assert!(
+            matches!(err, ProbeError::JsonRpcError(ref msg) if msg.contains("tools unavailable"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshake_surfaces_missing_server_info_in_initialize() {
+        let server = MockServer::start().await;
+        mount_mcp_rpc(
+            &server,
+            "initialize",
+            jsonrpc_result(
+                1,
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                }),
+            ),
+        )
+        .await;
+
+        let err = run_handshake_blocking(&server)
+            .await
+            .expect_err("handshake must fail");
+        assert!(
+            matches!(err, ProbeError::HandshakeShape(ref msg) if msg.contains("serverInfo")),
+            "Expected HandshakeShape error mentioning serverInfo, got {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshake_surfaces_missing_tools_array() {
+        let server = MockServer::start().await;
+        mount_mcp_rpc(
+            &server,
+            "initialize",
+            jsonrpc_result(
+                1,
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "missing-tools"},
+                }),
+            ),
+        )
+        .await;
+        mount_mcp_rpc(
+            &server,
+            "notifications/initialized",
+            ResponseTemplate::new(202),
+        )
+        .await;
+        mount_mcp_rpc(&server, "tools/list", jsonrpc_result(2, json!({}))).await;
+
+        let err = run_handshake_blocking(&server)
+            .await
+            .expect_err("handshake must fail");
+        assert!(
+            matches!(err, ProbeError::HandshakeShape(ref msg) if msg.contains("tools/list") && msg.contains("tools") && msg.contains("array")),
+            "Expected HandshakeShape error about missing tools array, got {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshake_surfaces_null_initialize_envelope() {
+        let server = MockServer::start().await;
+        mount_mcp_rpc(
+            &server,
+            "initialize",
+            ResponseTemplate::new(200).set_body_raw(b"null", "application/json"),
+        )
+        .await;
+
+        let err = run_handshake_blocking(&server)
+            .await
+            .expect_err("handshake must fail");
+        assert!(
+            matches!(err, ProbeError::HandshakeShape(ref msg) if msg.contains("empty envelope")),
+            "Expected HandshakeShape error about empty envelope, got {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_surfaces_non_success_status_as_handshake_shape() {
+        let server = MockServer::start().await;
+        mount_mcp_rpc(&server, "tools/list", ResponseTemplate::new(500)).await;
+        let url = format!("{}/mcp", server.uri());
+
+        let err = tokio::task::spawn_blocking(move || {
+            let client = Client::builder()
+                .timeout(HTTP_CALL_TIMEOUT)
+                .build()
+                .expect("client");
+            call(
+                &client,
+                &url,
+                None,
+                Some(MCP_PROTOCOL_VERSION),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {},
+                }),
+                Instant::now() + Duration::from_secs(TEST_TIMEOUT_SECS),
+            )
+        })
+        .await
+        .expect("join")
+        .expect_err("call must fail");
+
+        assert!(
+            matches!(err, ProbeError::HandshakeShape(ref msg) if msg.contains("500 Internal Server Error")),
+            "Expected HandshakeShape error mentioning 500 status, got {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_parses_json_body_without_content_type_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .and(body_partial_json(json!({"method": "tools/list"})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(
+                    serde_json::to_vec(&json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {"tools": [{"name": "echo"}]},
+                    }))
+                    .expect("json bytes"),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = format!("{}/mcp", server.uri());
+
+        let envelope = tokio::task::spawn_blocking(move || {
+            let client = Client::builder()
+                .timeout(HTTP_CALL_TIMEOUT)
+                .build()
+                .expect("client");
+            call(
+                &client,
+                &url,
+                None,
+                Some(MCP_PROTOCOL_VERSION),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {},
+                }),
+                Instant::now() + Duration::from_secs(TEST_TIMEOUT_SECS),
+            )
+        })
+        .await
+        .expect("join")
+        .expect("call ok");
+
+        assert_eq!(envelope["result"]["tools"][0]["name"], "echo");
     }
 }
