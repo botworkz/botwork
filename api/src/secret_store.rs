@@ -456,4 +456,85 @@ mod tests {
             .expect_err("unavailable");
         assert!(matches!(err, SecretStoreError::Unavailable(_)));
     }
+
+    #[test]
+    fn display_trait_covers_all_variants() {
+        let disabled = SecretStoreError::Disabled;
+        assert!(disabled.to_string().contains("disabled"));
+
+        let unavail = SecretStoreError::Unavailable("conn refused".to_string());
+        assert!(unavail.to_string().contains("unavailable"));
+        assert!(unavail.to_string().contains("conn refused"));
+
+        let exists = SecretStoreError::AlreadyExists("secret already there".to_string());
+        assert!(exists.to_string().contains("already_exists"));
+        assert!(exists.to_string().contains("already there"));
+
+        let not_found = SecretStoreError::NotFound("no such secret".to_string());
+        assert!(not_found.to_string().contains("not_found"));
+        assert!(not_found.to_string().contains("no such secret"));
+
+        let bad_req = SecretStoreError::BadRequest("bad base64".to_string());
+        assert!(bad_req.to_string().contains("bad_request"));
+        assert!(bad_req.to_string().contains("bad base64"));
+    }
+
+    #[tokio::test]
+    async fn put_secret_maps_200_ok_to_success() {
+        // Backend returning 200 (rather than 201) must also be treated as
+        // success — both are in the `s == StatusCode::OK || s == StatusCode::CREATED`
+        // arm at line 208.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "stored": "github.com/pat",
+                "created": false
+            })))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        let ok = client.put_secret(sample_put()).await.expect("put 200 ok");
+        assert_eq!(ok.stored, "github.com/pat");
+        assert!(!ok.created);
+    }
+
+    #[tokio::test]
+    async fn delete_secret_maps_200_ok_to_success() {
+        // Backend returning 200 (rather than 204) must also be treated as
+        // success — both are in the `s == StatusCode::OK || s == StatusCode::NO_CONTENT`
+        // arm at line 267.
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/secrets/github.com/pat"))
+            .and(query_param("tenant", "phlax"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        client
+            .delete_secret("phlax", "github.com", "pat")
+            .await
+            .expect("delete 200 ok");
+    }
+
+    #[test]
+    fn from_env_recognizes_all_truthy_disable_values() {
+        let _guard = EnvGuard::capture();
+        for truthy in &["true", "TRUE", "yes", "YES"] {
+            std::env::set_var(DISABLE_ENV, truthy);
+            let client = SecretStoreClient::from_env();
+            assert!(
+                client.is_disabled(),
+                "expected disabled=true for DISABLE_ENV={truthy}"
+            );
+        }
+        // "0" is NOT truthy
+        std::env::set_var(DISABLE_ENV, "0");
+        let not_disabled = SecretStoreClient::from_env();
+        assert!(
+            !not_disabled.is_disabled(),
+            "expected disabled=false for DISABLE_ENV=0"
+        );
+    }
 }

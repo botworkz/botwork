@@ -3398,4 +3398,82 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(json_body(response).await["error"]["code"], "unavailable");
     }
+
+    #[tokio::test]
+    async fn require_secret_component_rejects_blank_value() {
+        // Empty and whitespace-only values should yield validation_failed.
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/secrets",
+                "phlax",
+                serde_json::json!({
+                    "service": "   ",   // whitespace-only → trimmed to ""
+                    "name": "pat",
+                    "kind": "opaque",
+                    "value_b64": "dGVzdA=="
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "validation_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_secret_component_rejects_too_long_component() {
+        // A component longer than 128 chars hits the `len() > 128` branch
+        // (line 214) — the only condition not covered by the existing
+        // test that uses dot-prefix names.
+        let long_name = "a".repeat(129); // 129 chars, no forbidden chars, not empty
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_request(
+                "POST",
+                "/api/tenant/phlax/secrets",
+                "phlax",
+                serde_json::json!({
+                    "service": long_name,
+                    "name": "pat",
+                    "kind": "opaque",
+                    "value_b64": "dGVzdA=="
+                }),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "validation_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_secret_rejects_too_long_component() {
+        // Same branch via the DELETE handler path.
+        let long_name = "a".repeat(129);
+        let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
+        let app = crate::handler::build_router(state);
+
+        let response = app
+            .oneshot(tenant_delete_request(
+                &format!("/api/tenant/phlax/secrets/github/{long_name}"),
+                "phlax",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(response).await["error"]["code"],
+            "validation_failed"
+        );
+    }
 }

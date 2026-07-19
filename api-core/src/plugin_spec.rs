@@ -1091,4 +1091,179 @@ mod tests {
         assert_eq!(json_type_name(&serde_json::json!(true)), "bool");
         assert_eq!(json_type_name(&serde_json::json!({})), "object");
     }
+
+    // ── additional coverage for uncovered branches ──────────────────
+
+    #[test]
+    fn egress_null_is_rejected() {
+        // `egress: null` (explicit null) is different from absent egress.
+        // The validator catches both, but only the absent path was tested
+        // previously; this exercises the `is_null()` guard.
+        let r = raw("p", "image: ghcr.io/example/p:1.0\negress: ~\n");
+        let err = validate_one(&r).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::PluginInvalid { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn allow_entry_non_mapping_is_rejected() {
+        // A string element in the `allow:` sequence should be rejected.
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress:\n  allow:\n  - \"example.com\"\n",
+        );
+        let err = validate_one(&r).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::PluginInvalid { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn env_non_mapping_non_null_is_rejected() {
+        // `env: "a plain string"` — not a mapping and not null — hits
+        // the `as_mapping().ok_or_else(...)` error path.
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress: all\nenv: \"a plain string\"\n",
+        );
+        let err = validate_one(&r).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::PluginInvalid { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn env_rejects_more_than_max_static_entries() {
+        // Build a YAML string with MAX_STATIC_ENV_ENTRIES + 1 entries.
+        let entries: String = (1..=(MAX_STATIC_ENV_ENTRIES + 1))
+            .map(|i| format!("  ENTRY_{i:02}: value\n"))
+            .collect();
+        let yaml = format!("image: ghcr.io/example/p:1.0\negress: all\nenv:\n{entries}");
+        let r = raw("p", &yaml);
+        let err = validate_one(&r).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::PluginInvalid { .. }),
+            "{err}"
+        );
+        assert!(format!("{err}").contains("too many"), "{err}");
+    }
+
+    #[test]
+    fn env_rejects_non_string_key() {
+        // Construct a YAML mapping whose key is an integer (1) rather than
+        // a string. YAML allows `{1: foo}` and serde_yaml parses this with
+        // a Number key; `as_str()` on the key returns None.
+        let raw_val: serde_yaml::Value =
+            serde_yaml::from_str("image: ghcr.io/example/p:1.0\negress: all\nenv:\n  1: foo\n")
+                .expect("parse yaml");
+        let entry: RawPluginEntry = serde_yaml::from_value(raw_val).expect("deserialise entry");
+        let mut r = entry;
+        r.name = "p".to_string();
+        // Numeric keys in YAML may round-trip as strings in some
+        // serialisers; only assert that validate_one errors, not the
+        // specific message, since the exact behaviour depends on the
+        // serde_yaml version.
+        //
+        // If serde_yaml converts the integer key to the string "1" during
+        // deserialisation (which is valid behaviour), the key won't match
+        // `[A-Z_][A-Z0-9_]*` and the "invalid name" error fires instead.
+        // Either way, validation fails.
+        assert!(validate_one(&r).is_err());
+    }
+
+    #[test]
+    fn resources_null_returns_none() {
+        // `resources: null` (explicit null) is different from absent
+        // resources. Both must return `Ok(None)`.
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress: all\nresources: ~\n",
+        );
+        assert!(validate_one(&r).unwrap().resources.is_none());
+    }
+
+    #[test]
+    fn resources_rejects_non_string_key() {
+        // A numeric key in the resources mapping is not in the allowed
+        // set ("cpus" | "memory" | "pids"), so it hits the catch-all arm.
+        // serde_yaml may convert the numeric key to a string; in that case
+        // it still lands in the `_ => Err(...)` catch-all since the
+        // resulting string is not "cpus", "memory", or "pids".
+        let r = raw(
+            "p",
+            "image: ghcr.io/example/p:1.0\negress: all\nresources:\n  1: foo\n",
+        );
+        assert!(validate_one(&r).is_err());
+    }
+
+    #[test]
+    fn validate_workspace_plugin_config_returns_some_for_valid_nonempty_map() {
+        let raw_val: serde_yaml::Value = serde_yaml::from_str("key: value").expect("parse yaml");
+        let result = validate_workspace_plugin_config("tenant/ws/plugin", Some(&raw_val)).unwrap();
+        let json = result.expect("expected Some(json) for valid non-empty map");
+        assert_eq!(json["key"], "value");
+    }
+
+    #[test]
+    fn type_name_helpers_cover_remaining_variants() {
+        // yaml_type_name: cover Bool, Number, String, Mapping, Tagged
+        assert_eq!(yaml_type_name(&serde_yaml::Value::Bool(true)), "bool");
+        assert_eq!(
+            yaml_type_name(&serde_yaml::Value::Number(serde_yaml::Number::from(1))),
+            "number"
+        );
+        assert_eq!(
+            yaml_type_name(&serde_yaml::Value::String("x".to_string())),
+            "string"
+        );
+        assert_eq!(
+            yaml_type_name(&serde_yaml::Value::Mapping(serde_yaml::Mapping::new())),
+            "mapping"
+        );
+        // Tagged values are constructed via from_str with a YAML tag.
+        let tagged: serde_yaml::Value = serde_yaml::from_str("!!python/object:mymodule.MyClass {}")
+            .unwrap_or(
+                // If the tag isn't parseable as tagged, just construct directly.
+                serde_yaml::Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
+                    tag: serde_yaml::value::Tag::new("tagged"),
+                    value: serde_yaml::Value::Null,
+                })),
+            );
+        if matches!(tagged, serde_yaml::Value::Tagged(_)) {
+            assert_eq!(yaml_type_name(&tagged), "tagged");
+        }
+
+        // json_type_name: cover Null, Number, String, Array
+        assert_eq!(json_type_name(&serde_json::Value::Null), "null");
+        assert_eq!(json_type_name(&serde_json::json!(42)), "number");
+        assert_eq!(json_type_name(&serde_json::json!("str")), "string");
+        assert_eq!(json_type_name(&serde_json::json!([])), "array");
+    }
+
+    #[test]
+    fn plugin_name_and_tool_name_regex_constants_accept_and_reject() {
+        // Ensure PLUGIN_NAME_RE and TOOL_NAME_RE constants are correct.
+        let plugin_re = regex::Regex::new(PLUGIN_NAME_RE).expect("plugin name regex");
+        let tool_re = regex::Regex::new(TOOL_NAME_RE).expect("tool name regex");
+
+        // Plugin names: lowercase letter start, then [a-z0-9-]{0,30}
+        assert!(plugin_re.is_match("my-plugin"));
+        assert!(plugin_re.is_match("a"));
+        assert!(!plugin_re.is_match("1plugin")); // digit start
+        assert!(!plugin_re.is_match("MyPlugin")); // uppercase
+        assert!(!plugin_re.is_match("my_plugin")); // underscore not allowed
+                                                   // 32 chars exceeds the 31-char cap (1 letter + 30 of [a-z0-9-])
+        assert!(!plugin_re.is_match(&"a".repeat(32)));
+
+        // Tool names: [a-z0-9] start, then [a-z0-9_-]*
+        assert!(tool_re.is_match("fetch_url_2"));
+        assert!(tool_re.is_match("0tool"));
+        assert!(!tool_re.is_match("_tool")); // underscore start not allowed
+        assert!(!tool_re.is_match("Tool")); // uppercase not allowed
+        assert!(!tool_re.is_match("")); // empty not allowed
+    }
 }
