@@ -389,6 +389,78 @@ jobs:
         path: .ci-coverage/${{ env.CRATE_SLUG }}/
         if-no-files-found: error
 
+    # ── Per-crate coverage report ────────────────────────────────────────────
+    # Parses the lcov.info produced above and prints a human-readable
+    # summary to the step log and the job step-summary page so coverage
+    # is visible without downloading the artifact.
+    #
+    # Tuning constants:
+    #   MAX_FILES_UNCOV  - list uncovered-line numbers for up to N files.
+    #   MAX_LINES_PER_FILE - per file, print at most N uncovered line numbers.
+    # The full detail is always available in the uploaded lcov artifact.
+    - name: Report per-crate coverage
+      run: |
+        set -euo pipefail
+        MAX_FILES_UNCOV=20
+        MAX_LINES_PER_FILE=30
+        LCOV=".ci-coverage/${CRATE_SLUG}/lcov.info"
+        report="$(awk \
+          -v max_files="${MAX_FILES_UNCOV}" \
+          -v max_lines="${MAX_LINES_PER_FILE}" \
+          -v pkg="${PACKAGE}" \
+          -v slug="${CRATE_SLUG}" \
+          'BEGIN { n=0; tlf=0; tlh=0 }
+          /^SF:/ { f=substr($0,4); clf=0; clh=0; nu=0 }
+          /^DA:/ {
+            split(substr($0,4),p,",")
+            if (p[2]+0==0) { uc[nu++]=p[1] }
+          }
+          /^LF:/ { clf=substr($0,4)+0 }
+          /^LH:/ { clh=substr($0,4)+0 }
+          /^end_of_record/ {
+            if (clf>0) {
+              nm[n]=f; lf[n]=clf; lh[n]=clh
+              tlf+=clf; tlh+=clh
+              nua[n]=nu
+              for (i=0;i<nu;i++) ul[n,i]=uc[i]
+              n++; nu=0
+            }
+          }
+          END {
+            pct=(tlf>0)?(tlh*100.0/tlf):0
+            print "## Coverage: " pkg
+            print ""
+            printf "**Total: %d/%d lines (%.1f%%)**\n\n",tlh,tlf,pct
+            print "| File | Covered | Total | % |"
+            print "|------|---------|-------|---|"
+            for (i=0;i<n;i++) {
+              fp=(lf[i]>0)?(lh[i]*100.0/lf[i]):0
+              printf "| %s | %d | %d | %.1f%% |\n",nm[i],lh[i],lf[i],fp
+            }
+            print ""
+            print "### Uncovered Lines"
+            print ""
+            dc=0
+            for (i=0;i<n;i++) {
+              nc=nua[i]; if (nc==0) continue
+              if (dc>=max_files) {
+                print "_More files omitted - see the " slug "-coverage artifact._"
+                print ""; break
+              }
+              printf "**%s** (%d uncovered)\n\n",nm[i],nc
+              lim=(nc>max_lines)?max_lines:nc
+              printf "Lines: "
+              for (j=0;j<lim;j++) {
+                if (j>0) printf ", "; printf "%s",ul[i,j]
+              }
+              if (nc>max_lines) printf " ... %d more (see artifact)",nc-max_lines
+              printf "\n\n"
+              dc++
+            }
+          }' "${LCOV}")"
+        echo "${report}"
+        printf '%s\n' "${report}" >> "${GITHUB_STEP_SUMMARY}"
+
     # ── Per-crate hadolint ──────────────────────────────────────────────────
     # Lint the same Dockerfile we just built `ci-tools` from. A failure
     # here surfaces on the same runner that was about to publish the

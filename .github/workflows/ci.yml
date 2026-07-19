@@ -240,6 +240,44 @@ jobs:
           "${ignore_args[@]}" \
           --output-type html \
           --output-path coverage/html
+    - name: Report aggregate coverage
+      run: |
+        set -euo pipefail
+        # Max file rows shown in the aggregate table before truncating.
+        MAX_TABLE_FILES=60
+        LCOV=coverage/lcov.info
+        report="$(awk \
+          -v max_rows="${MAX_TABLE_FILES}" \
+          'BEGIN { n=0; tlf=0; tlh=0 }
+          /^SF:/ { f=substr($0,4); clf=0; clh=0 }
+          /^LF:/ { clf=substr($0,4)+0 }
+          /^LH:/ { clh=substr($0,4)+0 }
+          /^end_of_record/ {
+            if (clf>0) {
+              nm[n]=f; lf[n]=clf; lh[n]=clh
+              tlf+=clf; tlh+=clh; n++
+            }
+          }
+          END {
+            pct=(tlf>0)?(tlh*100.0/tlf):0
+            print "## Aggregate Coverage"
+            print ""
+            printf "**Total: %d/%d lines (%.1f%%)**\n\n",tlh,tlf,pct
+            print "> Full HTML report is in the uploaded `coverage` artifact."
+            print ""
+            print "| File | Covered | Total | % |"
+            print "|------|---------|-------|---|"
+            rows=(n>max_rows)?max_rows:n
+            for (i=0;i<rows;i++) {
+              fp=(lf[i]>0)?(lh[i]*100.0/lf[i]):0
+              printf "| %s | %d | %d | %.1f%% |\n",nm[i],lh[i],lf[i],fp
+            }
+            if (n>max_rows) {
+              printf "\n_%d more files - download the `coverage` artifact._\n",n-max_rows
+            }
+          }' "${LCOV}")"
+        echo "${report}"
+        printf '%s\n' "${report}" >> "${GITHUB_STEP_SUMMARY}"
     - name: Upload aggregate coverage artifact
       uses: actions/upload-artifact@v4
       with:
