@@ -20,15 +20,16 @@ jobs:
         targets: wasm32-unknown-unknown
     - uses: Swatinem/rust-cache@v2
     - run: cargo fmt --all -- --check
-    # Verify Cargo.lock is up to date.  Copies the committed lockfile, runs
-    # `cargo update --workspace` (which regenerates it in-place), then diffs.
-    # If the diff is non-empty the committed lockfile is stale or hand-edited.
+    # Verify Cargo.lock is consistent with the workspace manifests without
+    # upgrading any dependencies.  Fails with an actionable message when the
+    # committed lockfile is stale (e.g. after editing a Cargo.toml but
+    # forgetting to regenerate the lock).
     - name: Verify Cargo.lock is up to date
       run: |
-        cp Cargo.lock Cargo.lock.orig
-        cargo update --workspace --locked
-        diff -u Cargo.lock.orig Cargo.lock || {
-          echo "Cargo.lock is stale — run 'cargo update --workspace' locally and commit the result."
+        cargo metadata --locked --format-version 1 >/dev/null || {
+          echo "::error::Cargo.lock is out of date with Cargo.toml." \
+               "Run 'cargo generate-lockfile' or 'cargo update --workspace'" \
+               "locally and commit the result."
           exit 1
         }
     # `--workspace` covers every member, including ui/wasm.
