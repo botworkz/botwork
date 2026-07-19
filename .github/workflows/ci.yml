@@ -175,71 +175,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        components: llvm-tools-preview
-    - uses: taiki-e/install-action@grcov
+    - name: Install lcov
+      run: sudo apt-get install -y --no-install-recommends lcov
     - name: Download per-crate coverage artifacts
       uses: actions/download-artifact@v4
       with:
         pattern: '*-coverage'
         path: .ci-coverage
-    - name: Aggregate coverage with grcov
+    - name: Merge per-crate lcov files
       run: |
         set -euo pipefail
         mkdir -p coverage/html
-        profraw_count="$(
-          find .ci-coverage -type f -name '*.profraw' | wc -l
-        )"
-        if [ "${profraw_count}" -eq 0 ]; then
-          echo "::error::no per-crate .profraw files were downloaded"
+        # Collect per-crate lcov.info files downloaded by download-artifact@v4.
+        # Layout: .ci-coverage/<crate-slug>-coverage/lcov.info (one per crate).
+        # Each lcov is already scoped to that crate's own source (--keep-only in
+        # _crate.yml) and paths are repo-relative (--prefix-dir in _crate.yml),
+        # so no crate can be credited for coverage produced by another crate's tests.
+        tracefile_args=()
+        for f in .ci-coverage/*-coverage/lcov.info; do
+          [ -f "$f" ] && tracefile_args+=(--add-tracefile "$f")
+        done
+        if [ "${#tracefile_args[@]}" -eq 0 ]; then
+          echo "::error::no per-crate lcov.info files were downloaded"
           exit 1
         fi
-        # Build --binary-path args for each crate's instrumented-binary dir.
-        # download-artifact@v4 with pattern '*-coverage' and path .ci-coverage
-        # lays out each artifact as .ci-coverage/<crate-slug>-coverage/
-        # with binaries/ nested inside. Pass one --binary-path per crate so
-        # grcov can locate the instrumented test executables that produced
-        # the profraw data.
-        binary_path_args=()
-        for d in .ci-coverage/*/binaries; do
-          [ -d "$d" ] && binary_path_args+=(--binary-path "$d")
-        done
-        # Keep parity with tarpaulin.toml exclude-files (local coverage path).
-        # CI uses grcov --ignore; local uses tarpaulin exclude-files. Both lists
-        # must be kept in sync — see tarpaulin.toml for the canonical rationale
-        # for each exclusion. Note: tarpaulin.toml lists ui/wasm/src/api.rs and
-        # ui/wasm/src/pages/mod.rs individually because the whole botwork-ui-wasm
-        # crate is excluded via `exclude = ["botwork-ui-wasm"]` there; here we
-        # use the broader ui/wasm/src/* which subsumes those specific files.
-        ignore_args=(
-          --ignore "db/entity/src/*"
-          --ignore "db/migration/src/*"
-          --ignore "*/main.rs"
-          --ignore "ui/wasm/src/*"
-        )
-        # Baseline-only run: no fail-under threshold yet. Maintainer will
-        # ratchet a floor in a dedicated follow-up once the baseline is stable.
-        grcov .ci-coverage \
-          --source-dir . \
-          --branch \
-          --ignore-not-existing \
-          "${binary_path_args[@]}" \
-          "${ignore_args[@]}" \
-          --output-type lcov \
-          --output-path coverage/lcov.info
+        # Merge all per-crate lcovs into one repo-level report.
+        # No fail-under threshold yet (baseline run). Maintainer will ratchet
+        # a floor in a dedicated follow-up once the baseline is stable.
+        lcov "${tracefile_args[@]}" --output-file coverage/lcov.info
         if [ ! -s coverage/lcov.info ]; then
           echo "::error::aggregate coverage/lcov.info missing or empty"
           exit 1
         fi
-        grcov .ci-coverage \
-          --source-dir . \
-          --branch \
-          --ignore-not-existing \
-          "${binary_path_args[@]}" \
-          "${ignore_args[@]}" \
-          --output-type html \
-          --output-path coverage/html
+        genhtml coverage/lcov.info --output-directory coverage/html
     - name: Report aggregate coverage
       run: |
         set -euo pipefail

@@ -170,6 +170,18 @@ jobs:
         set -euo pipefail
         crate='${{ inputs.crate }}'
         echo "CRATE_SLUG=${crate//\//-}" >> "${GITHUB_ENV}"
+        # Derive --keep-only glob: whitelist just this crate's own source subtree
+        # so the coverage report contains only first-party source for this crate.
+        # Special cases: ui server source lives in ui/server/ (ui/wasm/ has its
+        # own separate job); db/migration and db/entity each scope to their
+        # sub-directory rather than the shared db/ parent.
+        case "${crate}" in
+          ui)           keep_only="ui/server/*" ;;
+          db/migration) keep_only="db/migration/*" ;;
+          db/entity)    keep_only="db/entity/*" ;;
+          *)            keep_only="${crate}/*" ;;
+        esac
+        echo "KEEP_ONLY=${keep_only}" >> "${GITHUB_ENV}"
 
     # ── Cross-run cargo cache ───────────────────────────────────────────────
     # `Swatinem/rust-cache@v2` keys on `Cargo.lock` + the host rust
@@ -372,9 +384,11 @@ jobs:
         grcov ".ci-coverage/${CRATE_SLUG}/raw" \
           --binary-path ".ci-coverage/${CRATE_SLUG}/binaries" \
           --source-dir . \
+          --prefix-dir "${GITHUB_WORKSPACE}" \
           --branch \
           --ignore-not-existing \
           "${ignore_args[@]}" \
+          --keep-only "${KEEP_ONLY}" \
           --output-type lcov \
           --output-path ".ci-coverage/${CRATE_SLUG}/lcov.info"
         if [ ! -s ".ci-coverage/${CRATE_SLUG}/lcov.info" ]; then
