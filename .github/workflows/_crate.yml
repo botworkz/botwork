@@ -182,6 +182,13 @@ jobs:
           *)            keep_only="${crate}/*" ;;
         esac
         echo "KEEP_ONLY=${keep_only}" >> "${GITHUB_ENV}"
+        # Sanity-check: the base directory must exist or the keep-only filter
+        # will silently produce an empty report. Fail early with a clear message.
+        keep_only_dir="${keep_only%/*}"
+        if [ ! -d "${keep_only_dir}" ]; then
+          echo "::error::keep-only dir '${keep_only_dir}' not found for crate '${crate}'"
+          exit 1
+        fi
 
     # ── Cross-run cargo cache ───────────────────────────────────────────────
     # `Swatinem/rust-cache@v2` keys on `Cargo.lock` + the host rust

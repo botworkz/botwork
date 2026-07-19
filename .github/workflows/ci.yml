@@ -192,9 +192,11 @@ jobs:
         # _crate.yml) and paths are repo-relative (--prefix-dir in _crate.yml),
         # so no crate can be credited for coverage produced by another crate's tests.
         tracefile_args=()
+        shopt -s nullglob
         for f in .ci-coverage/*-coverage/lcov.info; do
-          [ -f "$f" ] && tracefile_args+=(--add-tracefile "$f")
+          tracefile_args+=(--add-tracefile "$f")
         done
+        shopt -u nullglob
         if [ "${#tracefile_args[@]}" -eq 0 ]; then
           echo "::error::no per-crate lcov.info files were downloaded"
           exit 1
