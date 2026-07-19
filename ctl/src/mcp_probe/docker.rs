@@ -45,8 +45,15 @@ pub(crate) trait DockerApi {
     /// Force-remove a container (stopped or running).
     fn remove_container<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), BollardError>>;
 
-    /// Commit `container_id` to a new local image at `repo:tag`,
-    /// overwriting the image config labels with the supplied map.
+    /// Commit `container_id` to a new local image at `repo:tag`, setting the
+    /// image config labels to exactly the supplied map.
+    ///
+    /// Note: the docker commit endpoint *replaces* the image's label set with
+    /// whatever is passed here — it does not merge with the source image's
+    /// existing labels. Callers that need crane-style merge semantics (e.g.
+    /// `patch::patch_image`) must inspect the source image and pass the merged
+    /// union; this seam commits verbatim what it is handed.
+    ///
     /// Returns the new image ID.
     fn commit_container<'a>(
         &'a self,
