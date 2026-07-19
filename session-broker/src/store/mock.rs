@@ -316,6 +316,14 @@ impl MockSessionWorkerStore {
         std::mem::take(&mut self.inner.lock().expect("lock").recorded_reaps)
     }
 
+    pub async fn drain_recorded_spawns(&self) -> Vec<(String, String, String)> {
+        std::mem::take(&mut self.inner.lock().expect("lock").recorded_spawns)
+    }
+
+    pub async fn drain_recorded_mcp_backfills(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.inner.lock().expect("lock").recorded_mcp_backfills)
+    }
+
     fn maybe_db_err(&self) -> Option<SessionWorkerWriteError> {
         self.always_error
             .as_ref()
