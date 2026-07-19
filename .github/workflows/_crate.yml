@@ -176,12 +176,35 @@ jobs:
         # own separate job); db/migration and db/entity each scope to their
         # sub-directory rather than the shared db/ parent.
         case "${crate}" in
-          ui)           keep_only="ui/server/*" ;;
-          db/migration) keep_only="db/migration/*" ;;
-          db/entity)    keep_only="db/entity/*" ;;
-          *)            keep_only="${crate}/*" ;;
+          ui)
+            keep_only="ui/server/*"
+            expected_empty_coverage=false
+            ;;
+          ui/wasm)
+            keep_only="ui/wasm/*"
+            # ui/wasm source is intentionally excluded from CI grcov via
+            # --ignore "ui/wasm/src/*", so the per-crate lcov is expected to
+            # contain no DA records.
+            expected_empty_coverage=true
+            ;;
+          db/migration)
+            keep_only="db/migration/*"
+            expected_empty_coverage=false
+            ;;
+          db/entity)
+            keep_only="db/entity/*"
+            # db/entity source is intentionally excluded from CI grcov via
+            # --ignore "db/entity/src/*", so the per-crate lcov is expected to
+            # contain no DA records.
+            expected_empty_coverage=true
+            ;;
+          *)
+            keep_only="${crate}/*"
+            expected_empty_coverage=false
+            ;;
         esac
         echo "KEEP_ONLY=${keep_only}" >> "${GITHUB_ENV}"
+        echo "EXPECTED_EMPTY_COVERAGE=${expected_empty_coverage}" >> "${GITHUB_ENV}"
         # Sanity-check: the base directory must exist or the keep-only filter
         # will silently produce an empty report. Fail early with a clear message.
         keep_only_dir="${keep_only%/*}"
@@ -401,6 +424,14 @@ jobs:
         if [ ! -s ".ci-coverage/${CRATE_SLUG}/lcov.info" ]; then
           echo "::error::per-crate lcov missing or empty for ${PACKAGE}"
           exit 1
+        fi
+        if ! grep -q '^DA:' ".ci-coverage/${CRATE_SLUG}/lcov.info"; then
+          if [ "${EXPECTED_EMPTY_COVERAGE}" = "true" ]; then
+            echo "::notice::per-crate lcov for ${PACKAGE} has no DA records because all first-party source for ${CRATE} is intentionally excluded from CI coverage"
+          else
+            echo "::error::per-crate lcov for ${PACKAGE} has no DA records after filtering"
+            exit 1
+          fi
         fi
 
     - name: Upload per-crate coverage artifact

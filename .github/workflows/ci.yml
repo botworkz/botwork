@@ -206,12 +206,13 @@ jobs:
         # a floor in a dedicated follow-up once the baseline is stable.
         #
         # lcov v2 aborts the merge if ANY input tracefile has no valid records.
-        # Crates that legitimately produce 0% coverage (e.g. api-core, version,
-        # bootstrap — pure glue / trait-only crates) emit an empty lcov, which is
-        # the "0% is not a failure" case, not an error. --ignore-errors
-        # empty,unused,corrupt makes lcov skip such a tracefile instead of
-        # killing the merge. The non-empty assertion on the merged output below
-        # still guards against a totally empty aggregate.
+        # Some crates are intentionally record-less under CI grcov because every
+        # first-party source file they own is excluded from coverage collection
+        # (today: db/entity, ui/wasm). --ignore-errors empty,unused,corrupt
+        # makes lcov skip such a tracefile instead of killing the merge. Crates
+        # that still have DA/LF records but happen to be 0% covered are not an
+        # error and continue to merge normally. The per-crate DA-record guard in
+        # _crate.yml fails unexpected record-less reports before they get here.
         lcov "${tracefile_args[@]}" \
           --ignore-errors empty,unused,corrupt \
           --output-file coverage/lcov.info
