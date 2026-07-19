@@ -65,7 +65,6 @@
 
 use std::fmt;
 
-use generic_array::GenericArray;
 use opaque_ke::ciphersuite::CipherSuite;
 use opaque_ke::ksf::Ksf;
 use rand::{CryptoRng, RngCore};
@@ -405,7 +404,7 @@ impl fmt::Debug for ServerSetup {
 // Session / export keys
 // ---------------------------------------------------------------------------
 
-type KeyArray = GenericArray<u8, generic_array::typenum::U64>;
+type KeyArray = [u8; KEY_LEN];
 
 /// Mutually-derived AKE output. Both ends of a successful login finish
 /// holding the *same* [`SessionKey`]; it makes a sound key for an
@@ -422,14 +421,14 @@ pub struct SessionKey(KeyArray);
 impl SessionKey {
     /// Borrow the raw 64-byte key.
     pub fn as_bytes(&self) -> &[u8] {
-        self.0.as_slice()
+        &self.0
     }
 }
 
 impl PartialEq for SessionKey {
     fn eq(&self, other: &Self) -> bool {
         use subtle::ConstantTimeEq;
-        self.0.as_slice().ct_eq(other.0.as_slice()).into()
+        self.0[..].ct_eq(&other.0[..]).into()
     }
 }
 
@@ -459,14 +458,14 @@ pub struct ExportKey(KeyArray);
 impl ExportKey {
     /// Borrow the raw 64-byte key.
     pub fn as_bytes(&self) -> &[u8] {
-        self.0.as_slice()
+        &self.0
     }
 }
 
 impl PartialEq for ExportKey {
     fn eq(&self, other: &Self) -> bool {
         use subtle::ConstantTimeEq;
-        self.0.as_slice().ct_eq(other.0.as_slice()).into()
+        self.0[..].ct_eq(&other.0[..]).into()
     }
 }
 
@@ -717,7 +716,11 @@ pub mod client {
             .map_err(OpaqueError::from_protocol)?;
         Ok(ClientRegistrationFinish {
             upload: RegistrationUpload(finish.message),
-            export_key: ExportKey(finish.export_key),
+            export_key: ExportKey(
+                (&*finish.export_key)
+                    .try_into()
+                    .expect("export key is always KEY_LEN bytes"),
+            ),
         })
     }
 
@@ -755,8 +758,16 @@ pub mod client {
             .map_err(OpaqueError::from_protocol)?;
         Ok(ClientLoginFinish {
             finalization: LoginFinalization(finish.message),
-            session_key: SessionKey(finish.session_key),
-            export_key: ExportKey(finish.export_key),
+            session_key: SessionKey(
+                (&*finish.session_key)
+                    .try_into()
+                    .expect("session key is always KEY_LEN bytes"),
+            ),
+            export_key: ExportKey(
+                (&*finish.export_key)
+                    .try_into()
+                    .expect("export key is always KEY_LEN bytes"),
+            ),
         })
     }
 }
@@ -843,7 +854,11 @@ pub mod server {
             .0
             .finish(finalization.0)
             .map_err(OpaqueError::from_protocol)?;
-        Ok(SessionKey(finish.session_key))
+        Ok(SessionKey(
+            (&*finish.session_key)
+                .try_into()
+                .expect("session key is always KEY_LEN bytes"),
+        ))
     }
 }
 
@@ -1097,18 +1112,18 @@ mod tests {
         b_bytes[KEY_LEN - 1] = 8;
         let c_bytes = a_bytes;
         a_bytes[0] = 7;
-        let a = SessionKey(GenericArray::clone_from_slice(&a_bytes));
-        let b = SessionKey(GenericArray::clone_from_slice(&b_bytes));
-        let c = SessionKey(GenericArray::clone_from_slice(&c_bytes));
+        let a = SessionKey(a_bytes);
+        let b = SessionKey(b_bytes);
+        let c = SessionKey(c_bytes);
         assert_eq!(a, c, "byte-identical SessionKeys must compare equal");
         assert_ne!(
             a, b,
             "SessionKeys differing in tail byte must compare unequal"
         );
 
-        let ea = ExportKey(GenericArray::clone_from_slice(&a_bytes));
-        let eb = ExportKey(GenericArray::clone_from_slice(&b_bytes));
-        let ec = ExportKey(GenericArray::clone_from_slice(&c_bytes));
+        let ea = ExportKey(a_bytes);
+        let eb = ExportKey(b_bytes);
+        let ec = ExportKey(c_bytes);
         assert_eq!(ea, ec, "byte-identical ExportKeys must compare equal");
         assert_ne!(
             ea, eb,
