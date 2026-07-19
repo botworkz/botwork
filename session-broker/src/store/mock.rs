@@ -260,7 +260,8 @@ struct SessionWorkerInner {
     /// Per-container override: if the container name is in this map,
     /// `record_reap` returns that error instead of succeeding.
     record_reap_errors: HashMap<String, String>,
-    /// If set, `resolve_plugin_name` returns this error for every lookup.
+    /// Global override: if set, `resolve_plugin_name` returns this error
+    /// for all plugin-id lookups. All other operations still succeed.
     resolve_plugin_name_error: Option<String>,
 }
 

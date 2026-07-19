@@ -147,7 +147,7 @@ pub async fn recover_live_workers(state: &AppState) {
 }
 
 /// Testable variant of [`recover_live_workers`] that accepts injectable
-/// seams for the three external calls.  Production calls the public
+/// seams for the three external calls. Production calls the public
 /// `recover_live_workers` which wires the real implementations;
 /// unit tests inject closures so the reconciliation logic can be exercised
 /// without a running docker daemon or config-broker.

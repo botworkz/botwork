@@ -48,7 +48,7 @@ botwork-migration = { path = "../db/migration" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 http = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-sea-orm = { version = "1.1.20", features = ["mock"] }
+sea-orm = { version = "1.1.20", default-features = false, features = ["mock"] }
 sea-orm-migration = { version = "1.1.20", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",
