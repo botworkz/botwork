@@ -42,18 +42,31 @@ use crate::log_info;
 /// which is well inside the noise floor for both maps.
 pub const DEFAULT_SWEEPER_INTERVAL_SECS: u64 = 60;
 
+/// Pure helper: converts an already-read env value into the sweeper
+/// interval. `None` (unset), `Some("0")`, and any unparseable string all
+/// yield [`DEFAULT_SWEEPER_INTERVAL_SECS`].
+///
+/// Extracted so tests can exercise the parse/default logic directly without
+/// mutating the process-global environment.
+pub fn sweeper_interval_from(raw: Option<&str>) -> Duration {
+    let secs = raw
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_SWEEPER_INTERVAL_SECS);
+    Duration::from_secs(secs)
+}
+
 /// Reads `BOTWORK_BROKER_SWEEPER_INTERVAL_SECS`, falling back to
 /// [`DEFAULT_SWEEPER_INTERVAL_SECS`].  A value of `0`, an unparseable string,
 /// or an unset variable all yield the default — the sweeper cannot run with a
 /// zero interval (`tokio::time::interval` panics on `Duration::ZERO`), and
 /// silently degrading to the default is friendlier than refusing to start.
 pub fn sweeper_interval_from_env() -> Duration {
-    let secs = std::env::var("BOTWORK_BROKER_SWEEPER_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&s| s > 0)
-        .unwrap_or(DEFAULT_SWEEPER_INTERVAL_SECS);
-    Duration::from_secs(secs)
+    sweeper_interval_from(
+        std::env::var("BOTWORK_BROKER_SWEEPER_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Removes every entry from `map` whose expiry is at or before `now`. Returns
@@ -198,49 +211,39 @@ mod tests {
         handle.abort();
     }
 
-    /// All env-var cases live in one test so they execute sequentially
-    /// against the shared process-global, rather than racing each other under
-    /// cargo's default parallel-test execution. Same pattern as the
-    /// `BOTWORK_BROKER_DISCONNECT_GRACE_SECS` tests in
-    /// `tests/liveness_test.rs`.
-    ///
-    /// SAFETY: `BOTWORK_BROKER_SWEEPER_INTERVAL_SECS` is read only by
-    /// `sweeper_interval_from_env`; nothing else in the workspace touches it.
-    #[tokio::test]
-    async fn sweeper_interval_from_env_cases() {
-        // Unset → default.
-        std::env::remove_var("BOTWORK_BROKER_SWEEPER_INTERVAL_SECS");
+    #[test]
+    fn sweeper_interval_unset_yields_default() {
         assert_eq!(
-            sweeper_interval_from_env(),
+            sweeper_interval_from(None),
             Duration::from_secs(DEFAULT_SWEEPER_INTERVAL_SECS),
             "unset should fall back to default"
         );
+    }
 
-        // Zero → default (else `tokio::time::interval` would panic).
-        std::env::set_var("BOTWORK_BROKER_SWEEPER_INTERVAL_SECS", "0");
+    #[test]
+    fn sweeper_interval_zero_yields_default() {
         assert_eq!(
-            sweeper_interval_from_env(),
+            sweeper_interval_from(Some("0")),
             Duration::from_secs(DEFAULT_SWEEPER_INTERVAL_SECS),
             "zero should fall back to default"
         );
+    }
 
-        // Unparseable → default.
-        std::env::set_var("BOTWORK_BROKER_SWEEPER_INTERVAL_SECS", "not-a-number");
+    #[test]
+    fn sweeper_interval_garbage_yields_default() {
         assert_eq!(
-            sweeper_interval_from_env(),
+            sweeper_interval_from(Some("not-a-number")),
             Duration::from_secs(DEFAULT_SWEEPER_INTERVAL_SECS),
             "garbage should fall back to default"
         );
+    }
 
-        // Positive integer → that integer.
-        std::env::set_var("BOTWORK_BROKER_SWEEPER_INTERVAL_SECS", "7");
+    #[test]
+    fn sweeper_interval_positive_integer_is_honoured() {
         assert_eq!(
-            sweeper_interval_from_env(),
+            sweeper_interval_from(Some("7")),
             Duration::from_secs(7),
             "positive integer should be honoured"
         );
-
-        // Leave the env clean for any subsequent runs.
-        std::env::remove_var("BOTWORK_BROKER_SWEEPER_INTERVAL_SECS");
     }
 }
