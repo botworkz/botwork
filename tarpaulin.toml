@@ -58,5 +58,11 @@ exclude-files = [
   "ui/wasm/src/api.rs",
   "ui/wasm/src/pages/mod.rs",
 ]
+# `test-support` is a feature defined by auth-broker and vault that gates
+# their in-process test helpers and required-features test targets. With
+# resolver = "2", Cargo activates the feature only for packages that declare
+# it and silently ignores it for the rest of the workspace — so adding it
+# here does not break any crate that lacks the feature.
+features = ["test-support"]
 out = ["Lcov"]
 output-dir = "coverage"
