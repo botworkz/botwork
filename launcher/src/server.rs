@@ -48,6 +48,12 @@ struct LaunchRequest<'a> {
     /// the parsed view because the validator copies values out of the
     /// JSON payload; same shape as `env`.
     labels: Vec<(String, String)>,
+    /// Raw secret pairs from session-broker: `(sanitized_name, plaintext_value)`.
+    ///
+    /// The launcher owns all path/env-name mangling.  Values must never be
+    /// logged or put into `ContainerCreateBody.env`; they are written into a
+    /// container-local tmpfs via the daemon put-archive API.
+    secrets: Vec<(String, String)>,
 }
 
 #[cfg_attr(test, derive(Debug))]
@@ -154,18 +160,20 @@ async fn handle_launch(
             // rules at the wire boundary, so docker.rs treats the
             // slice as trusted.
             labels: &launch.labels,
+            secrets: &launch.secrets,
         },
         &state.validators,
     )
     .await?;
 
     log_info(&format!(
-        "launch ok: name={} image={} network={} staging_path={} env_count={} label_count={} ip={}",
+        "launch ok: name={} image={} network={} staging_path={} env_count={} secrets_count={} label_count={} ip={}",
         launch.name,
         launch.image,
         launch.network,
         launch.staging_path,
         env.len(),
+        launch.secrets.len(),
         launch.labels.len(),
         outcome.container_ip,
     ));
@@ -517,6 +525,72 @@ fn parse_launch_payload<'a>(
         }
     };
 
+    // Raw secret pairs from session-broker.  The launcher owns all mangling
+    // (path layout, *_FILE env naming, permissions).  Values must never be
+    // logged — we only log the count and the sanitized names.
+    //
+    // Wire shape: `secrets: [{name: "GITHUB_COM_PAT", value: "…"}, …]`
+    //
+    // Validation caps mirror the env caps: max 64 entries, max 64 KiB per value.
+    // Secret names must pass `valid_env_name`; the launcher will prefix them
+    // with `BOTWORK_SECRET_` and suffix with `_FILE` to form the env pointer.
+    // Secret values must not contain NUL bytes.
+    let secrets = match payload.get("secrets") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(entries)) => {
+            if entries.len() > MAX_ENV_ENTRIES {
+                return Err(LauncherError::PayloadTooLarge(
+                    "too many secret entries".to_string(),
+                ));
+            }
+            let mut seen = HashSet::new();
+            let mut secrets = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let Value::Object(entry_obj) = entry else {
+                    return Err(LauncherError::BadRequest(
+                        "invalid secret entry".to_string(),
+                    ));
+                };
+                if entry_obj.len() != 2 {
+                    return Err(LauncherError::BadRequest(
+                        "invalid secret entry".to_string(),
+                    ));
+                }
+                let name = entry_obj
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| LauncherError::BadRequest("invalid secret entry".to_string()))?;
+                let value = entry_obj
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| LauncherError::BadRequest("invalid secret entry".to_string()))?;
+                if !validators.valid_env_name(name) {
+                    return Err(LauncherError::BadRequest(format!(
+                        "invalid secret name: {name}"
+                    )));
+                }
+                if value.contains('\0') {
+                    return Err(LauncherError::BadRequest(
+                        "invalid secret value".to_string(),
+                    ));
+                }
+                if value.len() > MAX_ENV_VALUE_LEN {
+                    return Err(LauncherError::PayloadTooLarge(
+                        "secret value too large".to_string(),
+                    ));
+                }
+                if !seen.insert(name) {
+                    return Err(LauncherError::BadRequest(format!(
+                        "duplicate secret name: {name}"
+                    )));
+                }
+                secrets.push((name.to_string(), value.to_string()));
+            }
+            secrets
+        }
+        Some(_) => return Err(LauncherError::BadRequest("invalid secrets".to_string())),
+    };
+
     Ok(LaunchRequest {
         name,
         image,
@@ -528,6 +602,7 @@ fn parse_launch_payload<'a>(
         memory_limit,
         env,
         labels,
+        secrets,
     })
 }
 

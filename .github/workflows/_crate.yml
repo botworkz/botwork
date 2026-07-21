@@ -378,16 +378,6 @@ jobs:
     - name: Build per-crate coverage outputs
       run: |
         set -euo pipefail
-        binary_dir=".ci-coverage/${CRATE_SLUG}/binaries"
-        mkdir -p "${binary_dir}"
-        if [ -d target/debug ]; then
-          find target/debug -maxdepth 1 -type f -executable \
-            -exec cp {} "${binary_dir}/" \;
-        fi
-        if [ -d target/debug/deps ]; then
-          find target/debug/deps -maxdepth 1 -type f -executable \
-            -exec cp {} "${binary_dir}/" \;
-        fi
         profraw_count="$(
           find ".ci-coverage/${CRATE_SLUG}/raw" -type f -name '*.profraw' | wc -l
         )"
@@ -421,8 +411,14 @@ jobs:
         else
           prefix_dir="${GITHUB_WORKSPACE}"
         fi
+        # Point grcov straight at target/debug. grcov walks --binary-path
+        # recursively and matches binaries to profraw by hash, so there is no
+        # need to first copy the instrumented test binaries into a separate
+        # dir. The previous copy of target/debug + target/debug/deps into
+        # .ci-coverage/<slug>/binaries duplicated a large, coverage-inflated
+        # tree onto the same disk and exhausted the runner's disk space.
         grcov ".ci-coverage/${CRATE_SLUG}/raw" \
-          --binary-path ".ci-coverage/${CRATE_SLUG}/binaries" \
+          --binary-path target/debug \
           --source-dir . \
           --prefix-dir "${prefix_dir}" \
           --branch \
@@ -643,7 +639,7 @@ jobs:
         fi
         echo "OCI labels OK: version=${actual_version} revision=${actual_revision:0:7} source=${actual_source}"
 
-    # ── Save runtime image as artifact ──────────────────────────────────────
+    # ── Save runtime image as artifact ───────────────────────────���──────────
     # `docker save | gzip` the smoke-tested image so the publish job
     # in ci.yml can `docker load` exactly these bytes — no rebuild, no
     # round-trip to a registry, no possibility of label/cache drift.
