@@ -14,9 +14,8 @@ use tokio::time::timeout;
 
 use crate::{log_info, redact_token};
 
-pub(crate) const MAX_ENV_ENTRIES: usize = 64;
-pub(crate) const MAX_ENV_VALUE_BYTES: usize = 64 * 1024;
-pub(crate) const SECRET_ENV_PREFIX: &str = "BOTWORK_SECRET_";
+pub(crate) const MAX_SECRET_ENTRIES: usize = 64;
+pub(crate) const MAX_SECRET_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedSecret {
@@ -186,48 +185,55 @@ fn secret_services(secrets: &[FetchedSecret]) -> Vec<String> {
     services
 }
 
-/// Maps auth-broker secrets to launcher env entries:
+/// Maps auth-broker secrets to raw name/value pairs for the launcher `secrets` wire field.
 ///
-/// - Name: `BOTWORK_SECRET_<SANITIZED_SERVICE>_<SANITIZED_NAME>`
-/// - Value: decoded bytes interpreted with `String::from_utf8_lossy`
+/// The **launcher** owns all mangling (path layout, `*_FILE` env naming, permissions).
+/// session-broker produces only the sanitized `<SERVICE>_<NAME>` segment as the name,
+/// never a full env-var name or a `_FILE` pointer.
 ///
-/// Sanitization is byte-wise:
+/// Name segment sanitization is byte-wise:
 /// - ASCII letters are upper-cased
 /// - ASCII digits are preserved
 /// - every other byte becomes `_`
 ///
+/// For example: `service="github.com", name="pat"` → `("GITHUB_COM_PAT", "<value>")`
+///
 /// Duplicates (after sanitization) keep first value and drop later entries.
 /// Output preserves input order, is capped at 64 entries, and skips values over 64 KiB.
-pub fn build_env_entries(secrets: &[FetchedSecret]) -> Vec<(String, String)> {
+///
+/// Secret values are never logged.
+pub fn build_secret_pairs(secrets: &[FetchedSecret]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
     for secret in secrets {
-        if out.len() >= MAX_ENV_ENTRIES {
-            log_info("warn: secrets env entries exceed 64; truncating");
+        if out.len() >= MAX_SECRET_ENTRIES {
+            log_info("warn: secrets entries exceed 64; truncating");
             break;
         }
-        if secret.value.len() > MAX_ENV_VALUE_BYTES {
+        if secret.value.len() > MAX_SECRET_VALUE_BYTES {
             log_info(&format!(
-                "warn: secret env value too large; skipping service={} name={}",
+                "warn: secret value too large; skipping service={} name={}",
                 secret.service, secret.name
             ));
             continue;
         }
-        let env_name = format!(
-            "{SECRET_ENV_PREFIX}{}_{}",
+        // The name sent to the launcher is the sanitized `<SERVICE>_<NAME>` segment.
+        // The launcher prepends `BOTWORK_SECRET_` and appends `_FILE` for the env pointer.
+        let raw_name = format!(
+            "{}_{}",
             sanitize_segment(&secret.service),
             sanitize_segment(&secret.name)
         );
-        if !seen.insert(env_name.clone()) {
+        if !seen.insert(raw_name.clone()) {
             log_info(&format!(
-                "warn: duplicate secret env name {}; keeping first value",
-                env_name
+                "warn: duplicate secret name {}; keeping first value",
+                raw_name
             ));
             continue;
         }
         out.push((
-            env_name,
+            raw_name,
             String::from_utf8_lossy(&secret.value).into_owned(),
         ));
     }
@@ -270,8 +276,8 @@ mod tests {
     }
 
     #[test]
-    fn build_env_entries_sanitises_service_and_name() {
-        let entries = build_env_entries(&[
+    fn build_secret_pairs_sanitises_service_and_name() {
+        let entries = build_secret_pairs(&[
             secret("github.com", "pat", b"1"),
             secret("shared", "secret", b"2"),
             secret("npm-registry", "token", b"3"),
@@ -282,60 +288,73 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "BOTWORK_SECRET_GITHUB_COM_PAT",
-                "BOTWORK_SECRET_SHARED_SECRET",
-                "BOTWORK_SECRET_NPM_REGISTRY_TOKEN",
-                "BOTWORK_SECRET_9_LEADING_DIGIT_X",
+                "GITHUB_COM_PAT",
+                "SHARED_SECRET",
+                "NPM_REGISTRY_TOKEN",
+                "9_LEADING_DIGIT_X",
             ]
         );
     }
 
     #[test]
-    fn build_env_entries_handles_collisions_first_wins() {
-        let entries = build_env_entries(&[
+    fn build_secret_pairs_handles_collisions_first_wins() {
+        let entries = build_secret_pairs(&[
             secret("github.com", "pat", b"first"),
             secret("github/com", "pat", b"second"),
         ]);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, "BOTWORK_SECRET_GITHUB_COM_PAT");
+        assert_eq!(entries[0].0, "GITHUB_COM_PAT");
         assert_eq!(entries[0].1, "first");
     }
 
     #[test]
-    fn build_env_entries_truncates_at_64() {
+    fn build_secret_pairs_truncates_at_64() {
         let secrets: Vec<FetchedSecret> = (0..65)
             .map(|idx| secret("service", &format!("name{idx}"), b"v"))
             .collect();
-        let entries = build_env_entries(&secrets);
+        let entries = build_secret_pairs(&secrets);
         assert_eq!(entries.len(), 64);
     }
 
     #[test]
-    fn build_env_entries_skips_oversized_values() {
-        let entries = build_env_entries(&[
+    fn build_secret_pairs_skips_oversized_values() {
+        let entries = build_secret_pairs(&[
             secret("a", "ok", b"ok"),
             secret("a", "too-big", &vec![b'a'; (64 * 1024) + 1]),
         ]);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, "BOTWORK_SECRET_A_OK");
+        assert_eq!(entries[0].0, "A_OK");
     }
 
     #[test]
-    fn build_env_entries_preserves_input_order() {
-        let entries = build_env_entries(&[
+    fn build_secret_pairs_preserves_input_order() {
+        let entries = build_secret_pairs(&[
             secret("svc", "b", b"1"),
             secret("svc", "a", b"2"),
             secret("svc", "c", b"3"),
         ]);
         let names: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "BOTWORK_SECRET_SVC_B",
-                "BOTWORK_SECRET_SVC_A",
-                "BOTWORK_SECRET_SVC_C",
-            ]
+        assert_eq!(names, vec!["SVC_B", "SVC_A", "SVC_C",]);
+    }
+
+    #[test]
+    fn build_secret_pairs_does_not_produce_env_prefix() {
+        // The `BOTWORK_SECRET_` prefix and `_FILE` suffix must NOT appear in the
+        // names emitted by session-broker.  The launcher owns that mangling.
+        let entries = build_secret_pairs(&[secret("github.com", "pat", b"ghp_xxx")]);
+        assert_eq!(entries.len(), 1);
+        assert!(
+            !entries[0].0.starts_with("BOTWORK_SECRET_"),
+            "name must not have BOTWORK_SECRET_ prefix: {}",
+            entries[0].0
         );
+        assert!(
+            !entries[0].0.ends_with("_FILE"),
+            "name must not have _FILE suffix: {}",
+            entries[0].0
+        );
+        // The value itself must still be the decoded plaintext (launcher writes it to file).
+        assert_eq!(entries[0].1, "ghp_xxx");
     }
 
     #[tokio::test]

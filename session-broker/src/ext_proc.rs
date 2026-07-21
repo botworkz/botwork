@@ -26,7 +26,9 @@ use chrono::Utc;
 use crate::config_broker::{self, EnvEntry, PluginDescriptor, UpstreamAuth, CONFIG_ENV_NAME};
 use crate::control_plane::{self, PostSessionRequest};
 use crate::docker::is_container_running;
-use crate::launcher::{call_bind_agent, call_teardown, launch_session, probe_ready, LauncherError};
+use crate::launcher::{
+    call_bind_agent, call_teardown, launch_session, probe_ready, LaunchRequest, LauncherError,
+};
 use crate::secrets;
 use crate::{
     log_info, redact_token, AppState, PendingInit, SessionLiveness, TransportState, LIVENESS_TTL,
@@ -972,6 +974,7 @@ async fn spawn_new_container(
     descriptor: &PluginDescriptor,
     upstream_authorization: Option<String>,
     env: &[(String, String)],
+    secrets: &[(String, String)],
 ) -> Result<PendingInit, LauncherError> {
     let mut token_bytes = [0u8; 6];
     rand::thread_rng().fill_bytes(&mut token_bytes);
@@ -995,12 +998,15 @@ async fn spawn_new_container(
     ];
     let launch_outcome = launch_session(
         &state.launcher_socket_path,
-        &container_name,
-        &descriptor.image,
-        &staging_path,
-        env,
-        &descriptor.resources,
-        &labels,
+        LaunchRequest {
+            name: &container_name,
+            image: &descriptor.image,
+            staging_path: &staging_path,
+            env,
+            secrets,
+            resources: &descriptor.resources,
+            labels: &labels,
+        },
     )
     .await?;
     let container_ip = launch_outcome.container_ip.clone();
@@ -1551,11 +1557,15 @@ impl ExternalProcessorService {
                     );
                 }
             };
-            let secret_env = secrets::build_env_entries(&fetched_secrets);
+            // Build raw secret pairs (sanitized name + value) for the launcher
+            // `secrets` wire field.  The launcher owns all mangling: it writes
+            // each value to a file in a container-local tmpfs and injects only
+            // `*_FILE` path pointers into the container env — no plaintext
+            // secret value ever appears in ContainerCreateBody.env.
+            let secret_pairs = secrets::build_secret_pairs(&fetched_secrets);
             let static_env_count = descriptor.env.len();
-            let mut env: Vec<(String, String)> =
-                Vec::with_capacity(static_env_count + secret_env.len() + 1);
-            // Static plugin env first (deterministic config), secrets appended after.
+            let mut env: Vec<(String, String)> = Vec::with_capacity(static_env_count + 1);
+            // Static plugin env first (deterministic config), then structured config.
             env.extend(
                 descriptor
                     .env
@@ -1567,31 +1577,13 @@ impl ExternalProcessorService {
             if let Some(blob) = &descriptor.config_blob {
                 env.push((CONFIG_ENV_NAME.to_string(), blob.clone()));
             }
-            for entry in &secret_env {
-                if env.len() >= secrets::MAX_ENV_ENTRIES {
-                    log_info(&format!(
-                        "spawn_secrets tenant={} plugin={} total env cap reached; truncating secrets",
-                        stream.trusted_tenant, plugin_name
-                    ));
-                    break;
-                }
-                // Defensive: BOTWORK_SECRET_ prefix is reserved; static env cannot collide.
-                if entry.0.starts_with(secrets::SECRET_ENV_PREFIX) {
-                    env.push(entry.clone());
-                } else {
-                    log_info(&format!(
-                        "spawn_secrets unexpected non-secret env name from secrets: {}; skipping",
-                        entry.0
-                    ));
-                }
-            }
             log_info(&format!(
-                "spawn_secrets tenant={} plugin={} cap_present={} static_env={} secrets_injected={}",
+                "spawn_secrets tenant={} plugin={} cap_present={} static_env={} secrets_count={}",
                 stream.trusted_tenant,
                 plugin_name,
                 matches!(stream.cap.as_deref(), Some(cap) if !cap.is_empty()),
                 static_env_count,
-                secret_env.len()
+                secret_pairs.len()
             ));
             let upstream_authorization = match resolve_spawn_upstream_authorization(
                 &stream.trusted_tenant,
@@ -1614,6 +1606,7 @@ impl ExternalProcessorService {
                 &descriptor,
                 upstream_authorization.clone(),
                 &env,
+                &secret_pairs,
             )
             .await
             {
