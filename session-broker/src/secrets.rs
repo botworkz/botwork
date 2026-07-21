@@ -334,7 +334,7 @@ mod tests {
             secret("svc", "c", b"3"),
         ]);
         let names: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(names, vec!["SVC_B", "SVC_A", "SVC_C",]);
+        assert_eq!(names, vec!["SVC_B", "SVC_A", "SVC_C"]);
     }
 
     #[test]

@@ -587,7 +587,7 @@ fn append_tar_entry(archive: &mut Vec<u8>, name: &str, data: &[u8], mode: u32, u
 
 /// Write `value` as a NUL-terminated octal string into `buf` with `digits` significant digits.
 fn write_octal(buf: &mut [u8], value: u64, digits: usize) {
-    let s = format!("{value:0>digits$o}\0");
+    let s = format!("{value:0digits$o}\0");
     let copy_len = s.len().min(buf.len());
     buf[..copy_len].copy_from_slice(&s.as_bytes()[..copy_len]);
 }
