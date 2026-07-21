@@ -12,6 +12,7 @@ use botwork_vault::{Vault, VaultError};
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
+use subtle::ConstantTimeEq;
 use tokio::time::Instant;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -149,6 +150,14 @@ fn success_public_no_identity() -> Response {
     (StatusCode::OK, "OK").into_response()
 }
 
+/// Return 200 OK with `x-botwork-admin: admin` injected for the
+/// downstream API's `require_admin` gate.  Emitted when the request
+/// carries the pre-shared genesis admin key (checked via constant-time
+/// comparison in [`check`] before any path-specific routing).
+fn success_admin() -> Response {
+    (StatusCode::OK, [("x-botwork-admin", "admin")], "OK").into_response()
+}
+
 /// Mint a fresh cap value bound to `lease_id`.
 ///
 /// Round 1b: `lease_id` is now a required `Uuid` (no longer
@@ -203,6 +212,28 @@ pub async fn check(State(state): State<AppState>, headers: HeaderMap) -> Respons
         warn!("{PREFIX} unauthorized request with bad path={}", if original_path.is_empty() { "<missing>" } else { original_path });
         return unauthorized(ErrorCode::InvalidBearer, None);
     };
+
+    // ── Genesis admin bearer fast-path ─────────────────────────────────
+    // When the pre-shared admin key is configured and the request carries a
+    // matching bearer, bypass the OPAQUE lease path and inject
+    // `x-botwork-admin: admin`.  The API layer gates admin-only routes
+    // (`/api/tenants`, `/api/plugins`, …) on that header.
+    //
+    // The check is skipped for the login path (ApiAuthLogin), which is
+    // intentionally public.  For every other path a matching admin bearer
+    // always wins over the tenant OPAQUE path.
+    if !matches!(path, crate::grammar::ParsedPath::ApiAuthLogin) {
+        if let Some(ref admin_key) = state.admin_api_key {
+            let bearer_matches = request_cap(&headers)
+                .ok()
+                .flatten()
+                .is_some_and(|b| bool::from(b.as_bytes().ct_eq(admin_key.as_bytes())));
+            if bearer_matches {
+                info!("{PREFIX} auth/check: admin bearer accepted path={original_path}");
+                return success_admin();
+            }
+        }
+    }
 
     match path {
         crate::grammar::ParsedPath::ApiAuthLogin => StatusCode::OK.into_response(),
@@ -1170,6 +1201,30 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use chrono::TimeZone;
+
+    // ---------------------------------------------------------------------------
+    // success_admin
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn success_admin_returns_200_with_x_botwork_admin_header() {
+        let response = success_admin();
+        assert_eq!(response.status(), StatusCode::OK);
+        let admin_header = response
+            .headers()
+            .get("x-botwork-admin")
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(admin_header, Some("admin"));
+    }
+
+    #[tokio::test]
+    async fn success_admin_does_not_set_x_botwork_tenant() {
+        let response = success_admin();
+        assert!(
+            response.headers().get("x-botwork-tenant").is_none(),
+            "success_admin must not set x-botwork-tenant"
+        );
+    }
 
     // ---------------------------------------------------------------------------
     // redact_token

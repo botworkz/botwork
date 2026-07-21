@@ -21,9 +21,83 @@ Currently implemented subcommands:
 - `mcp-probe` - probe an MCP image, validate it against an
   `mcp-package.yaml`, and emit / verify / describe the
   `org.botwork.mcp.*` label set (RFE #147).
+- `admin-key` - manage the genesis admin credential. See below.
+
+## `botctl admin-key`
+
+Manages the **genesis admin credential** for `botwork-auth-broker`.
+
+When `BOTWORK_ADMIN_API_KEY` is set in auth-broker's environment,
+requests carrying `Authorization: ****** pass the admin check
+and receive `x-botwork-admin: admin` in the forwarded headers.
+`botwork-api` uses this header to gate admin-only routes
+(`/api/tenants`, `/api/plugins`, etc.).
+
+The key is stored in a file so it is never exposed via `docker inspect`
+or process-env dumps.  Systemd reads the file via `EnvironmentFile=`
+and injects the env var into auth-broker's process only.
+
+### Key file
+
+Default path: `/var/lib/botwork/admin.env`  
+Override: `BOTWORK_ADMIN_KEY_FILE` env var or `--file <path>` flag.
+
+File format (shell-parseable):
+
+```text
+BOTWORK_ADMIN_API_KEY=<key>
+```
+
+### CLI shape
+
+```text
+botctl admin-key <COMMAND> [OPTIONS]
+
+Commands:
+  get           Print the current admin key to stdout.
+  set <key>     Write <key> to the key file (rotation).
+  generate      Generate a random key and write to the file.
+                No-op if file already exists (idempotent).
+                Use --force to overwrite (rotate).
+
+Common options:
+  --file <path> Override the default key file path.
+
+Generate options:
+  --force       Overwrite an existing key (rotate).
+```
+
+### Genesis provisioning
+
+On a clean boot, run once after `botctl bootstrap`:
+
+```bash
+botctl admin-key generate          # idempotent: no-op if already provisioned
+```
+
+The generated key is written to `/var/lib/botwork/admin.env`.
+Systemd picks it up via `EnvironmentFile=` on the next start of
+`botwork-auth-broker.service`.
+
+### Credential rotation
+
+```bash
+botctl admin-key generate --force    # rotate: overwrite with fresh random key
+# or set an explicit value:
+botctl admin-key set <new-key>
+```
+
+Rotation takes effect on the next auth-broker restart.
+
+### Exit codes
+
+| Code | Meaning                      |
+|------|------------------------------|
+| 0    | success                      |
+| 2    | invalid CLI usage            |
+| 4    | key-file I/O error           |
 
 ## `botctl mcp-probe`
-
 Producer-side tool for the
 [image-labels-as-plugin-descriptor flow](https://github.com/botworkz/botwork/issues/147).
 
