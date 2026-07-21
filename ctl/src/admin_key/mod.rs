@@ -2,8 +2,9 @@
 //!
 //! Manages the pre-shared key that identifies the genesis admin to
 //! `botwork-auth-broker`.  When `BOTWORK_ADMIN_API_KEY` is set in
-//! auth-broker's environment, any request carrying
-//! `Authorization: ****** passes the admin check and receives
+//! auth-broker's environment, any request carrying an
+//! `Authorization: ****** header whose token matches that key
+//! passes the admin check and receives
 //! `x-botwork-admin: admin` in the forwarded headers — satisfying
 //! `botwork-api`'s `admin_required` gate on `/api/tenants`,
 //! `/api/plugins`, etc.
@@ -248,7 +249,9 @@ impl Args {
                 // `set <key> [--file <path>]`
                 let key = iter
                     .next()
-                    .ok_or(AdminKeyError::InvalidUsage("set requires a <key> argument"))?
+                    .ok_or_else(|| {
+                        AdminKeyError::InvalidUsage("set requires a <key> argument".into())
+                    })?
                     .clone();
                 let key_file = parse_common_flags(&mut iter, default_key_file)?;
                 return Ok(Args {
@@ -258,8 +261,8 @@ impl Args {
             }
             Some("generate") => "generate",
             Some(other) => {
-                return Err(AdminKeyError::InvalidUsage(Box::leak(
-                    format!("unknown admin-key command '{other}'").into_boxed_str(),
+                return Err(AdminKeyError::InvalidUsage(format!(
+                    "unknown admin-key command '{other}'"
                 )));
             }
         };
@@ -273,14 +276,14 @@ impl Args {
             match arg.as_str() {
                 "--force" => force = true,
                 "--file" => {
-                    let v = iter
-                        .next()
-                        .ok_or(AdminKeyError::InvalidUsage("--file requires a value"))?;
+                    let v = iter.next().ok_or_else(|| {
+                        AdminKeyError::InvalidUsage("--file requires a value".into())
+                    })?;
                     key_file = PathBuf::from(v);
                 }
                 other => {
-                    return Err(AdminKeyError::InvalidUsage(Box::leak(
-                        format!("unknown flag '{other}'").into_boxed_str(),
+                    return Err(AdminKeyError::InvalidUsage(format!(
+                        "unknown flag '{other}'"
                     )));
                 }
             }
@@ -307,12 +310,12 @@ fn parse_common_flags(
             "--file" => {
                 let v = iter
                     .next()
-                    .ok_or(AdminKeyError::InvalidUsage("--file requires a value"))?;
+                    .ok_or_else(|| AdminKeyError::InvalidUsage("--file requires a value".into()))?;
                 key_file = PathBuf::from(v);
             }
             other => {
-                return Err(AdminKeyError::InvalidUsage(Box::leak(
-                    format!("unknown flag '{other}'").into_boxed_str(),
+                return Err(AdminKeyError::InvalidUsage(format!(
+                    "unknown flag '{other}'"
                 )));
             }
         }
@@ -360,7 +363,7 @@ pub enum AdminKeyError {
     Usage(&'static str),
     /// Invalid CLI usage (exit 2).
     #[error("usage: {0}\n\n{help}", help = help_text())]
-    InvalidUsage(&'static str),
+    InvalidUsage(String),
     /// Key file could not be read (exit 4).
     #[error("failed to read key file {path}: {reason}", path = path.display())]
     FileRead { path: PathBuf, reason: String },
@@ -645,7 +648,7 @@ mod tests {
     #[test]
     fn admin_key_error_exit_codes() {
         assert_eq!(AdminKeyError::Usage("").exit_code(), 0);
-        assert_eq!(AdminKeyError::InvalidUsage("").exit_code(), 2);
+        assert_eq!(AdminKeyError::InvalidUsage("".into()).exit_code(), 2);
         assert_eq!(AdminKeyError::InvalidKey("".into()).exit_code(), 2);
         assert_eq!(
             AdminKeyError::FileRead {
