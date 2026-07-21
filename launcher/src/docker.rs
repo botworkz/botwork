@@ -10,9 +10,10 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, EventsOptions, InspectContainerOptionsBuilder,
-    RemoveContainerOptionsBuilder,
+    RemoveContainerOptionsBuilder, UploadToContainerOptionsBuilder,
 };
 use bollard::Docker;
+use bytes::Bytes;
 use futures_util::future::{BoxFuture, FutureExt};
 use futures_util::Stream;
 
@@ -20,6 +21,14 @@ use crate::cmd::{log_info, run_command, CommandOutput};
 use crate::error::LauncherError;
 use crate::mount::{is_not_mounted_or_einval, setup_staging_dir};
 use crate::validate::{valid_env_name, Validators};
+
+/// The container-local tmpfs path where secrets are delivered as files.
+///
+/// - Mode `0500` on the directory: the plugin uid can traverse and read but not write.
+/// - Each file is mode `0400`, owned by `plugin_uid:plugin_gid`.
+/// - The tmpfs is RAM-backed and destroyed with the container (`auto_remove: true`).
+///   No host-side cleanup is needed for secrets.
+pub(crate) const SECRETS_TMPFS_PATH: &str = "/run/botwork-secrets";
 
 pub(crate) type DockerEventStream =
     Pin<Box<dyn Stream<Item = Result<EventMessage, BollardError>> + Send>>;
@@ -41,6 +50,18 @@ pub(crate) trait DockerApi {
     fn remove_container_force<'a>(
         &'a self,
         name: &'a str,
+    ) -> BoxFuture<'a, Result<(), BollardError>>;
+
+    /// Upload a tar archive into a running or stopped container at the given path.
+    ///
+    /// Used to populate the secrets tmpfs after `create_container` and before
+    /// `start_container`.  The `tar` bytes must be a valid POSIX tar archive; the
+    /// Docker daemon extracts it into `path` inside the container.
+    fn upload_to_container<'a>(
+        &'a self,
+        name: &'a str,
+        path: &'a str,
+        tar: Vec<u8>,
     ) -> BoxFuture<'a, Result<(), BollardError>>;
 
     fn events(&self, options: Option<EventsOptions>) -> DockerEventStream;
@@ -85,6 +106,17 @@ impl DockerApi for Docker {
         Docker::remove_container(self, name, options).boxed()
     }
 
+    fn upload_to_container<'a>(
+        &'a self,
+        name: &'a str,
+        path: &'a str,
+        tar: Vec<u8>,
+    ) -> BoxFuture<'a, Result<(), BollardError>> {
+        let options = Some(UploadToContainerOptionsBuilder::new().path(path).build());
+        let body = bollard::body_full(Bytes::from(tar));
+        Docker::upload_to_container(self, name, options, body).boxed()
+    }
+
     fn events(&self, options: Option<EventsOptions>) -> DockerEventStream {
         Box::pin(Docker::events(self, options))
     }
@@ -109,6 +141,16 @@ pub struct ContainerLaunch<'a> {
     pub read_only_rootfs: bool,
     pub env: &'a [(String, String)],
     pub labels: &'a [(String, String)],
+    /// Raw secret pairs from session-broker: `(sanitized_name, plaintext_value)`.
+    ///
+    /// The launcher owns ALL mangling:
+    /// - On-disk file name: `<sanitized_name>` lowercased (e.g. `github_com_pat`)
+    /// - Env pointer: `BOTWORK_SECRET_<SANITIZED_NAME_UPPERCASED>_FILE=<SECRETS_TMPFS_PATH>/<file_name>`
+    ///
+    /// Secret values are written via the Docker daemon put-archive API into a
+    /// container-local tmpfs at `SECRETS_TMPFS_PATH` (never touches host disk).
+    /// Each file has mode `0400`, owned by `plugin_uid:plugin_gid`.
+    pub secrets: &'a [(String, String)],
 }
 
 #[derive(Debug)]
@@ -175,6 +217,24 @@ async fn ensure_container_impl<D: DockerApi + ?Sized>(
         .create_container(request.name, config)
         .await
         .map_err(|e| LauncherError::Internal(format!("failed to start {}: {e}", request.name)))?;
+
+    // After create, before start: upload secrets into the tmpfs via the daemon
+    // put-archive API.  Nothing touches the host disk.  If the upload fails we
+    // remove the container and return an error (fail-closed: never start a
+    // container that could not receive its secrets).
+    if !request.secrets.is_empty() {
+        let tar = build_secrets_tar(request.secrets, request.plugin_uid, request.plugin_gid);
+        if let Err(e) = docker
+            .upload_to_container(request.name, SECRETS_TMPFS_PATH, tar)
+            .await
+        {
+            let _ = docker.remove_container_force(request.name).await;
+            return Err(LauncherError::Internal(format!(
+                "failed to upload secrets to {}: {e}",
+                request.name
+            )));
+        }
+    }
 
     docker
         .start_container(request.name)
@@ -256,7 +316,8 @@ fn build_container_config(
         labels.insert(key.clone(), value.clone());
     }
 
-    let env = request
+    // Non-secret env entries go into the container env verbatim.
+    let mut env = request
         .env
         .iter()
         .map(|(name, value)| {
@@ -266,6 +327,30 @@ fn build_container_config(
             Ok(format!("{name}={value}"))
         })
         .collect::<Result<Vec<_>, LauncherError>>()?;
+
+    // Secrets: inject only the `*_FILE` path pointer; the plaintext value is
+    // written to the container-local tmpfs via the daemon put-archive API
+    // (see `ensure_container_impl`).
+    //
+    // Pointer naming:
+    //   env var:  BOTWORK_SECRET_<SANITIZED_NAME_UPPERCASED>_FILE
+    //   file:     <SECRETS_TMPFS_PATH>/<sanitized_name_lowercased>
+    //
+    // The sanitized name arrives from session-broker already in its canonical
+    // form (e.g. `GITHUB_COM_PAT`).  We uppercase it here as a no-op safety
+    // measure and lowercase for the on-disk path.
+    for (name, _value) in request.secrets {
+        let upper_name = name.to_ascii_uppercase();
+        let file_name = name.to_ascii_lowercase();
+        let env_name = format!("BOTWORK_SECRET_{upper_name}_FILE");
+        let env_value = format!("{SECRETS_TMPFS_PATH}/{file_name}");
+        if !valid_env_name(&env_name) {
+            return Err(LauncherError::Internal(format!(
+                "invalid secret env name: {env_name}"
+            )));
+        }
+        env.push(format!("{env_name}={env_value}"));
+    }
 
     let mounts = if request.with_workspace {
         Some(vec![Mount {
@@ -278,6 +363,33 @@ fn build_container_config(
             }),
             ..Default::default()
         }])
+    } else {
+        None
+    };
+
+    // A container-local tmpfs for secrets delivery.  The tmpfs is RAM-backed
+    // and destroyed when the container exits (auto_remove: true), so no
+    // host-side cleanup is ever needed.
+    //
+    // Options:
+    //   rw         - the daemon writes into it via put-archive before start
+    //   noexec     - no executables in the secrets dir
+    //   nosuid     - belt-and-suspenders
+    //   uid=…,gid=… - the directory is owned by the plugin uid/gid
+    //   mode=0500  - plugin uid can traverse + read; others cannot
+    //
+    // `readonly_rootfs: true` does not affect a tmpfs mount — the tmpfs is its
+    // own writable mount regardless of the rootfs setting.
+    let tmpfs = if !request.secrets.is_empty() {
+        let mut map = HashMap::new();
+        map.insert(
+            SECRETS_TMPFS_PATH.to_string(),
+            format!(
+                "rw,noexec,nosuid,uid={},gid={},mode=0500",
+                request.plugin_uid, request.plugin_gid
+            ),
+        );
+        Some(map)
     } else {
         None
     };
@@ -295,6 +407,7 @@ fn build_container_config(
         nano_cpus: Some(nano_cpus),
         readonly_rootfs: Some(request.read_only_rootfs),
         mounts,
+        tmpfs,
         ..Default::default()
     };
 
@@ -392,6 +505,93 @@ fn parse_cpu_limit(value: &str) -> Result<i64, LauncherError> {
     Ok(nano_i64)
 }
 
+/// Build an in-memory POSIX ustar tar archive containing one file per secret.
+///
+/// Each file entry has:
+/// - Name:  `<sanitized_name>` lowercased  (e.g. `github_com_pat`)
+/// - Mode:  `0400` — readable only by the owning uid
+/// - Owner: `uid` / `gid` of the plugin process
+/// - Data:  the plaintext secret value bytes
+///
+/// The archive is intended to be extracted into `SECRETS_TMPFS_PATH` inside
+/// the container via the Docker daemon put-archive API, so tar entries contain
+/// only bare filenames (no directory prefix).
+fn build_secrets_tar(secrets: &[(String, String)], uid: u32, gid: u32) -> Vec<u8> {
+    let mut archive: Vec<u8> = Vec::new();
+    for (name, value) in secrets {
+        let file_name = name.to_ascii_lowercase();
+        append_tar_entry(&mut archive, &file_name, value.as_bytes(), 0o400, uid, gid);
+    }
+    // POSIX tar: two consecutive 512-byte zero blocks mark end-of-archive.
+    archive.extend_from_slice(&[0u8; 1024]);
+    archive
+}
+
+/// Append one POSIX ustar file entry to a tar byte buffer.
+///
+/// The header is a standard 512-byte block (ustar format):
+/// offset  len  field
+///    0   100   name (file name, NUL-terminated)
+///  100     8   mode (octal ASCII, NUL-terminated)
+///  108     8   uid  (octal ASCII, NUL-terminated)
+///  116     8   gid  (octal ASCII, NUL-terminated)
+///  124    12   size (octal ASCII, NUL-terminated)
+///  136    12   mtime (octal ASCII, NUL-terminated)  — zeroed (epoch)
+///  148     8   checksum (ASCII)
+///  156     1   typeflag ('0' = regular file)
+///  157   100   linkname (empty)
+///  257     6   magic  ("ustar\0")
+///  263     2   version ("00")
+///  ...     rest zeroed
+fn append_tar_entry(archive: &mut Vec<u8>, name: &str, data: &[u8], mode: u32, uid: u32, gid: u32) {
+    let mut header = [0u8; 512];
+
+    // name (offset 0, len 100): truncate silently; keys are sanitized short names
+    let name_bytes = name.as_bytes();
+    let copy_len = name_bytes.len().min(99);
+    header[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    // mode (offset 100, len 8): e.g. "0000400\0"
+    write_octal(&mut header[100..108], mode as u64, 7);
+    // uid (offset 108, len 8)
+    write_octal(&mut header[108..116], uid as u64, 7);
+    // gid (offset 116, len 8)
+    write_octal(&mut header[116..124], gid as u64, 7);
+    // size (offset 124, len 12)
+    write_octal(&mut header[124..136], data.len() as u64, 11);
+    // mtime (offset 136, len 12): epoch
+    write_octal(&mut header[136..148], 0, 11);
+    // typeflag (offset 156): '0' = regular file
+    header[156] = b'0';
+    // ustar magic (offset 257, len 6)
+    header[257..263].copy_from_slice(b"ustar\0");
+    // ustar version (offset 263, len 2)
+    header[263..265].copy_from_slice(b"00");
+
+    // Checksum: sum of all header bytes (treating checksum field as spaces)
+    for b in &mut header[148..156] {
+        *b = b' ';
+    }
+    let checksum: u32 = header.iter().map(|&b| b as u32).sum();
+    // Write checksum as 6 octal digits + NUL + space (POSIX convention)
+    let cs_str = format!("{checksum:06o}\0 ");
+    header[148..156].copy_from_slice(cs_str.as_bytes());
+
+    archive.extend_from_slice(&header);
+
+    // Data blocks (padded to 512-byte boundary)
+    archive.extend_from_slice(data);
+    let pad = (512 - (data.len() % 512)) % 512;
+    archive.extend(std::iter::repeat_n(0u8, pad));
+}
+
+/// Write `value` as a NUL-terminated octal string into `buf` with `digits` significant digits.
+fn write_octal(buf: &mut [u8], value: u64, digits: usize) {
+    let s = format!("{value:0digits$o}\0");
+    let copy_len = s.len().min(buf.len());
+    buf[..copy_len].copy_from_slice(&s.as_bytes()[..copy_len]);
+}
+
 pub async fn teardown(
     name: &str,
     staging_path: &str,
@@ -460,13 +660,19 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
+    /// Type alias to satisfy `clippy::type_complexity` for the uploaded-tars capture buffer.
+    type UploadedTars = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     #[derive(Default, Clone)]
     struct FakeDocker {
         inspect_results: Arc<Mutex<VecDeque<Result<ContainerInspectResponse, BollardError>>>>,
         create_results: Arc<Mutex<VecDeque<Result<(), BollardError>>>>,
         start_results: Arc<Mutex<VecDeque<Result<(), BollardError>>>>,
         remove_results: Arc<Mutex<VecDeque<Result<(), BollardError>>>>,
+        upload_results: Arc<Mutex<VecDeque<Result<(), BollardError>>>>,
         created_configs: Arc<Mutex<Vec<ContainerCreateBody>>>,
+        /// Captures (path, tar_bytes) pairs from `upload_to_container` calls.
+        uploaded_tars: UploadedTars,
     }
 
     impl FakeDocker {
@@ -491,6 +697,18 @@ mod tests {
         fn with_remove(self, results: Vec<Result<(), BollardError>>) -> Self {
             *self.remove_results.lock().expect("remove lock") = VecDeque::from(results);
             self
+        }
+
+        fn with_upload(self, results: Vec<Result<(), BollardError>>) -> Self {
+            *self.upload_results.lock().expect("upload lock") = VecDeque::from(results);
+            self
+        }
+
+        fn uploaded_tars(&self) -> Vec<(String, Vec<u8>)> {
+            self.uploaded_tars
+                .lock()
+                .expect("uploaded_tars lock")
+                .clone()
         }
     }
 
@@ -556,6 +774,27 @@ mod tests {
             .boxed()
         }
 
+        fn upload_to_container<'a>(
+            &'a self,
+            _name: &'a str,
+            path: &'a str,
+            tar: Vec<u8>,
+        ) -> BoxFuture<'a, Result<(), BollardError>> {
+            let path = path.to_string();
+            async move {
+                self.uploaded_tars
+                    .lock()
+                    .expect("uploaded_tars lock")
+                    .push((path, tar));
+                self.upload_results
+                    .lock()
+                    .expect("upload lock")
+                    .pop_front()
+                    .unwrap_or(Ok(()))
+            }
+            .boxed()
+        }
+
         fn events(&self, _options: Option<EventsOptions>) -> DockerEventStream {
             Box::pin(stream::iter(
                 Vec::<Result<EventMessage, BollardError>>::new(),
@@ -582,6 +821,7 @@ mod tests {
             read_only_rootfs: true,
             env,
             labels,
+            secrets: &[],
         }
     }
 
@@ -630,13 +870,12 @@ mod tests {
 
     #[test]
     fn build_container_config_includes_sandbox_flags_and_all_env() {
-        let env = vec![
-            ("FOO".to_string(), "plain".to_string()),
-            ("BOTWORK_SECRET_TOKEN".to_string(), "s3cr3t".to_string()),
-        ];
+        let env = vec![("FOO".to_string(), "plain".to_string())];
+        let secrets = vec![("TOKEN".to_string(), "s3cr3t".to_string())];
         let labels = vec![("io.botworkz.tenant".to_string(), "acme".to_string())];
         let mut launch = minimal_launch("mcp_session_aabbccddeeff", &env, &labels);
         launch.with_workspace = true;
+        launch.secrets = &secrets;
 
         let config = build_container_config(&launch).expect("config");
         let host = config.host_config.expect("host config");
@@ -652,14 +891,27 @@ mod tests {
         assert_eq!(host.nano_cpus, Some(1_000_000_000));
         assert_eq!(host.readonly_rootfs, Some(true));
 
-        assert_eq!(
-            config.env,
-            Some(vec![
-                "FOO=plain".to_string(),
-                "BOTWORK_SECRET_TOKEN=s3cr3t".to_string()
-            ])
+        let env_list = config.env.expect("env");
+        // Non-secret env is present verbatim.
+        assert!(
+            env_list.contains(&"FOO=plain".to_string()),
+            "expected FOO=plain in env: {env_list:?}"
         );
+        // The *_FILE pointer for the secret must be present.
+        let expected_file_ptr = format!("BOTWORK_SECRET_TOKEN_FILE={SECRETS_TMPFS_PATH}/token");
+        assert!(
+            env_list.contains(&expected_file_ptr),
+            "expected {expected_file_ptr} in env: {env_list:?}"
+        );
+        // The plaintext secret value must NOT appear anywhere in the env list.
+        for entry in &env_list {
+            assert!(
+                !entry.contains("s3cr3t"),
+                "plaintext secret value must not appear in env: {entry}"
+            );
+        }
 
+        // Workspace bind mount is still present.
         let mounts = host.mounts.expect("mounts");
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].target.as_deref(), Some("/workspace"));
@@ -668,6 +920,30 @@ mod tests {
         assert_eq!(
             mounts[0].bind_options.as_ref().and_then(|b| b.propagation),
             Some(MountBindOptionsPropagationEnum::RSLAVE)
+        );
+
+        // Secrets tmpfs must be configured.
+        let tmpfs = host.tmpfs.expect("tmpfs");
+        let tmpfs_opts = tmpfs.get(SECRETS_TMPFS_PATH).expect("secrets tmpfs entry");
+        assert!(
+            tmpfs_opts.contains("noexec"),
+            "tmpfs options must contain noexec: {tmpfs_opts}"
+        );
+        assert!(
+            tmpfs_opts.contains("nosuid"),
+            "tmpfs options must contain nosuid: {tmpfs_opts}"
+        );
+        assert!(
+            tmpfs_opts.contains("mode=0500"),
+            "tmpfs options must contain mode=0500: {tmpfs_opts}"
+        );
+        assert!(
+            tmpfs_opts.contains(&format!("uid={}", launch.plugin_uid)),
+            "tmpfs options must contain uid: {tmpfs_opts}"
+        );
+        assert!(
+            tmpfs_opts.contains(&format!("gid={}", launch.plugin_gid)),
+            "tmpfs options must contain gid: {tmpfs_opts}"
         );
 
         assert_eq!(
@@ -810,6 +1086,166 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, LauncherError::BadRequest(_)));
+    }
+
+    // --------------- secrets delivery tests ---------------
+
+    /// Helper: extract the content of a named file from a tar archive.
+    fn tar_file_content(archive: &[u8], target_name: &str) -> Option<Vec<u8>> {
+        let mut pos = 0;
+        while pos + 512 <= archive.len() {
+            let header = &archive[pos..pos + 512];
+            // Check for end-of-archive (two zero blocks)
+            if header.iter().all(|&b| b == 0) {
+                return None;
+            }
+            // Name is null-terminated in first 100 bytes
+            let name_end = header[..100].iter().position(|&b| b == 0).unwrap_or(100);
+            let name = std::str::from_utf8(&header[..name_end]).unwrap_or("");
+            // Size is octal in bytes 124..136
+            let size_str = std::str::from_utf8(&header[124..136])
+                .unwrap_or("0")
+                .trim_matches(|c: char| !c.is_ascii_digit());
+            let size = u64::from_str_radix(size_str.trim(), 8).unwrap_or(0) as usize;
+            pos += 512;
+            if name == target_name {
+                return Some(archive[pos..pos + size].to_vec());
+            }
+            // Skip data blocks (padded to 512)
+            let padded = size.div_ceil(512) * 512;
+            pos += padded;
+        }
+        None
+    }
+
+    /// Helper: return the mode field (octal) from a named tar entry's header.
+    fn tar_file_mode(archive: &[u8], target_name: &str) -> Option<u32> {
+        let mut pos = 0;
+        while pos + 512 <= archive.len() {
+            let header = &archive[pos..pos + 512];
+            if header.iter().all(|&b| b == 0) {
+                return None;
+            }
+            let name_end = header[..100].iter().position(|&b| b == 0).unwrap_or(100);
+            let name = std::str::from_utf8(&header[..name_end]).unwrap_or("");
+            let mode_str = std::str::from_utf8(&header[100..108])
+                .unwrap_or("0")
+                .trim_matches(|c: char| !c.is_ascii_digit());
+            let size_str = std::str::from_utf8(&header[124..136])
+                .unwrap_or("0")
+                .trim_matches(|c: char| !c.is_ascii_digit());
+            let size = u64::from_str_radix(size_str.trim(), 8).unwrap_or(0) as usize;
+            if name == target_name {
+                let mode = u32::from_str_radix(mode_str.trim(), 8).unwrap_or(0);
+                return Some(mode);
+            }
+            pos += 512;
+            let padded = size.div_ceil(512) * 512;
+            pos += padded;
+        }
+        None
+    }
+
+    #[test]
+    fn build_secrets_tar_produces_readable_entry() {
+        let secrets = vec![("GITHUB_COM_PAT".to_string(), "ghp_test_value".to_string())];
+        let tar = build_secrets_tar(&secrets, 1000, 1000);
+
+        // The file should be named by the lowercased key.
+        let content =
+            tar_file_content(&tar, "github_com_pat").expect("tar must contain github_com_pat");
+        assert_eq!(content, b"ghp_test_value");
+
+        let mode = tar_file_mode(&tar, "github_com_pat").expect("mode");
+        assert_eq!(mode, 0o400, "file mode must be 0400");
+    }
+
+    #[tokio::test]
+    async fn ensure_container_uploads_secrets_before_start() {
+        let validators =
+            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
+        let secrets = vec![("GITHUB_COM_PAT".to_string(), "ghp_abc".to_string())];
+        let mut launch = minimal_launch("mcp_session_aabbccddeeff", &[], &[]);
+        launch.secrets = &secrets;
+
+        let fake = FakeDocker::default()
+            .with_inspect(vec![
+                Err(BollardError::DockerResponseServerError {
+                    status_code: 404,
+                    message: "not found".to_string(),
+                }),
+                Ok(inspect_running("172.20.0.5", "botwork")),
+            ])
+            .with_create(vec![Ok(())])
+            .with_start(vec![Ok(())]);
+
+        let outcome = ensure_container_impl(&launch, &validators, &fake)
+            .await
+            .expect("outcome");
+        assert_eq!(outcome.status, "started");
+
+        // Verify the tar was uploaded to the correct path.
+        let uploads = fake.uploaded_tars();
+        assert_eq!(uploads.len(), 1, "expected exactly one upload");
+        let (path, tar) = &uploads[0];
+        assert_eq!(path, SECRETS_TMPFS_PATH);
+
+        // Verify the tar contains the secret file with correct content.
+        let content =
+            tar_file_content(tar, "github_com_pat").expect("tar must contain github_com_pat");
+        assert_eq!(content, b"ghp_abc");
+
+        // Verify env contains the *_FILE pointer, not the plaintext value.
+        let configs = fake.created_configs.lock().expect("lock");
+        let env = configs[0].env.as_ref().expect("env");
+        let expected_ptr =
+            format!("BOTWORK_SECRET_GITHUB_COM_PAT_FILE={SECRETS_TMPFS_PATH}/github_com_pat");
+        assert!(
+            env.contains(&expected_ptr),
+            "env must contain FILE pointer: {env:?}"
+        );
+        for entry in env {
+            assert!(
+                !entry.contains("ghp_abc"),
+                "plaintext secret value must not appear in env: {entry}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_container_fails_closed_when_upload_fails() {
+        let validators =
+            Validators::new(r"^botwork/[a-z0-9_-]+:[a-z0-9._-]+$").expect("validators");
+        let secrets = vec![("TOKEN".to_string(), "secret".to_string())];
+        let mut launch = minimal_launch("mcp_session_aabbccddeeff", &[], &[]);
+        launch.secrets = &secrets;
+
+        let fake = FakeDocker::default()
+            .with_inspect(vec![Err(BollardError::DockerResponseServerError {
+                status_code: 404,
+                message: "not found".to_string(),
+            })])
+            .with_create(vec![Ok(())])
+            .with_upload(vec![Err(BollardError::DockerResponseServerError {
+                status_code: 500,
+                message: "upload failed".to_string(),
+            })]);
+
+        let err = ensure_container_impl(&launch, &validators, &fake)
+            .await
+            .expect_err("expected failure");
+
+        // Must fail with Internal error (fail-closed).
+        assert!(
+            matches!(err, LauncherError::Internal(_)),
+            "expected Internal error, got {err:?}"
+        );
+        // The container must NOT have been started.
+        assert_eq!(
+            fake.start_results.lock().expect("lock").len(),
+            0,
+            "start_container must not be called when upload fails"
+        );
     }
 
     // --------------- parse_memory_limit ---------------

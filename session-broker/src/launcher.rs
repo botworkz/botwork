@@ -106,20 +106,35 @@ pub struct LaunchOutcome {
     pub raw: Value,
 }
 
+/// Per-session parameters for [`launch_session`].
+pub struct LaunchRequest<'a> {
+    pub name: &'a str,
+    pub image: &'a str,
+    pub staging_path: &'a str,
+    pub env: &'a [(String, String)],
+    pub secrets: &'a [(String, String)],
+    pub resources: &'a PluginResources,
+    pub labels: &'a [(String, String)],
+}
+
 pub async fn launch_session(
     socket_path: &str,
-    name: &str,
-    image: &str,
-    staging_path: &str,
-    env: &[(String, String)],
-    resources: &PluginResources,
-    labels: &[(String, String)],
+    req: LaunchRequest<'_>,
 ) -> Result<LaunchOutcome, LauncherError> {
     // network is intentionally not threaded from session-broker into the
     // launcher payload (post-0.1.4). The launcher resolves it from its own
     // BOTWORK_LAUNCHER_DEFAULT_NETWORK env, because "which docker network
     // do plugin containers belong to" is a deploy-topology concern owned
     // by the launcher's systemd unit, not a per-plugin-registry setting.
+    let LaunchRequest {
+        name,
+        image,
+        staging_path,
+        env,
+        secrets,
+        resources,
+        labels,
+    } = req;
     let mut payload = serde_json::Map::from_iter([
         ("name".to_string(), Value::String(name.to_string())),
         ("image".to_string(), Value::String(image.to_string())),
@@ -133,6 +148,26 @@ pub async fn launch_session(
             "env".to_string(),
             Value::Array(
                 env.iter()
+                    .map(|(name, value)| {
+                        serde_json::json!({
+                            "name": name,
+                            "value": value,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    // Raw secret pairs are sent on a dedicated `secrets` field, separate from
+    // `env`.  The launcher writes them to a container-local tmpfs as files and
+    // injects only `*_FILE` path pointers into the container env.  Secret
+    // values must never appear in the `env` array.
+    if !secrets.is_empty() {
+        payload.insert(
+            "secrets".to_string(),
+            Value::Array(
+                secrets
+                    .iter()
                     .map(|(name, value)| {
                         serde_json::json!({
                             "name": name,
@@ -296,8 +331,8 @@ mod tests {
     #[tokio::test]
     async fn launcher_post_includes_env_when_slice_non_empty_in_order() {
         let env = vec![
-            ("BOTWORK_SECRET_A".to_string(), "1".to_string()),
-            ("BOTWORK_SECRET_B".to_string(), "2".to_string()),
+            ("GITHUB_TOOLSETS".to_string(), "default,actions".to_string()),
+            ("BOTWORK_MCP_CONFIG".to_string(), "{}".to_string()),
         ];
         let body = capture_launch_body(&env, &PluginResources::default()).await;
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("json body");
@@ -307,7 +342,54 @@ mod tests {
             .iter()
             .map(|entry| entry["name"].as_str().expect("name"))
             .collect();
-        assert_eq!(names, vec!["BOTWORK_SECRET_A", "BOTWORK_SECRET_B"]);
+        assert_eq!(names, vec!["GITHUB_TOOLSETS", "BOTWORK_MCP_CONFIG"]);
+        // The `env` array must NOT contain any BOTWORK_SECRET_* entries;
+        // secrets go on the dedicated `secrets` field.
+        assert!(
+            !body.contains("BOTWORK_SECRET_"),
+            "env array must not contain BOTWORK_SECRET_ entries: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn launcher_post_omits_secrets_when_slice_empty() {
+        let body = capture_launch_body(&[], &PluginResources::default()).await;
+        assert!(
+            !body.contains("\"secrets\""),
+            "secrets field must be absent when slice is empty: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn launcher_post_includes_secrets_on_dedicated_field() {
+        let secrets = vec![
+            ("GITHUB_COM_PAT".to_string(), "ghp_abc".to_string()),
+            ("SLACK_DEFAULT_TOKEN".to_string(), "xoxb-xyz".to_string()),
+        ];
+        let body =
+            capture_launch_body_with_secrets(&[], &secrets, &PluginResources::default(), &[]).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json body");
+
+        // Secrets must appear on the `secrets` field.
+        let secret_names: Vec<&str> = parsed["secrets"]
+            .as_array()
+            .expect("secrets array")
+            .iter()
+            .map(|entry| entry["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(secret_names, vec!["GITHUB_COM_PAT", "SLACK_DEFAULT_TOKEN"]);
+
+        // The `env` field must NOT contain any BOTWORK_SECRET_ entries.
+        // (It may be absent entirely, or present with only non-secret entries.)
+        if let Some(env_arr) = parsed["env"].as_array() {
+            for entry in env_arr {
+                let name = entry["name"].as_str().unwrap_or("");
+                assert!(
+                    !name.starts_with("BOTWORK_SECRET_"),
+                    "env array must not contain BOTWORK_SECRET_* entries, found: {name}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -376,16 +458,19 @@ mod tests {
 
         let _ = launch_session(
             path_to_string(&socket_path).as_str(),
-            "mcp_session_abc",
-            "botwork/mcp-a:local",
-            "/tmp/staging",
-            env,
-            resources,
-            // Test helper exercises the spawn path with the
-            // pre-round-3-PR2 shape (no labels); the labels-emitted
-            // case is covered by `launcher_post_includes_labels_when_slice_non_empty`
-            // below.
-            &[],
+            LaunchRequest {
+                name: "mcp_session_abc",
+                image: "botwork/mcp-a:local",
+                staging_path: "/tmp/staging",
+                env,
+                secrets: &[],
+                resources,
+                // Test helper exercises the spawn path with the
+                // pre-round-3-PR2 shape (no labels); the labels-emitted
+                // case is covered by `launcher_post_includes_labels_when_slice_non_empty`
+                // below.
+                labels: &[],
+            },
         )
         .await
         .expect("launch succeeds");
@@ -439,6 +524,15 @@ mod tests {
         resources: &PluginResources,
         labels: &[(String, String)],
     ) -> String {
+        capture_launch_body_with_secrets(env, &[], resources, labels).await
+    }
+
+    async fn capture_launch_body_with_secrets(
+        env: &[(String, String)],
+        secrets: &[(String, String)],
+        resources: &PluginResources,
+        labels: &[(String, String)],
+    ) -> String {
         let temp_dir = tempdir().expect("tempdir");
         let socket_path = temp_dir.path().join("launcher.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
@@ -467,12 +561,15 @@ mod tests {
 
         let _ = launch_session(
             path_to_string(&socket_path).as_str(),
-            "mcp_session_abc",
-            "botwork/mcp-a:local",
-            "/tmp/staging",
-            env,
-            resources,
-            labels,
+            LaunchRequest {
+                name: "mcp_session_abc",
+                image: "botwork/mcp-a:local",
+                staging_path: "/tmp/staging",
+                env,
+                secrets,
+                resources,
+                labels,
+            },
         )
         .await
         .expect("launch succeeds");
@@ -544,12 +641,15 @@ mod tests {
         });
         let result = launch_session(
             path_to_string(&socket_path).as_str(),
-            "mcp_session_abc",
-            "botwork/mcp-a:local",
-            "/tmp/staging",
-            &[],
-            &PluginResources::default(),
-            &[],
+            LaunchRequest {
+                name: "mcp_session_abc",
+                image: "botwork/mcp-a:local",
+                staging_path: "/tmp/staging",
+                env: &[],
+                secrets: &[],
+                resources: &PluginResources::default(),
+                labels: &[],
+            },
         )
         .await;
         let _ = server.await;

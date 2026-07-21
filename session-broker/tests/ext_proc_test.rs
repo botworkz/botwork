@@ -1186,18 +1186,26 @@ async fn spawn_passes_cap_to_secrets_fetch_and_envs_to_launcher() {
     let launcher_payload: serde_json::Value =
         serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
             .expect("launcher json");
-    let env = launcher_payload["env"].as_array().expect("env array");
-    let env_names: Vec<&str> = env
+
+    // Secrets must now be on the dedicated `secrets` field, NOT in env.
+    let secrets = launcher_payload["secrets"]
+        .as_array()
+        .expect("secrets array");
+    let secret_names: Vec<&str> = secrets
         .iter()
         .map(|entry| entry["name"].as_str().expect("name"))
         .collect();
-    assert_eq!(
-        env_names,
-        vec![
-            "BOTWORK_SECRET_GITHUB_COM_PAT",
-            "BOTWORK_SECRET_SHARED_SECRET"
-        ]
-    );
+    assert_eq!(secret_names, vec!["GITHUB_COM_PAT", "SHARED_SECRET"]);
+    // The env array must not contain any BOTWORK_SECRET_* entries.
+    if let Some(env) = launcher_payload["env"].as_array() {
+        for entry in env {
+            let name = entry["name"].as_str().unwrap_or("");
+            assert!(
+                !name.starts_with("BOTWORK_SECRET_"),
+                "env array must not contain BOTWORK_SECRET_* entries, found: {name}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -1843,17 +1851,41 @@ async fn spawn_static_env_appears_before_secrets() {
     let launcher_payload: serde_json::Value =
         serde_json::from_str(&launcher_body.lock().await.clone().expect("launcher body"))
             .expect("launcher json");
+
+    // Static env must be in the `env` field (not in secrets).
     let env = launcher_payload["env"].as_array().expect("env array");
     let env_names: Vec<&str> = env
         .iter()
         .map(|entry| entry["name"].as_str().expect("name"))
         .collect();
-    // Static env first, then secrets.
     assert_eq!(
         env_names,
-        vec!["GITHUB_TOOLSETS", "BOTWORK_SECRET_GITHUB_COM_PAT"],
-        "static env must precede secrets"
+        vec!["GITHUB_TOOLSETS"],
+        "static env must be in env field"
     );
+
+    // The secret must be on the dedicated `secrets` field.
+    let secrets = launcher_payload["secrets"]
+        .as_array()
+        .expect("secrets array");
+    let secret_names: Vec<&str> = secrets
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(
+        secret_names,
+        vec!["GITHUB_COM_PAT"],
+        "secret must be on secrets field"
+    );
+
+    // env must NOT contain any BOTWORK_SECRET_* entries.
+    for entry in env {
+        let name = entry["name"].as_str().unwrap_or("");
+        assert!(
+            !name.starts_with("BOTWORK_SECRET_"),
+            "env array must not contain BOTWORK_SECRET_* entries, found: {name}"
+        );
+    }
 }
 
 #[tokio::test]

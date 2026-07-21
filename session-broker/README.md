@@ -31,21 +31,37 @@ goose / curl
 `session-broker` is the only component that handles `x-botwork-cap`.
 
 On spawn (`POST` without `Mcp-Session-Id`), it exchanges the cap with
-`BOTWORK_AUTH_BROKER_URL` (`/secrets/fetch`) and maps returned secrets to
-container env vars of the form `BOTWORK_SECRET_<SERVICE>_<NAME>`.
+`BOTWORK_AUTH_BROKER_URL` (`/secrets/fetch`) and produces a list of raw
+`{name, value}` secret pairs (sanitized `<SERVICE>_<NAME>` form, no prefix).
 
-Name mapping is documented in `src/secrets.rs` (`build_env_entries`), including
-byte-wise sanitization and collision handling.
+Name sanitization is documented in `src/secrets.rs` (`build_secret_pairs`),
+including byte-wise sanitization and collision handling.
 
-`session-broker` then passes those env vars to launcher `/launch` as optional
-`env: [{name, value}]` entries. The MCP container itself does not call
-auth-broker and does not need cap awareness.
+`session-broker` then passes those raw pairs to launcher `/launch` on a
+dedicated `secrets: [{name, value}]` wire field — **never** inside the `env`
+array. The launcher owns all mangling: it writes each secret to a
+container-local tmpfs as a `0400` file owned by the plugin uid/gid and injects
+only `BOTWORK_SECRET_<SERVICE>_<NAME>_FILE=/run/botwork-secrets/<service>_<name>`
+path pointers into the container `env`. The plaintext value **never** appears
+in `ContainerCreateBody.env` or `docker inspect` output.
+
+### Plugin contract
+
+- Secrets are delivered as files under `/run/botwork-secrets/` (tmpfs,
+  RAM-backed, mode `0400`, owned by the plugin uid). The directory itself is
+  mode `0500`.
+- The container env exposes `BOTWORK_SECRET_<SERVICE>_<NAME>_FILE` pointers to
+  those file paths. The env var contains only a path (not the secret value).
+- Plugins read the file path from the `*_FILE` env var and then read the file.
+  A missing `*_FILE` pointer should be treated the same as an unset secret.
+- The tmpfs is destroyed automatically when the container stops (`auto_remove:
+  true`). No host-side cleanup is needed.
 
 Spawn is fail-closed for cap/secrets fetch preconditions: a missing
 `x-botwork-cap` on spawn, or any `/secrets/fetch` error (401, transport, bad
 response), returns an immediate 503 and does not launch a container. A
 successful fetch that returns an empty secret list is still a normal spawn and
-injects no `BOTWORK_SECRET_*` variables. Config-broker errors are likewise
+injects no `BOTWORK_SECRET_*_FILE` variables. Config-broker errors are likewise
 fail-closed: spawn cannot proceed without a descriptor (see
 "Config-broker resolution" below).
 
@@ -170,16 +186,18 @@ plugins:
   github:
     image: botwork/mcp-github:local
     config:
-      default_token_env: BOTWORK_SECRET_GITHUB_DEFAULT
+      default_token_env: BOTWORK_SECRET_GITHUB_DEFAULT_FILE
       routes:
         - owner: botworkz
-          token_env: BOTWORK_SECRET_GITHUB_BOTWORKZ
+          token_env: BOTWORK_SECRET_GITHUB_BOTWORKZ_FILE
         - owner: phlax
-          token_env: BOTWORK_SECRET_GITHUB_PHLAX
+          token_env: BOTWORK_SECRET_GITHUB_PHLAX_FILE
 ```
 
 The plugin container receives `BOTWORK_MCP_CONFIG` as a compact-JSON string and
-is responsible for parsing it.
+is responsible for parsing it. Config values that reference secrets should use
+the `*_FILE` pointer env var names (e.g. `BOTWORK_SECRET_GITHUB_DEFAULT_FILE`)
+and read the file at that path to obtain the secret value.
 
 ### Plugin-side contract
 
@@ -194,9 +212,10 @@ is responsible for parsing it.
   does not change mid-session; a container restart is needed to pick up new
   config.
 - **What config must NOT contain.** No secrets.  Route entries or feature flags
-  may *reference* a secret by env-var name (e.g. `token_env:
-  BOTWORK_SECRET_GITHUB_BOTWORKZ`), but the secret *value* is never in the
-  config blob — it arrives separately via `BOTWORK_SECRET_*`.
+  may *reference* a secret by its `*_FILE` env var name (e.g. `token_env:
+  BOTWORK_SECRET_GITHUB_BOTWORKZ_FILE`), but the secret *value* is never in the
+  config blob — it is delivered separately as a file under `/run/botwork-secrets/`
+  with only a `*_FILE` path pointer in the container env.
 
 ### Operator rules
 
@@ -212,7 +231,11 @@ is responsible for parsing it.
 The final env sent to the launcher is ordered:
 1. Static plugin `env:` entries.
 2. `BOTWORK_MCP_CONFIG` (if `config:` is set).
-3. Vault-derived `BOTWORK_SECRET_*` entries.
+3. `BOTWORK_SECRET_<SERVICE>_<NAME>_FILE` path pointers (one per secret).
+
+The plaintext secret values are written by the launcher into
+`/run/botwork-secrets/<service>_<name>` files on the container-local tmpfs;
+they never appear in the `env` array.
 
 ## Plugin registry: `env`
 
@@ -236,9 +259,9 @@ plugins:
 - Keys must match `[A-Z_][A-Z0-9_]*`, must not be in the reserved set
   (`PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`), must not start
   with `DOCKER_`, must not start with `BOTWORK_SECRET_` (reserved for
-  vault-derived entries), and must not be `BOTWORK_MCP_CONFIG` (reserved for
-  structured config injection — use the `config:` field). `HOME` and `USER`
-  are intentionally **not** reserved and may be set per-plugin (e.g.
+  vault-derived `*_FILE` pointer entries), and must not be `BOTWORK_MCP_CONFIG`
+  (reserved for structured config injection — use the `config:` field). `HOME`
+  and `USER` are intentionally **not** reserved and may be set per-plugin (e.g.
   `HOME: /workspace` for cache-heavy plugins like `bazel` or `cargo`).
 - Non-string YAML scalars (booleans, integers) are **rejected at parse time**
   with a clear error suggesting the user quote the value.
@@ -253,10 +276,11 @@ naming the offending plugin and field. session-broker is unaffected.
 
 When a container is spawned the final `env` array sent to the launcher is
 built as: **static plugin env first, then `BOTWORK_MCP_CONFIG` (if set), then
-vault-derived secrets**. This keeps the `BOTWORK_SECRET_*` block contiguous at
-the end for easy scanning in logs.
-The combined list is capped at 64 entries; if `static + config + secrets > 64`,
-secrets are truncated (not static env or config).
+`BOTWORK_SECRET_*_FILE` path pointers**. The `secrets` wire field carries the
+raw name/value pairs separately; the launcher writes them to a tmpfs and injects
+only the `*_FILE` pointers into `env`.
+The combined env list (static + config + `*_FILE` pointers) is capped at 64
+entries per the launcher's wire validator.
 
 ## Plugin registry: `resources`
 
