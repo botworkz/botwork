@@ -2,9 +2,8 @@
 //!
 //! Manages the pre-shared key that identifies the genesis admin to
 //! `botwork-auth-broker`.  When `BOTWORK_ADMIN_API_KEY` is set in
-//! auth-broker's environment, any request carrying an
-//! `Authorization: ****** header whose token matches that key
-//! passes the admin check and receives
+//! auth-broker's environment, any bearer-authenticated request whose
+//! token matches that key passes the admin check and receives
 //! `x-botwork-admin: admin` in the forwarded headers — satisfying
 //! `botwork-api`'s `admin_required` gate on `/api/tenants`,
 //! `/api/plugins`, etc.

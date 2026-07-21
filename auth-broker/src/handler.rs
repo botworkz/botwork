@@ -224,11 +224,13 @@ pub async fn check(State(state): State<AppState>, headers: HeaderMap) -> Respons
     // always wins over the tenant OPAQUE path.
     if !matches!(path, crate::grammar::ParsedPath::ApiAuthLogin) {
         if let Some(ref admin_key) = state.admin_api_key {
-            if let Ok(Some(bearer)) = request_cap(&headers) {
-                if bool::from(bearer.as_bytes().ct_eq(admin_key.as_bytes())) {
-                    info!("{PREFIX} auth/check: admin bearer accepted path={original_path}");
-                    return success_admin();
-                }
+            let bearer_matches = request_cap(&headers)
+                .ok()
+                .flatten()
+                .is_some_and(|b| bool::from(b.as_bytes().ct_eq(admin_key.as_bytes())));
+            if bearer_matches {
+                info!("{PREFIX} auth/check: admin bearer accepted path={original_path}");
+                return success_admin();
             }
         }
     }
