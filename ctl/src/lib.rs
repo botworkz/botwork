@@ -1,3 +1,4 @@
+pub mod admin_key;
 pub mod bootstrap;
 pub mod cli;
 pub mod mcp_probe;

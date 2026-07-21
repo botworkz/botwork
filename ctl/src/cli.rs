@@ -2,7 +2,7 @@ use std::io::Write;
 
 use thiserror::Error;
 
-use crate::{bootstrap, mcp_probe, ps};
+use crate::{admin_key, bootstrap, mcp_probe, ps};
 
 pub fn dispatch(args: Vec<String>) -> Result<i32, CliError> {
     dispatch_with_writer(args, std::io::stdout())
@@ -68,6 +68,22 @@ fn dispatch_with_writer<W: Write>(args: Vec<String>, mut writer: W) -> Result<i3
                 }
             }
         }
+        Some("admin-key") => {
+            // admin-key manages the genesis admin credential file.
+            // Owns its own argv-tail parsing and exit-code mapping.
+            match admin_key::run(&args[2..]) {
+                Ok(code) => Ok(code),
+                Err(err) => {
+                    let code = err.exit_code();
+                    if code != 0 {
+                        eprintln!("{err}");
+                    } else {
+                        println!("{err}");
+                    }
+                    Ok(code)
+                }
+            }
+        }
         Some(other) => Err(CliError::UnknownSubcommand(other.to_string())),
     }
 }
@@ -80,13 +96,14 @@ fn print_usage() {
     println!("  ps         List running botwork sessions");
     println!("  bootstrap  Apply a bootstrap.yaml through api");
     println!("  mcp-probe  Probe an MCP image and generate / verify / describe its labels");
+    println!("  admin-key  Manage the genesis admin credential (get / set / generate)");
     println!();
     println!("Run `botctl <SUBCOMMAND> --help` for subcommand options.");
 }
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("unknown subcommand '{0}'\n\nUsage: botctl <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botctl build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels")]
+    #[error("unknown subcommand '{0}'\n\nUsage: botctl <SUBCOMMAND>\n\nAvailable subcommands:\n  version    Print the botctl build version\n  ps         List running botwork sessions\n  bootstrap  Apply a bootstrap.yaml through api\n  mcp-probe  Probe an MCP image and generate / verify / describe its labels\n  admin-key  Manage the genesis admin credential (get / set / generate)")]
     UnknownSubcommand(String),
     #[error(transparent)]
     Ps(#[from] ps::PsError),
@@ -214,5 +231,40 @@ mod tests {
     fn cli_error_exit_codes() {
         assert_eq!(CliError::UnknownSubcommand("x".into()).exit_code(), 2);
         assert_eq!(CliError::Ps(PsError::InvalidUsage).exit_code(), 2);
+    }
+
+    // ── admin-key dispatch ──────────────────────────────────────────────
+
+    #[test]
+    fn admin_key_no_args_exits_zero_via_usage_branch() {
+        // admin-key with no argv produces AdminKeyError::Usage (exit 0 = help).
+        let code = dispatch_with_writer(args(&["botctl", "admin-key"]), Vec::new()).expect("ok");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn admin_key_help_flag_exits_zero() {
+        for flag in ["-h", "--help"] {
+            let code =
+                dispatch_with_writer(args(&["botctl", "admin-key", flag]), Vec::new()).expect("ok");
+            assert_eq!(code, 0, "flag {flag} should exit 0");
+        }
+    }
+
+    #[test]
+    fn admin_key_unknown_command_exits_2() {
+        let code =
+            dispatch_with_writer(args(&["botctl", "admin-key", "frob"]), Vec::new()).expect("ok");
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn unknown_subcommand_display_includes_admin_key() {
+        let err = CliError::UnknownSubcommand("x".to_string());
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("admin-key"),
+            "expected admin-key in usage: {msg}"
+        );
     }
 }
