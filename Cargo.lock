@@ -291,8 +291,6 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "hyper",
- "hyper-util",
  "itoa",
  "matchit 0.7.3",
  "memchr",
@@ -301,15 +299,10 @@ dependencies = [
  "pin-project-lite",
  "rustversion",
  "serde",
- "serde_json",
- "serde_path_to_error",
- "serde_urlencoded",
  "sync_wrapper",
- "tokio",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -320,10 +313,13 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core 0.5.6",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "itoa",
  "matchit 0.8.4",
  "memchr",
@@ -331,10 +327,15 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
+ "tokio",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -355,7 +356,6 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -374,6 +374,7 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -535,7 +536,7 @@ name = "botwork-api"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "botwork-api-core",
  "botwork-bootstrap",
  "botwork-entity",
@@ -577,7 +578,7 @@ name = "botwork-auth-broker"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "base64",
  "blake2",
  "botwork-entity",
@@ -664,7 +665,7 @@ dependencies = [
 name = "botwork-config-broker"
 version = "0.0.0"
 dependencies = [
- "axum 0.7.9",
+ "axum 0.8.9",
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
@@ -697,7 +698,7 @@ name = "botwork-control-plane"
 version = "0.0.0"
 dependencies = [
  "async-stream",
- "axum 0.7.9",
+ "axum 0.8.9",
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
@@ -827,7 +828,7 @@ name = "botwork-session-broker"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "base64",
  "bollard",
  "botwork-bootstrap",
@@ -870,7 +871,7 @@ version = "0.0.0"
 name = "botwork-ui-server"
 version = "0.0.0"
 dependencies = [
- "axum 0.7.9",
+ "axum 0.8.9",
  "botwork-version",
  "http",
  "include_dir",

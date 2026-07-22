@@ -13,7 +13,7 @@ name = "botwork-config-broker"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.7"
+axum = "0.8"
 botwork-entity = { path = "../db/entity" }
 botwork-version = { path = "../version" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

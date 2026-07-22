@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -162,7 +163,17 @@ struct PostBody {
     egress_policy: Option<serde_json::Value>,
 }
 
-async fn post_session(State(state): State<AppState>, body: Option<Json<PostBody>>) -> Response {
+async fn post_session(
+    State(state): State<AppState>,
+    body: Result<Json<PostBody>, JsonRejection>,
+) -> Response {
+    match body {
+        Ok(body) => post_session_inner(state, Some(body)).await,
+        Err(_) => post_session_inner(state, None).await,
+    }
+}
+
+async fn post_session_inner(state: AppState, body: Option<Json<PostBody>>) -> Response {
     let Some(Json(payload)) = body else {
         warn!("{PREFIX} post: invalid_request — missing or unparseable JSON body");
         return error_response(
@@ -483,7 +494,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/sessions", post(post_session).get(list_sessions))
         .route(
-            "/sessions/:session_id",
+            "/sessions/{session_id}",
             get(get_session).delete(delete_session),
         )
         .with_state(state)
@@ -544,7 +555,7 @@ mod tests {
     #[tokio::test]
     async fn post_creates_and_returns_201_with_ack() {
         let state = empty_state();
-        let response = post_session(State(state.clone()), Some(good_post("mcp_session_abc"))).await;
+        let response = post_session_inner(state.clone(), Some(good_post("mcp_session_abc"))).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(body["status"], "stored");
@@ -556,8 +567,8 @@ mod tests {
     #[tokio::test]
     async fn post_duplicate_returns_409_already_exists() {
         let state = empty_state();
-        post_session(State(state.clone()), Some(good_post("mcp_session_abc"))).await;
-        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        post_session_inner(state.clone(), Some(good_post("mcp_session_abc"))).await;
+        let response = post_session_inner(state, Some(good_post("mcp_session_abc"))).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"], "already_exists");
@@ -574,7 +585,7 @@ mod tests {
             plugin: Some("fetch".to_string()),
             egress_policy: None,
         });
-        let response = post_session(State(state), Some(bad)).await;
+        let response = post_session_inner(state, Some(bad)).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_request");
@@ -595,7 +606,7 @@ mod tests {
             plugin: Some("fetch".to_string()),
             egress_policy: None,
         });
-        let response = post_session(State(state), Some(bad)).await;
+        let response = post_session_inner(state, Some(bad)).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_request");
@@ -612,7 +623,7 @@ mod tests {
             plugin: Some("fetch".to_string()),
             egress_policy: None,
         });
-        let response = post_session(State(state), Some(bad)).await;
+        let response = post_session_inner(state, Some(bad)).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_request");
@@ -628,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn post_missing_body_returns_400() {
         let state = empty_state();
-        let response = post_session(State(state), None).await;
+        let response = post_session_inner(state, None).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_request");
@@ -645,7 +656,7 @@ mod tests {
             plugin: Some("fetch".to_string()),
             egress_policy: None,
         });
-        let response = post_session(State(state.clone()), Some(body)).await;
+        let response = post_session_inner(state.clone(), Some(body)).await;
         let (status, _) = body_status(response).await;
         assert_eq!(status, StatusCode::CREATED);
         let stored = state
@@ -659,7 +670,7 @@ mod tests {
     #[tokio::test]
     async fn delete_known_session_returns_200_with_ack() {
         let state = empty_state();
-        post_session(State(state.clone()), Some(good_post("mcp_session_abc"))).await;
+        post_session_inner(state.clone(), Some(good_post("mcp_session_abc"))).await;
         let response =
             delete_session(State(state.clone()), Path("mcp_session_abc".to_string())).await;
         let (status, body) = body_status(response).await;
@@ -689,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn get_known_session_returns_record() {
         let state = empty_state();
-        post_session(State(state.clone()), Some(good_post("mcp_session_abc"))).await;
+        post_session_inner(state.clone(), Some(good_post("mcp_session_abc"))).await;
         let response = get_session(State(state), Path("mcp_session_abc".to_string())).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::OK);
@@ -719,7 +730,7 @@ mod tests {
                 plugin: Some("fetch".to_string()),
                 egress_policy: None,
             });
-            post_session(State(state.clone()), Some(body)).await;
+            post_session_inner(state.clone(), Some(body)).await;
         }
         let response = list_sessions(State(state)).await;
         let (status, body) = body_status(response).await;
@@ -750,7 +761,7 @@ mod tests {
     async fn post_with_ack_gate_returns_503_when_no_xds_subscriber() {
         let sessions = Arc::new(SessionStore::new());
         let state = ack_state_with(sessions.clone(), Duration::from_millis(100), false);
-        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        let response = post_session_inner(state, Some(good_post("mcp_session_abc"))).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], "no_xds_subscriber");
@@ -766,7 +777,7 @@ mod tests {
         // (rather than short-circuiting to NoSubscriber).
         let _guard = sessions.xds_subscriber_guard();
         let state = ack_state_with(sessions.clone(), Duration::from_millis(75), false);
-        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        let response = post_session_inner(state, Some(good_post("mcp_session_abc"))).await;
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], "xds_ack_timeout");
@@ -800,7 +811,7 @@ mod tests {
             acker_sessions.record_acked_version(new_gen);
         });
 
-        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        let response = post_session_inner(state, Some(good_post("mcp_session_abc"))).await;
         acker.await.expect("acker join");
         let (status, body) = body_status(response).await;
         assert_eq!(status, StatusCode::CREATED, "body: {body}");
@@ -814,7 +825,7 @@ mod tests {
         // No subscriber, no acker. With ack_disabled=true the handler
         // does NOT call wait_for_ack at all.
         let state = ack_state_with(sessions.clone(), Duration::from_secs(5), true);
-        let response = post_session(State(state), Some(good_post("mcp_session_abc"))).await;
+        let response = post_session_inner(state, Some(good_post("mcp_session_abc"))).await;
         let (status, _body) = body_status(response).await;
         assert_eq!(status, StatusCode::CREATED);
         assert!(sessions.get("mcp_session_abc").await.is_some());

@@ -13,7 +13,7 @@ use crate::AppState;
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/sessions", get(get_sessions))
-        .route("/evict-tenant/:tenant", post(evict_tenant))
+        .route("/evict-tenant/{tenant}", post(evict_tenant))
         .with_state(state)
 }
 

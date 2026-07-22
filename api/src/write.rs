@@ -257,36 +257,39 @@ pub fn router() -> Router<AppState> {
     Router::new()
         // Admin-gated tenant CRUD.
         .route("/api/tenants", post(create_tenant))
-        .route("/api/tenants/:id", put(update_tenant))
-        .route("/api/tenants/:id", delete(delete_tenant))
+        .route("/api/tenants/{id}", put(update_tenant))
+        .route("/api/tenants/{id}", delete(delete_tenant))
         // Admin-gated plugin CRUD (plugins are globally shared resources).
         .route("/api/plugins", post(create_plugin))
-        .route("/api/plugins/:id", put(update_plugin))
-        .route("/api/plugins/:id", delete(delete_plugin))
+        .route("/api/plugins/{id}", put(update_plugin))
+        .route("/api/plugins/{id}", delete(delete_plugin))
         // Tenant-scoped workspace CRUD.
-        .route("/api/tenant/:tenant/workspaces", post(create_workspace))
-        .route("/api/tenant/:tenant/workspaces/:id", put(update_workspace))
+        .route("/api/tenant/{tenant}/workspaces", post(create_workspace))
         .route(
-            "/api/tenant/:tenant/workspaces/:id",
+            "/api/tenant/{tenant}/workspaces/{id}",
+            put(update_workspace),
+        )
+        .route(
+            "/api/tenant/{tenant}/workspaces/{id}",
             delete(delete_workspace),
         )
         // Tenant-scoped binding CRUD.
         .route(
-            "/api/tenant/:tenant/workspace_plugins",
+            "/api/tenant/{tenant}/workspace_plugins",
             post(create_workspace_plugin),
         )
         .route(
-            "/api/tenant/:tenant/workspace_plugins/:workspace_id/:plugin_id",
+            "/api/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
             put(update_workspace_plugin),
         )
         .route(
-            "/api/tenant/:tenant/workspace_plugins/:workspace_id/:plugin_id",
+            "/api/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
             delete(delete_workspace_plugin),
         )
         // Tenant-scoped secrets.
-        .route("/api/tenant/:tenant/secrets", post(create_secret))
+        .route("/api/tenant/{tenant}/secrets", post(create_secret))
         .route(
-            "/api/tenant/:tenant/secrets/:service/:name",
+            "/api/tenant/{tenant}/secrets/{service}/{name}",
             delete(delete_secret),
         )
 }
