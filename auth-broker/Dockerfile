@@ -33,7 +33,7 @@
 
 ARG BINARY_SOURCE=source
 
-FROM rust:1.90-slim-bookworm AS rust-toolchain
+FROM rust:1.97-slim-bookworm AS rust-toolchain
 
 # ── build-source ─────────────────────────────────────────────────────────
 # Cargo build from the workspace tree. Cache mounts are shared across
