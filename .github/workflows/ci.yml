@@ -189,11 +189,11 @@ jobs:
     needs: [crates]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Install lcov
       run: sudo apt-get install -y --no-install-recommends lcov
     - name: Download per-crate coverage artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         pattern: '*-coverage'
         path: .ci-coverage
@@ -277,7 +277,7 @@ jobs:
         echo "${report}"
         printf '%s\n' "${report}" >> "${GITHUB_STEP_SUMMARY}"
     - name: Upload aggregate coverage artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: coverage
         path: coverage/
@@ -314,7 +314,7 @@ jobs:
       packages: write   # push images to GHCR
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     # ── Read and validate the VERSION file ──────────────────────────────────
     - name: Read VERSION
@@ -350,7 +350,7 @@ jobs:
     # ── Log in to GHCR ──────────────────────────────────────────────────────
     - name: Log in to GHCR
       if: steps.version.outputs.is_release == 'true'
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -362,7 +362,7 @@ jobs:
     # layout is `.ci-images/<service>-image/<service>.tar.gz`.
     - name: Download image artifacts
       if: steps.version.outputs.is_release == 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         pattern: '*-image'
         path: .ci-images
@@ -403,28 +403,28 @@ jobs:
     # ── Binaries: consume the prebuilt per-crate binary artifacts ───────────
     - name: Download launcher binary
       if: steps.version.outputs.is_release == 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: botwork-launcher-binary
         path: .ci-binaries
 
     - name: Download botctl binary
       if: steps.version.outputs.is_release == 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: botwork-ctl-binary
         path: .ci-binaries
 
     - name: Download bw binary
       if: steps.version.outputs.is_release == 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: botwork-cli-binary
         path: .ci-binaries
 
     - name: Download botwork-vault binary
       if: steps.version.outputs.is_release == 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: botwork-vault-binary
         path: .ci-binaries
@@ -436,7 +436,7 @@ jobs:
     # tag is guaranteed not to exist yet.
     - name: Create GitHub Release
       if: steps.version.outputs.is_release == 'true'
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: v${{ steps.version.outputs.version }}
         name: v${{ steps.version.outputs.version }}
