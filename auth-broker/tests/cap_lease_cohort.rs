@@ -34,7 +34,7 @@ fn fresh_cap_id() -> CapId {
     let mut id = [0u8; 32];
     let mut rng = SysRng;
     rng.try_fill_bytes(&mut id)
-        .expect("SysRng should be available");
+        .expect("failed to generate test cap id from system RNG");
     id
 }
 

@@ -45,7 +45,7 @@ pub fn mint_cap_id() -> CapId {
     let mut buf = [0u8; CAP_BYTES];
     let mut rng = SysRng;
     rng.try_fill_bytes(&mut buf)
-        .expect("SysRng should be available");
+        .expect("failed to mint cap id from system RNG");
     buf
 }
 
