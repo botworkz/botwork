@@ -1930,7 +1930,8 @@ fn make_login_finalization_b64(
 async fn api_auth_login_finish_success_with_set_cookie() {
     let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
-    let password: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let mut password = vec![0u8; 32];
+    rand::Rng::fill_bytes(&mut rng, &mut password);
     let setup = ServerSetup::generate(&mut rng);
     let password_file = make_password_file(&setup, &password);
 
