@@ -5,7 +5,7 @@
 //! | Endpoint                  | Verb   | Purpose                                   |
 //! |---------------------------|--------|-------------------------------------------|
 //! | `/secrets`                | POST   | Deposit a secret into the tenant's vault. |
-//! | `/secrets/:service/:name` | DELETE | Remove a secret from the tenant's vault.  |
+//! | `/secrets/{service}/{name}` | DELETE | Remove a secret from the tenant's vault.  |
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -313,7 +313,7 @@ pub async fn delete_secret(
 pub fn build_secrets_router(state: AppState) -> Router {
     Router::new()
         .route("/secrets", post(store))
-        .route("/secrets/:service/:name", delete(delete_secret))
+        .route("/secrets/{service}/{name}", delete(delete_secret))
         .with_state(state)
 }
 

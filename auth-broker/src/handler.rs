@@ -902,7 +902,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/auth/logout", post(api_auth_logout))
         .route("/api/auth/whoami", get(api_auth_whoami))
         .route("/", any(check))
-        .route("/*path", any(check))
+        .route("/{*path}", any(check))
         .with_state(state.clone());
     core.merge(crate::auth::build_auth_router(state.auth.clone()))
         .merge(crate::admin::build_admin_router(state))

@@ -483,7 +483,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/sessions", post(post_session).get(list_sessions))
         .route(
-            "/sessions/:session_id",
+            "/sessions/{session_id}",
             get(get_session).delete(delete_session),
         )
         .with_state(state)
