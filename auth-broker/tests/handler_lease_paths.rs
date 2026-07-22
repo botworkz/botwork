@@ -26,6 +26,7 @@ use botwork_entity::{lease, tenant};
 use botwork_opaque_handshake::{client, server, LoginResponse, PasswordFile, ServerSetup};
 use botwork_vault::Vault;
 use chrono::{Duration, Utc};
+use rand::Rng;
 use sea_orm::{DatabaseBackend, DatabaseConnection, DbErr, MockDatabase, MockExecResult};
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -1930,7 +1931,8 @@ fn make_login_finalization_b64(
 async fn api_auth_login_finish_success_with_set_cookie() {
     let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
-    let password: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let mut password = vec![0u8; 32];
+    rng.fill_bytes(&mut password);
     let setup = ServerSetup::generate(&mut rng);
     let password_file = make_password_file(&setup, &password);
 

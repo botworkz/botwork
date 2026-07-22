@@ -77,7 +77,7 @@ pub fn wrap_session_key(bearer: &[u8], session_key: &[u8]) -> Vec<u8> {
     let mut nonce_bytes = [0u8; LEASE_KEK_NONCE_LEN];
     let mut rng = SysRng;
     rng.try_fill_bytes(&mut nonce_bytes)
-        .expect("SysRng should be available");
+        .expect("failed to generate lease KEK nonce from system RNG");
 
     let mut buf = session_key.to_vec();
     let tag = cipher

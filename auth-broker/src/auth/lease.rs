@@ -78,7 +78,7 @@ impl Bearer {
         let mut bytes = [0u8; BEARER_BYTES];
         let mut rng = SysRng;
         rng.try_fill_bytes(&mut bytes)
-            .expect("SysRng should be available");
+            .expect("failed to generate bearer token bytes from system RNG");
         Self::from_bytes(bytes)
     }
 
