@@ -27,7 +27,12 @@ base64 = "0.22"
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
-hkdf = "0.12"
+# hkdf 0.13 is built against digest 0.11, matching sha2 0.11 below.
+# hkdf 0.12 was pinned to digest 0.10, so `Sha512` from sha2 0.11
+# (digest 0.11) did not implement the digest-0.10 `OutputSizeUser`
+# / `CoreProxy` traits that `Hkdf<H>` requires, which broke the
+# build in `kdf.rs`. Keeping both crates on digest 0.11 resolves it.
+hkdf = "0.13"
 postcard = { version = "1", features = ["alloc"] }
 rand = "0.10"
 # reqwest pulled in here so `botwork-vault init` and
@@ -39,7 +44,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2"
 tempfile = "3"
 thiserror = "2"
