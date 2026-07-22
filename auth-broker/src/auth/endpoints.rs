@@ -653,7 +653,7 @@ async fn login_start_inner_with_handshake_id(
     };
 
     let started = match server::login_start(
-        &mut rand::thread_rng(),
+        &mut rand::rng(),
         &state.setup,
         password_file.as_ref(),
         request,
@@ -928,7 +928,7 @@ mod tests {
         setup: &botwork_opaque_handshake::ServerSetup,
         password: &[u8],
     ) -> PasswordFile {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let started =
             client::registration_start(&mut rng, password).expect("client registration_start");
         let response = server::registration_start(setup, started.request, b"alice")
@@ -949,11 +949,11 @@ mod tests {
     #[tokio::test]
     async fn login_start_collision_maps_to_500() {
         let tenant_id = Uuid::new_v4();
-        let mut rng_pw = rand::thread_rng();
+        let mut rng_pw = rand::rng();
         let mut pw_bytes = [0u8; 16];
         rand::RngCore::fill_bytes(&mut rng_pw, &mut pw_bytes);
         let password = &pw_bytes[..];
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rng);
         let password_file = make_password_file(&setup, password);
         let login = client::login_start(&mut rng, password).expect("client login_start");

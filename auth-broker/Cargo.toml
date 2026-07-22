@@ -36,7 +36,7 @@ botwork-entity = { path = "../db/entity" }
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 hkdf = "0.12"
-rand = "0.8"
+rand = "0.9"
 regex = "1"
 # SeaORM with the same shape every other DB-touching crate uses in
 # `botworkz/botwork`. The runtime is rustls-tokio so we don't drag in

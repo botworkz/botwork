@@ -43,7 +43,7 @@ use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::TryRngCore;
 use sha2::Sha512;
 use zeroize::Zeroizing;
 
@@ -75,7 +75,7 @@ pub fn wrap_session_key(bearer: &[u8], session_key: &[u8]) -> Vec<u8> {
     let cipher = ChaCha20Poly1305::new(<&Key>::from(&*kek));
 
     let mut nonce_bytes = [0u8; LEASE_KEK_NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    OsRng.try_fill_bytes(&mut nonce_bytes).expect("OsRng failed");
 
     let mut buf = session_key.to_vec();
     let tag = cipher

@@ -89,7 +89,7 @@ pub async fn load_or_generate_server_setup(vault_root: &Path) -> Result<ServerSe
                         source,
                     })?;
             }
-            let setup = ServerSetup::generate(&mut rand::thread_rng());
+            let setup = ServerSetup::generate(&mut rand::rng());
 
             // tempfile + rename for atomicity. The tempfile lives in
             // the same directory as the destination so the rename is
@@ -318,7 +318,7 @@ mod tests {
     /// the DB layer.
     fn make_password_file() -> PasswordFile {
         use botwork_opaque_handshake::{client, server};
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let mut pw = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rng, &mut pw);

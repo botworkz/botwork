@@ -71,7 +71,7 @@ async fn spawn_minimum() -> Option<(
     Migrator::up(&*db, None).await.ok()?;
 
     let vault_root = tempdir().unwrap();
-    let setup = ServerSetup::generate(&mut rand::thread_rng());
+    let setup = ServerSetup::generate(&mut rand::rng());
     let auth = AuthState::new_arc(Arc::clone(&db), setup);
     let state = AppState::with_auth(vault_root.path().to_path_buf(), auth);
     let app = build_router(state);
@@ -105,7 +105,7 @@ async fn drive_login_start(
 ) -> Option<(serde_json::Value, usize)> {
     // Returns (json_body, login_response_byte_length) so the
     // shape-equality assertion can be done at the byte level.
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let cl = client::login_start(&mut rng, b"anything-pwd").unwrap();
     let resp = reqwest::Client::new()
         .post(format!("{base}/auth/login/start"))

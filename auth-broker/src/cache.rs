@@ -440,7 +440,7 @@ mod tests {
     }
 
     async fn make_state() -> AppState {
-        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
+        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
         let auth = AuthState::from_stores(
             Arc::new(MockLeaseStore::new()),
             Arc::new(MockTenantStore::new()),

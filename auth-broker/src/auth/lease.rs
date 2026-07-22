@@ -32,7 +32,7 @@ use std::ops::Add;
 use botwork_entity::lease;
 use chrono::{DateTime, Duration, Utc};
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::TryRngCore;
 use sea_orm::{
     sea_query::{Expr, OnConflict},
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbErr,
@@ -76,7 +76,7 @@ impl Bearer {
 
     pub fn generate() -> Self {
         let mut bytes = [0u8; BEARER_BYTES];
-        OsRng.fill_bytes(&mut bytes);
+        OsRng.try_fill_bytes(&mut bytes).expect("OsRng failed");
         Self::from_bytes(bytes)
     }
 

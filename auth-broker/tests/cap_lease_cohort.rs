@@ -25,14 +25,14 @@ use std::time::Duration;
 
 use botwork_auth_broker::cache::evict_caps_from_map;
 use botwork_auth_broker::{CapEntry, CapId, CAP_TTL};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::OsRng, TryRngCore};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 fn fresh_cap_id() -> CapId {
     let mut id = [0u8; 32];
-    OsRng.fill_bytes(&mut id);
+    OsRng.try_fill_bytes(&mut id).expect("OsRng failed");
     id
 }
 

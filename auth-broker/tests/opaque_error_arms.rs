@@ -28,12 +28,12 @@ use uuid::Uuid;
 
 fn random_password() -> Vec<u8> {
     let mut password = vec![0u8; 32];
-    rand::thread_rng().fill_bytes(&mut password);
+    rand::rng().fill_bytes(&mut password);
     password
 }
 
 fn make_password_file(setup: &ServerSetup, password: &[u8]) -> PasswordFile {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let started =
         client::registration_start(&mut rng, password).expect("client registration_start");
     let response = server::registration_start(setup, started.request, b"alice")
@@ -45,7 +45,7 @@ fn make_password_file(setup: &ServerSetup, password: &[u8]) -> PasswordFile {
 }
 
 fn make_registration_request_b64() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let password = random_password();
     let started =
         client::registration_start(&mut rng, &password).expect("client registration_start");
@@ -53,7 +53,7 @@ fn make_registration_request_b64() -> String {
 }
 
 fn make_registration_upload_b64(setup: &ServerSetup, password: &[u8]) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let started =
         client::registration_start(&mut rng, password).expect("client registration_start");
     let response = server::registration_start(setup, started.request, b"alice")
@@ -149,7 +149,7 @@ async fn start_login(
     tenant: &str,
     password: &[u8],
 ) -> (ClientLoginState, LoginStartResponse) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let started = client::login_start(&mut rng, password).expect("client login_start");
     let response = send_json(
         app,
@@ -187,7 +187,7 @@ fn make_login_finalization_b64(
 
 #[tokio::test]
 async fn register_start_rate_limit_returns_429_with_retry_after() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let auth = AuthState::from_stores(
         Arc::new(MockLeaseStore::new()),
         Arc::new(MockTenantStore::new()),
@@ -227,7 +227,7 @@ async fn register_start_rate_limit_returns_429_with_retry_after() {
 
 #[tokio::test]
 async fn register_start_unknown_tenant_returns_404() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let db = MockDatabase::new(DatabaseBackend::Postgres)
         .append_query_results(vec![Vec::<tenant::Model>::new()])
         .into_connection();
@@ -252,7 +252,7 @@ async fn register_start_unknown_tenant_returns_404() {
 
 #[tokio::test]
 async fn register_start_tenant_store_db_error_returns_500() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let db = MockDatabase::new(DatabaseBackend::Postgres)
         .append_query_errors(vec![DbErr::Custom("tenant lookup failed".to_string())])
         .into_connection();
@@ -281,7 +281,7 @@ async fn register_start_tenant_store_db_error_returns_500() {
 
 #[tokio::test]
 async fn register_start_bad_base64_returns_400() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let app = build_auth_router(mock_auth_with_known_tenant(
         ServerSetup::generate(&mut rng),
         Uuid::new_v4(),
@@ -310,7 +310,7 @@ async fn register_start_bad_base64_returns_400() {
 
 #[tokio::test]
 async fn register_start_malformed_request_returns_400() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let app = build_auth_router(mock_auth_with_known_tenant(
         ServerSetup::generate(&mut rng),
         Uuid::new_v4(),
@@ -335,7 +335,7 @@ async fn register_start_malformed_request_returns_400() {
 
 #[tokio::test]
 async fn register_finish_rate_limit_returns_429_with_retry_after() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let auth = AuthState::from_stores(
         Arc::new(MockLeaseStore::new()),
         Arc::new(MockTenantStore::new()),
@@ -366,7 +366,7 @@ async fn register_finish_rate_limit_returns_429_with_retry_after() {
 
 #[tokio::test]
 async fn register_finish_unknown_tenant_returns_404() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
     let upload = make_registration_upload_b64(&setup, &password);
@@ -393,7 +393,7 @@ async fn register_finish_unknown_tenant_returns_404() {
 
 #[tokio::test]
 async fn register_finish_tenant_store_db_error_returns_500() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
     let upload = make_registration_upload_b64(&setup, &password);
@@ -424,7 +424,7 @@ async fn register_finish_tenant_store_db_error_returns_500() {
 
 #[tokio::test]
 async fn register_finish_bad_base64_returns_400() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let app = build_auth_router(mock_auth_with_known_tenant(
         ServerSetup::generate(&mut rng),
         Uuid::new_v4(),
@@ -452,7 +452,7 @@ async fn register_finish_bad_base64_returns_400() {
 
 #[tokio::test]
 async fn register_finish_conflict_returns_409() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let setup = ServerSetup::generate(&mut rng);
     let upload_password = random_password();
@@ -491,7 +491,7 @@ async fn register_finish_conflict_returns_409() {
 
 #[tokio::test]
 async fn register_finish_db_error_returns_500() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
@@ -524,7 +524,7 @@ async fn register_finish_db_error_returns_500() {
 
 #[tokio::test]
 async fn login_start_bad_base64_returns_400() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let app = build_auth_router(AuthState::from_stores(
         Arc::new(MockLeaseStore::new()),
         Arc::new(MockTenantStore::new()),
@@ -555,7 +555,7 @@ async fn login_start_bad_base64_returns_400() {
 
 #[tokio::test]
 async fn login_start_malformed_request_returns_400() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let app = build_auth_router(AuthState::from_stores(
         Arc::new(MockLeaseStore::new()),
         Arc::new(MockTenantStore::new()),
@@ -582,7 +582,7 @@ async fn login_start_malformed_request_returns_400() {
 
 #[tokio::test]
 async fn login_start_tenant_store_db_error_returns_500() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let password = random_password();
     let started = client::login_start(&mut rng, &password).expect("client login_start");
     let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -613,7 +613,7 @@ async fn login_start_tenant_store_db_error_returns_500() {
 
 #[tokio::test]
 async fn login_start_password_file_store_db_error_returns_500() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password = random_password();
     let started = client::login_start(&mut rng, &password).expect("client login_start");
@@ -649,7 +649,7 @@ async fn login_finish_expired_pending_returns_404() {
     // Enable manual time control so we can advance the clock to trigger expiry.
     pause();
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
@@ -682,7 +682,7 @@ async fn login_finish_expired_pending_returns_404() {
 
 #[tokio::test]
 async fn login_finish_bad_base64_returns_400() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
@@ -716,7 +716,7 @@ async fn login_finish_bad_base64_returns_400() {
 
 #[tokio::test]
 async fn login_finish_malformed_finalization_returns_400() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
@@ -746,7 +746,7 @@ async fn login_finish_malformed_finalization_returns_400() {
 
 #[tokio::test]
 async fn login_finish_dummy_flow_returns_invalid_bearer() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
     let password_file = make_password_file(&setup, &password);
@@ -813,7 +813,7 @@ async fn login_finish_dummy_flow_returns_invalid_bearer() {
 
 #[tokio::test]
 async fn login_finish_insert_lease_error_returns_500() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
@@ -858,7 +858,7 @@ async fn login_finish_insert_lease_error_returns_500() {
 /// (lines 447–452).
 #[tokio::test]
 async fn register_start_success_returns_200() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let setup = ServerSetup::generate(&mut rng);
     let app = build_auth_router(mock_auth_with_known_tenant(setup, tenant_id));
@@ -892,7 +892,7 @@ async fn register_start_success_returns_200() {
 /// `OpaqueError::Serialization` → bad_request (lines 514–515).
 #[tokio::test]
 async fn register_finish_malformed_upload_bytes_returns_400() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let setup = ServerSetup::generate(&mut rng);
     let app = build_auth_router(mock_auth_with_known_tenant(setup, tenant_id));
@@ -925,7 +925,7 @@ async fn register_finish_malformed_upload_bytes_returns_400() {
 /// (lines 531–542).
 #[tokio::test]
 async fn register_finish_success_returns_201() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let setup = ServerSetup::generate(&mut rng);
     let password = random_password();
@@ -959,7 +959,7 @@ async fn register_finish_success_returns_201() {
 /// returns `OpaqueError::InvalidLogin` → 401 (lines 791–799).
 #[tokio::test]
 async fn login_finish_invalid_login_returns_401() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
@@ -1026,7 +1026,7 @@ async fn login_finish_invalid_login_returns_401() {
 /// Covers `too_many_requests` return at endpoints.rs line 742.
 #[tokio::test]
 async fn login_finish_rate_limit_returns_429() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let auth = AuthState::from_stores(
         Arc::new(MockLeaseStore::new()),
         Arc::new(MockTenantStore::new()),
@@ -1074,7 +1074,7 @@ async fn login_finish_rate_limit_returns_429() {
 /// wrapper emits `Json(response).into_response()` → endpoints.rs line 745.
 #[tokio::test]
 async fn login_finish_success_returns_200_with_bearer() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);

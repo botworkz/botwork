@@ -27,7 +27,7 @@ pub const MASTER_INFO: &[u8] = b"botwork-vault/v4/master-key";
 /// landed in the file header.
 pub fn gen_salt() -> [u8; SALT_LEN] {
     let mut salt = [0u8; SALT_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     salt
 }
 
@@ -78,7 +78,7 @@ pub fn derive_master_key(
 /// entries.
 pub fn gen_dek() -> Zeroizing<[u8; KEY_LEN]> {
     let mut dek = [0u8; KEY_LEN];
-    rand::thread_rng().fill_bytes(&mut dek);
+    rand::rng().fill_bytes(&mut dek);
     Zeroizing::new(dek)
 }
 

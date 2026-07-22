@@ -71,7 +71,7 @@ async fn spawn_server(
     db: Arc<DatabaseConnection>,
     vault_root: std::path::PathBuf,
 ) -> Result<Server, String> {
-    let setup = ServerSetup::generate(&mut rand::thread_rng());
+    let setup = ServerSetup::generate(&mut rand::rng());
     let auth = AuthState::new_arc(db, setup);
     let state = AppState::with_auth(vault_root, auth);
     let app = build_router(state);
@@ -102,7 +102,7 @@ async fn seed_tenant(db: &DatabaseConnection, name: &str) -> Uuid {
 }
 
 async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
     let cr = client::registration_start(&mut rng, password).unwrap();
@@ -139,7 +139,7 @@ async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
 }
 
 async fn login(base: &str, tenant: &str, cred: &str, password: &[u8]) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
     let cl = client::login_start(&mut rng, password).unwrap();
@@ -209,7 +209,7 @@ async fn restart_preserves_leases() {
         .expect("spawn initial broker");
     seed_tenant(&db, "phlax").await;
     let mut password = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut password);
+    rand::rng().fill_bytes(&mut password);
     register(&srv1.base, "phlax", "phlax", &password).await;
     let bearer = login(&srv1.base, "phlax", "phlax", &password).await;
 

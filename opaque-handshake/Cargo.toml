@@ -46,7 +46,7 @@ opaque-ke = { version = "3", default-features = false, features = [
 # version opaque-ke compiled its trait impl against, so this stays
 # strictly in lockstep with the opaque-ke pin above.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
-rand = "0.8"
+rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 # Constant-time byte comparison for the `SessionKey` and `ExportKey`
 # `PartialEq` impls. Comparing two derived keys with slice `==` is a

@@ -51,7 +51,7 @@ use uuid::Uuid;
 /// `upsert_password_file`, ensuring `PasswordFile::from_bytes` succeeds on the
 /// re-read path.
 fn make_password_file() -> PasswordFile {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rng);
     // Use a freshly-generated random password for the fixture so static
     // analysis tools don't flag a hard-coded credential (this value is never
