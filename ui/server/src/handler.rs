@@ -127,10 +127,10 @@ pub fn build_router() -> Router {
         .route("/login", get(index))
         .route("/login/", get(index))
         // Static assets under /static/*.
-        .route("/static/*rest", get(static_asset))
+        .route("/static/{*rest}", get(static_asset))
         // Tenant SPA shell: /{tenant} and /{tenant}/ serve index.html.
         // /{tenant}/* deep links also fall back to index.html via tenant_asset.
-        .route("/:tenant", get(index))
-        .route("/:tenant/", get(index))
-        .route("/:tenant/*rest", get(tenant_asset))
+        .route("/{tenant}", get(index))
+        .route("/{tenant}/", get(index))
+        .route("/{tenant}/{*rest}", get(tenant_asset))
 }

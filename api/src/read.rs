@@ -71,35 +71,35 @@ pub fn router() -> Router<AppState> {
     Router::new()
         // Admin-gated: tenant list/detail and global plugin list/detail.
         .route("/api/tenants", get(list_tenants))
-        .route("/api/tenants/:id", get(get_tenant))
+        .route("/api/tenants/{id}", get(get_tenant))
         .route("/api/plugins", get(list_plugins))
-        .route("/api/plugins/:id", get(get_plugin))
+        .route("/api/plugins/{id}", get(get_plugin))
         // Tenant-scoped: path carries {tenant} name; consistency with
         // x-botwork-tenant header is checked in each handler.
-        .route("/api/tenant/:tenant/workspaces", get(list_workspaces))
-        .route("/api/tenant/:tenant/workspaces/:id", get(get_workspace))
+        .route("/api/tenant/{tenant}/workspaces", get(list_workspaces))
+        .route("/api/tenant/{tenant}/workspaces/{id}", get(get_workspace))
         .route(
-            "/api/tenant/:tenant/workspace_plugins",
+            "/api/tenant/{tenant}/workspace_plugins",
             get(list_workspace_plugins),
         )
         .route(
-            "/api/tenant/:tenant/workspace_plugins/:workspace_id/:plugin_id",
+            "/api/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
             get(get_workspace_plugin),
         )
         .route(
-            "/api/tenant/:tenant/agent_sessions",
+            "/api/tenant/{tenant}/agent_sessions",
             get(list_agent_sessions),
         )
         .route(
-            "/api/tenant/:tenant/agent_sessions/:id",
+            "/api/tenant/{tenant}/agent_sessions/{id}",
             get(get_agent_session),
         )
         .route(
-            "/api/tenant/:tenant/session_workers",
+            "/api/tenant/{tenant}/session_workers",
             get(list_session_workers),
         )
         .route(
-            "/api/tenant/:tenant/session_workers/:id",
+            "/api/tenant/{tenant}/session_workers/{id}",
             get(get_session_worker),
         )
 }

@@ -4,7 +4,7 @@
 //!
 //! | Endpoint                      | Verb   | Purpose                              |
 //! |-------------------------------|--------|--------------------------------------|
-//! | `/admin/api/v1/leases/:id`    | DELETE | Revoke a lease by UUID; evict caps.  |
+//! | `/admin/api/v1/leases/{id}`   | DELETE | Revoke a lease by UUID; evict caps.  |
 //!
 //! ## Authentication
 //!
@@ -16,7 +16,7 @@
 //!
 //! ## Revocation semantics
 //!
-//! `DELETE /admin/api/v1/leases/:id` does two things atomically from the
+//! `DELETE /admin/api/v1/leases/{id}` does two things atomically from the
 //! operator's perspective:
 //!
 //! 1. Sets `revoked_at = now()` on the postgres `lease` row (via
@@ -113,7 +113,7 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Respon
 }
 
 // ---------------------------------------------------------------------------
-// DELETE /admin/api/v1/leases/:id
+// DELETE /admin/api/v1/leases/{id}
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
@@ -165,7 +165,7 @@ async fn admin_revoke_lease(
 /// [`crate::handler::build_router`].
 pub fn build_admin_router(state: AppState) -> Router {
     Router::new()
-        .route("/admin/api/v1/leases/:id", delete(admin_revoke_lease))
+        .route("/admin/api/v1/leases/{id}", delete(admin_revoke_lease))
         .with_state(state)
 }
 
