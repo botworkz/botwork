@@ -120,7 +120,7 @@ impl<R: Rng> OpaqueRngCore for OpaqueKeRng<R> {
 
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
         rand::TryRng::try_fill_bytes(&mut self.0, dst)
-            .expect("opaque-handshake expects wrapped rand RNGs not to fail in practice");
+            .expect("wrapped rand RNG unexpectedly failed; use a modern rand RNG that is infallible in normal operation");
         Ok(())
     }
 }
