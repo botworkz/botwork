@@ -42,7 +42,9 @@
 //! #         self.0.fill_bytes(dst);
 //! #     }
 //! #     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
-//! #         self.0.try_fill_bytes(dst).map_err(|err| match err {})
+//! #         self.0
+//! #             .try_fill_bytes(dst)
+//! #             .map_err(|_| unreachable!("rand::Rng errors are infallible"))
 //! #     }
 //! # }
 //! # impl<R: rand::CryptoRng> opaque_ke::rand::CryptoRng for Rand10Compat<R> {}
@@ -902,7 +904,9 @@ mod tests {
         }
 
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
-            self.0.try_fill_bytes(dst).map_err(|err| match err {})
+            self.0
+                .try_fill_bytes(dst)
+                .map_err(|_| unreachable!("rand::Rng errors are infallible"))
         }
     }
 
