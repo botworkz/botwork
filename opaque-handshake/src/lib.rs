@@ -30,7 +30,24 @@
 //! ```
 //! # use botwork_opaque_handshake::{client, server, PasswordFile, ServerSetup};
 //! # fn try_main() -> Result<(), botwork_opaque_handshake::OpaqueError> {
-//! let mut rng = rand::thread_rng();
+//! # struct Rand10Compat<R>(R);
+//! # impl<R: rand::Rng> opaque_ke::rand::RngCore for Rand10Compat<R> {
+//! #     fn next_u32(&mut self) -> u32 {
+//! #         self.0.next_u32()
+//! #     }
+//! #     fn next_u64(&mut self) -> u64 {
+//! #         self.0.next_u64()
+//! #     }
+//! #     fn fill_bytes(&mut self, dst: &mut [u8]) {
+//! #         self.0.fill_bytes(dst);
+//! #     }
+//! #     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
+//! #         self.0.fill_bytes(dst);
+//! #         Ok(())
+//! #     }
+//! # }
+//! # impl<R: rand::CryptoRng> opaque_ke::rand::CryptoRng for Rand10Compat<R> {}
+//! let mut rng = Rand10Compat(rand::rng());
 //! let setup = ServerSetup::generate(&mut rng);
 //! let credential_id = b"alice@example.com";
 //!
@@ -67,7 +84,7 @@ use std::fmt;
 
 use opaque_ke::ciphersuite::CipherSuite;
 use opaque_ke::ksf::Ksf;
-use rand::{CryptoRng, RngCore};
+use opaque_ke::rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -870,6 +887,29 @@ pub mod server {
 mod tests {
     use super::*;
 
+    struct Rand10Compat<R>(R);
+
+    impl<R: rand::Rng> RngCore for Rand10Compat<R> {
+        fn next_u32(&mut self) -> u32 {
+            self.0.next_u32()
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0.next_u64()
+        }
+
+        fn fill_bytes(&mut self, dst: &mut [u8]) {
+            self.0.fill_bytes(dst);
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
+            self.0.fill_bytes(dst);
+            Ok(())
+        }
+    }
+
+    impl<R: rand::CryptoRng> CryptoRng for Rand10Compat<R> {}
+
     fn run_registration(
         rng: &mut (impl RngCore + CryptoRng),
         setup: &ServerSetup,
@@ -900,7 +940,7 @@ mod tests {
 
     #[test]
     fn registration_and_login_yield_matching_session_keys() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"alice@example.com";
         let pw = b"correct horse battery staple";
@@ -923,7 +963,7 @@ mod tests {
 
     #[test]
     fn wrong_password_fails_login_cleanly() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"bob@example.com";
         let pw = b"hunter2";
@@ -941,7 +981,7 @@ mod tests {
 
     #[test]
     fn export_key_differs_per_password() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"carol@example.com";
 
@@ -957,7 +997,7 @@ mod tests {
 
     #[test]
     fn password_file_round_trips_through_bytes() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"dave@example.com";
         let pw = b"a-strong-and-elaborate-password";
@@ -974,7 +1014,7 @@ mod tests {
 
     #[test]
     fn server_setup_round_trips_through_bytes() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let bytes = setup.as_bytes().to_vec();
         let setup2 = ServerSetup::from_bytes(&bytes).unwrap();
@@ -990,7 +1030,7 @@ mod tests {
 
     #[test]
     fn message_round_trips_through_bytes() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"frank@example.com";
         let pw = b"another-password";
@@ -1044,7 +1084,7 @@ mod tests {
         // even when the credential is unknown — the test is that
         // `client::login_finish` then refuses to authenticate without
         // panicking.
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"ghost@example.com";
 
@@ -1067,7 +1107,7 @@ mod tests {
 
     #[test]
     fn debug_impls_do_not_leak_key_material() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"hank@example.com";
         let pw = b"a-very-private-password";
@@ -1152,7 +1192,7 @@ mod tests {
     /// work without affinity routing.
     #[test]
     fn server_login_state_round_trips_through_bytes() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"ivan@example.com";
         let pw = b"a-password-for-state-round-trip";
@@ -1190,7 +1230,7 @@ mod tests {
         // compiling, the signature changed in a way that breaks the
         // \"key material is wiped on drop\" guarantee in the issue body.
         fn assert_zeroizing<T: zeroize::Zeroize>(_: zeroize::Zeroizing<T>) {}
-        let mut rng = rand::thread_rng();
+        let mut rng = Rand10Compat(rand::rng());
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"jess@example.com";
         let pw = b"another-password-for-the-zeroize-check";
