@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
@@ -43,7 +43,9 @@ pub type CapMap = Arc<Mutex<HashMap<CapId, CapEntry>>>;
 
 pub fn mint_cap_id() -> CapId {
     let mut buf = [0u8; CAP_BYTES];
-    OsRng.fill_bytes(&mut buf);
+    let mut rng = SysRng;
+    rng.try_fill_bytes(&mut buf)
+        .expect("SysRng should be available");
     buf
 }
 

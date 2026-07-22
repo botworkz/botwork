@@ -61,7 +61,7 @@ use botwork_auth_broker::AppState;
 use botwork_vault::Vault;
 use chrono::{Duration, Utc};
 use http::StatusCode;
-use rand::RngCore;
+use rand::Rng;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -96,7 +96,7 @@ impl SecretsWriteFixture {
         let tenant_id = Uuid::new_v4();
         let lease_id = Uuid::new_v4();
         let mut export_key = [0u8; 64];
-        rand::thread_rng().fill_bytes(&mut export_key);
+        rand::rng().fill_bytes(&mut export_key);
 
         // Create the vault on disk so unlock_master succeeds.
         let tenant_vault_root = vault_root.join(tenant);
@@ -106,7 +106,7 @@ impl SecretsWriteFixture {
         let tenant_store = Arc::new(MockTenantStore::with_tenant(tenant, tenant_id));
         let lease_store = Arc::new(MockLeaseStore::new());
         let pf_store = Arc::new(MockPasswordFileStore::new());
-        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
+        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
         let auth = AuthState::from_stores(
             Arc::clone(&lease_store)
                 as Arc<dyn botwork_auth_broker::store::LeaseStore + Send + Sync>,
@@ -253,7 +253,7 @@ async fn store_tenant_db_error_is_500() {
     let tenant_store = Arc::new(MockTenantStore::always_error("db down"));
     let lease_store = Arc::new(MockLeaseStore::new());
     let pf_store = Arc::new(MockPasswordFileStore::new());
-    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
+    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
     let auth = AuthState::from_stores(lease_store, tenant_store, pf_store, setup);
     let state = AppState::with_auth(vault_root, auth);
     let app = build_secrets_router(state);

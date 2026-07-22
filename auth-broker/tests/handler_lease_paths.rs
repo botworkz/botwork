@@ -57,7 +57,7 @@ fn build_auth_state(
     lease_store: Arc<dyn LeaseStore + Send + Sync>,
     tenant_store: Arc<dyn TenantStore + Send + Sync>,
 ) -> AuthState {
-    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
+    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
     let password_file_store: Arc<dyn PasswordFileStore + Send + Sync> =
         Arc::new(MockPasswordFileStore::new());
     AuthState::from_stores(lease_store, tenant_store, password_file_store, setup)
@@ -1559,7 +1559,7 @@ async fn login_start_with_opaque_request_routes_through_login_start_inner() {
 /// Json(ApiLoginResponse::Start { … })` arm (lines 761–766).
 #[tokio::test]
 async fn login_start_valid_opaque_request_returns_200_start_response() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let password = vec![0x01u8; 32];
     let setup = ServerSetup::generate(&mut rng);
     let tenant_id = Uuid::new_v4();
@@ -1846,7 +1846,7 @@ async fn auth_check_tenant_mismatch_is_401() {
 // ===========================================================================
 
 fn make_password_file(setup: &ServerSetup, password: &[u8]) -> PasswordFile {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let started =
         client::registration_start(&mut rng, password).expect("client registration_start");
     let response = server::registration_start(setup, started.request, b"alice")
@@ -1862,7 +1862,7 @@ async fn do_login_start_via_http(
     tenant: &str,
     password: &[u8],
 ) -> (botwork_opaque_handshake::ClientLoginState, Uuid, String) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let started = client::login_start(&mut rng, password).expect("client login_start");
     let request_b64 =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(started.request.serialize());
@@ -1928,7 +1928,7 @@ fn make_login_finalization_b64(
 /// written into the response (handler.rs lines 781–797).
 #[tokio::test]
 async fn api_auth_login_finish_success_with_set_cookie() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let password: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
     let setup = ServerSetup::generate(&mut rng);
@@ -2037,7 +2037,7 @@ async fn auth_check_api_tenant_expired_returns_expired_lease() {
 /// resistance) and returns 200 with `handshake_id` + `login_response`.
 #[tokio::test]
 async fn login_start_unknown_tenant_returns_200_via_dummy_opaque_flow() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let password = vec![0x01u8; 32];
     let setup = ServerSetup::generate(&mut rng);
 
@@ -2087,7 +2087,7 @@ async fn login_start_unknown_tenant_returns_200_via_dummy_opaque_flow() {
 /// 643-645). The handler returns 500 `internal`.
 #[tokio::test]
 async fn login_start_password_file_db_error_returns_500() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let password = vec![0x01u8; 32];
     let setup = ServerSetup::generate(&mut rng);
     let tenant_id = Uuid::new_v4();

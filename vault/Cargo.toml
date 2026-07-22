@@ -29,7 +29,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive", "env"] }
 hkdf = "0.12"
 postcard = { version = "1", features = ["alloc"] }
-rand = "0.8"
+rand = "0.10"
 # reqwest pulled in here so `botwork-vault init` and
 # the other CLI subcommands can fetch the wrapped export_key from
 # the auth-broker without dragging a custom HTTP client through

@@ -89,7 +89,7 @@ pub async fn load_or_generate_server_setup(vault_root: &Path) -> Result<ServerSe
                         source,
                     })?;
             }
-            let setup = ServerSetup::generate(&mut rand::thread_rng());
+            let setup = ServerSetup::generate(&mut rand::rng());
 
             // tempfile + rename for atomicity. The tempfile lives in
             // the same directory as the destination so the rename is
@@ -309,6 +309,7 @@ pub async fn upsert_password_file<C: ConnectionTrait>(
 mod tests {
     use super::*;
     use chrono::Utc;
+    use rand::Rng;
     use sea_orm::{DatabaseBackend, DbErr, MockDatabase, MockExecResult};
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -318,10 +319,10 @@ mod tests {
     /// the DB layer.
     fn make_password_file() -> PasswordFile {
         use botwork_opaque_handshake::{client, server};
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let mut pw = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rng, &mut pw);
+        rng.fill_bytes(&mut pw);
         let cr = client::registration_start(&mut rng, &pw).unwrap();
         let sr = server::registration_start(&setup, cr.request, b"test-cred").unwrap();
         let cf = client::registration_finish(&mut rng, cr.state, &pw, sr.response).unwrap();

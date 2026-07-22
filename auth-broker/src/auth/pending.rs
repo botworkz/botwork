@@ -253,7 +253,7 @@ mod tests {
         // path round-trips through ServerLoginState::from_bytes, so
         // garbage would surface as PendingError::NotFound and mask
         // the actual contract we want to pin.
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"pending-test@example.com";
         let cr = client::registration_start(&mut rng, b"pw").unwrap();

@@ -135,7 +135,7 @@ async fn admin_revoke_wrong_bearer_returns_401() {
 #[tokio::test]
 async fn admin_revoke_correct_bearer_calls_revoke_by_id() {
     // Wire up the mock lease store so we can inspect the revoke_by_id call.
-    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
+    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
     let lease_store = Arc::new(MockLeaseStore::new());
     let tenant_store = Arc::new(MockTenantStore::new());
     let pf_store = Arc::new(MockPasswordFileStore::new());
@@ -190,7 +190,7 @@ async fn admin_revoke_evicts_matching_cap_cohort() {
     use botwork_auth_broker::cache_key;
     use botwork_auth_broker::CAP_TTL;
 
-    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
+    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
     let lease_store = Arc::new(MockLeaseStore::new());
     let tenant_store = Arc::new(MockTenantStore::new());
     let pf_store = Arc::new(MockPasswordFileStore::new());
@@ -292,7 +292,7 @@ async fn admin_revoke_401_has_json_envelope() {
 
 #[tokio::test]
 async fn admin_revoke_db_error_returns_500() {
-    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
+    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
     let lease_store = Arc::new(MockLeaseStore::new());
     let tenant_store = Arc::new(MockTenantStore::new());
     let pf_store = Arc::new(MockPasswordFileStore::new());

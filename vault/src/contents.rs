@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 use chrono::{DateTime, Utc};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -280,7 +280,7 @@ impl VaultContents {
 
 fn gen_entry_nonce() -> [u8; ENTRY_NONCE_LEN] {
     let mut n = [0u8; ENTRY_NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut n);
+    rand::rng().fill_bytes(&mut n);
     n
 }
 
@@ -292,7 +292,7 @@ fn wrap_dek_under_master(
 ) -> Result<Vec<u8>, VaultError> {
     let cipher = ChaCha20Poly1305::new(<&Key>::from(master));
     let mut nonce_bytes = [0u8; ENTRY_NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let mut buf = dek.to_vec();
     let tag = cipher
         .encrypt_in_place_detached(&Nonce::from(nonce_bytes), &[], &mut buf)
