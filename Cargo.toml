@@ -73,3 +73,6 @@ serial_test = "3"
 # behaviour for better diagnostics.
 [profile.release]
 panic = "abort"
+
+[patch."https://github.com/phlax/envoy-proto-rs"]
+envoy-proto = { path = "vendor/envoy-proto" }
