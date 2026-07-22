@@ -87,6 +87,8 @@ use envoy_proto::envoy::config::rbac::v3::{
     permission, principal, rbac, Permission, Policy, Principal, Rbac,
 };
 use envoy_proto::envoy::config::route::v3::header_matcher::HeaderMatchSpecifier;
+use envoy_proto::envoy::r#type::matcher::v3::string_matcher::MatchPattern as StringMatchPattern;
+use envoy_proto::envoy::r#type::matcher::v3::StringMatcher;
 use envoy_proto::envoy::config::route::v3::route::Action as RouteActionKind;
 use envoy_proto::envoy::config::route::v3::route_match::{ConnectMatcher, PathSpecifier};
 use envoy_proto::envoy::config::route::v3::{
@@ -539,9 +541,10 @@ fn authority_header_match(host: &str, port: u64) -> Permission {
     Permission {
         rule: Some(permission::Rule::Header(HeaderMatcher {
             name: ":authority".to_string(),
-            header_match_specifier: Some(HeaderMatchSpecifier::ExactMatch(format!(
-                "{host}:{port}"
-            ))),
+            header_match_specifier: Some(HeaderMatchSpecifier::StringMatch(StringMatcher {
+                match_pattern: Some(StringMatchPattern::Exact(format!("{host}:{port}"))),
+                ..Default::default()
+            })),
             ..Default::default()
         })),
     }
@@ -813,7 +816,10 @@ mod tests {
             .iter()
             .filter_map(|p| match p.rule.clone()? {
                 permission::Rule::Header(h) => match h.header_match_specifier? {
-                    HeaderMatchSpecifier::ExactMatch(s) => Some(s),
+                    HeaderMatchSpecifier::StringMatch(sm) => match sm.match_pattern? {
+                        StringMatchPattern::Exact(s) => Some(s),
+                        _ => None,
+                    },
                     _ => None,
                 },
                 _ => None,
