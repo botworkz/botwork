@@ -209,7 +209,7 @@ tempfile = "3"
 testcontainers = "0.27.3"
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 tokio = { version = "1", features = ["test-util"] }
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 # Only the ported integration tests reach for sqlx directly (to
 # build a lazy/offline `DatabaseConnection` without going through
 # sea-orm's connect path). Listed here, not in `[dependencies]`,
