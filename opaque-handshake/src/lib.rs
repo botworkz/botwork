@@ -765,8 +765,8 @@ pub mod client {
         rng: &mut R,
         password: &[u8],
     ) -> Result<ClientLoginStart, OpaqueError> {
-        let start =
-            ClientLogin::<OpaqueSuite>::start(&mut OpaqueKeRng(rng), password).map_err(OpaqueError::from_protocol)?;
+        let start = ClientLogin::<OpaqueSuite>::start(&mut OpaqueKeRng(rng), password)
+            .map_err(OpaqueError::from_protocol)?;
         Ok(ClientLoginStart {
             request: LoginRequest(start.message),
             state: ClientLoginState(start.state),
@@ -905,7 +905,7 @@ mod tests {
     use super::*;
 
     fn run_registration(
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut impl CryptoRng,
         setup: &ServerSetup,
         credential_id: &[u8],
         password: &[u8],
@@ -919,7 +919,7 @@ mod tests {
     }
 
     fn run_login(
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut impl CryptoRng,
         setup: &ServerSetup,
         credential_id: &[u8],
         password: &[u8],
