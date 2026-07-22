@@ -1,0 +1,81 @@
+version: 2
+updates:
+# Rust — one entry covers the whole Cargo workspace (all members)
+- package-ecosystem: cargo
+  directory: "/"
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 10
+  groups:
+    cargo-minor-patch:
+      update-types:
+      - minor
+      - patch
+  labels:
+  - dependencies
+  - rust
+
+# Dockerfile base images — one entry per service Dockerfile
+- package-ecosystem: docker
+  directory: "/api"
+  schedule:
+    interval: weekly
+  labels:
+  - dependencies
+  - docker
+- package-ecosystem: docker
+  directory: "/auth-broker"
+  schedule:
+    interval: weekly
+  labels:
+  - dependencies
+  - docker
+- package-ecosystem: docker
+  directory: "/config-broker"
+  schedule:
+    interval: weekly
+  labels:
+  - dependencies
+  - docker
+- package-ecosystem: docker
+  directory: "/control-plane"
+  schedule:
+    interval: weekly
+  labels:
+  - dependencies
+  - docker
+- package-ecosystem: docker
+  directory: "/db/migration"
+  schedule:
+    interval: weekly
+  labels:
+  - dependencies
+  - docker
+- package-ecosystem: docker
+  directory: "/session-broker"
+  schedule:
+    interval: weekly
+  labels:
+  - dependencies
+  - docker
+- package-ecosystem: docker
+  directory: "/ui"
+  schedule:
+    interval: weekly
+  labels:
+  - dependencies
+  - docker
+
+# GitHub Actions used by the workflows in .github/workflows
+- package-ecosystem: github-actions
+  directory: "/"
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 10
+  groups:
+    actions-all:
+      patterns:
+      - "*"
+  labels:
+  - dependencies
+  - github-actions
