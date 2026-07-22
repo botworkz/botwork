@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
-axum = "0.7"
+axum = "0.8"
 # botwork-api-core: per-entry validators shared with bootstrap
 # (RFE #106 PR2 extraction). PR3 consumes them on the write side
 # (validate_one for plugin POST/PUT, ValidationError -> ApiError).

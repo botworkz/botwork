@@ -13,7 +13,7 @@ name = "botwork-ui-server"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.7"
+axum = "0.8"
 botwork-version = { path = "../../version" }
 # `include_dir!` pulls ui/wasm/dist/ into the binary at compile
 # time so the distroless runtime image carries no extra filesystem

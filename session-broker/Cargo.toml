@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
-axum = "0.7"
+axum = "0.8"
 base64 = "0.22"
 # RFE #105 PR2: session-broker becomes a DB writer. botwork-entity + sea-orm
 # mirror the shape config-broker / bootstrap use. tracing surfaces the
@@ -51,7 +51,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-axum = { version = "0.7", features = [] }
+axum = { version = "0.8", features = [] }
 botwork-bootstrap = { path = "../bootstrap" }
 botwork-migration = { path = "../db/migration" }
 http = "1"

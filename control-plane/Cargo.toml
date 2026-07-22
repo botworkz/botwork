@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-stream = "0.3"
-axum = "0.7"
+axum = "0.8"
 botwork-entity = { path = "../db/entity" }
 botwork-version = { path = "../version" }
 envoy-proto = { git = "https://github.com/phlax/envoy-proto-rs", tag = "v0.0.1" }

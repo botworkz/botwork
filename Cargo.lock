@@ -291,8 +291,6 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "hyper",
- "hyper-util",
  "itoa",
  "matchit 0.7.3",
  "memchr",
@@ -301,15 +299,10 @@ dependencies = [
  "pin-project-lite",
  "rustversion",
  "serde",
- "serde_json",
- "serde_path_to_error",
- "serde_urlencoded",
  "sync_wrapper",
- "tokio",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -320,10 +313,13 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core 0.5.6",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "itoa",
  "matchit 0.8.4",
  "memchr",
@@ -331,10 +327,15 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
+ "tokio",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -355,7 +356,6 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -374,6 +374,7 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -535,7 +536,7 @@ name = "botwork-api"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "botwork-api-core",
  "botwork-bootstrap",
  "botwork-entity",
@@ -577,7 +578,7 @@ name = "botwork-auth-broker"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "base64",
  "blake2",
  "botwork-entity",
@@ -664,7 +665,7 @@ dependencies = [
 name = "botwork-config-broker"
 version = "0.0.0"
 dependencies = [
- "axum 0.7.9",
+ "axum 0.8.9",
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
@@ -697,7 +698,7 @@ name = "botwork-control-plane"
 version = "0.0.0"
 dependencies = [
  "async-stream",
- "axum 0.7.9",
+ "axum 0.8.9",
  "botwork-bootstrap",
  "botwork-entity",
  "botwork-migration",
@@ -827,7 +828,7 @@ name = "botwork-session-broker"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "axum 0.7.9",
+ "axum 0.8.9",
  "base64",
  "bollard",
  "botwork-bootstrap",
@@ -870,7 +871,7 @@ version = "0.0.0"
 name = "botwork-ui-server"
 version = "0.0.0"
 dependencies = [
- "axum 0.7.9",
+ "axum 0.8.9",
  "botwork-version",
  "http",
  "include_dir",
@@ -1623,7 +1624,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2235,7 +2236,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3072,7 +3073,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3686,7 +3687,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -3724,9 +3725,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4134,7 +4135,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5196,7 +5197,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6114,7 +6115,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

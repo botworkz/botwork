@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
-axum = "0.7"
+axum = "0.8"
 base64 = "0.22"
 blake2 = "0.10"
 botwork-opaque-handshake = { path = "../opaque-handshake" }
