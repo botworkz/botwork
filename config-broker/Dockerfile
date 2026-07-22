@@ -13,7 +13,7 @@
 
 ARG BINARY_SOURCE=source
 
-FROM rust:1.90-slim-bookworm AS rust-toolchain
+FROM rust:1.97-slim-bookworm AS rust-toolchain
 
 FROM rust-toolchain AS build-source
 WORKDIR /build
