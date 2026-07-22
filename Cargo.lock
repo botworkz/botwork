@@ -815,7 +815,7 @@ version = "0.0.0"
 dependencies = [
  "argon2",
  "opaque-ke",
- "rand 0.8.7",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "subtle",
