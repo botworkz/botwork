@@ -13,7 +13,10 @@ use leptos_router::components::A;
 use leptos_router::hooks::{use_params_map, use_query_map};
 use leptos_shadcn_button::{Button, ButtonVariant};
 use leptos_shadcn_card::{Card, CardContent};
-use leptos_shadcn_select::{Select, SelectContent, SelectItem, SelectTrigger, SelectValue};
+use leptos_shadcn_select::default_components::{
+    select_content::{SelectContent, SelectItem},
+    select_root::{Select, SelectTrigger, SelectValue},
+};
 
 use crate::api;
 use crate::pages::{Async, AsyncView, PageTable};
