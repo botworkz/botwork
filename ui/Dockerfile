@@ -34,7 +34,7 @@
 ARG BINARY_SOURCE=source
 ARG TAILWINDCSS_VERSION=3.4.17
 
-FROM rust:1.90-slim-bookworm AS rust-toolchain
+FROM rust:1.97-slim-bookworm AS rust-toolchain
 
 # Toolchain image with trunk and the wasm32 target on top of plain
 # rust-toolchain. The trunk crate-pin matches ui's CI invocation
