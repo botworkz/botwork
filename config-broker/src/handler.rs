@@ -24,6 +24,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -111,9 +112,9 @@ fn error_response(status: StatusCode, code: &'static str, message: impl Into<Str
 
 pub(crate) async fn resolve(
     State(state): State<AppState>,
-    body: Option<Json<ResolveRequest>>,
+    body: Result<Json<ResolveRequest>, JsonRejection>,
 ) -> Response {
-    let Some(Json(payload)) = body else {
+    let Ok(Json(payload)) = body else {
         warn!("{PREFIX} resolve: invalid_request — missing or unparseable JSON body");
         return error_response(
             StatusCode::BAD_REQUEST,

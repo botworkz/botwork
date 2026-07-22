@@ -265,7 +265,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/plugins/{id}", delete(delete_plugin))
         // Tenant-scoped workspace CRUD.
         .route("/api/tenant/{tenant}/workspaces", post(create_workspace))
-        .route("/api/tenant/{tenant}/workspaces/{id}", put(update_workspace))
+        .route(
+            "/api/tenant/{tenant}/workspaces/{id}",
+            put(update_workspace),
+        )
         .route(
             "/api/tenant/{tenant}/workspaces/{id}",
             delete(delete_workspace),
