@@ -18,6 +18,7 @@ members = [
     "ctl",
     "test-support",
     "vault",
+    "vendor/envoy-proto",
     "version",
 ]
 
