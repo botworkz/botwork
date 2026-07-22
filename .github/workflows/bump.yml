@@ -37,7 +37,7 @@ jobs:
       contents: write   # commit and push VERSION bump to main
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         ref: main
         # Use the default GITHUB_TOKEN; the resulting push triggers CI

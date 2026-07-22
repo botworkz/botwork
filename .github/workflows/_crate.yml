@@ -159,7 +159,7 @@ jobs:
       ARTIFACT: ${{ inputs.artifact }}
       FEATURES: ${{ inputs.features }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Validate artifact inputs
       run: |
@@ -264,13 +264,13 @@ jobs:
 
     - name: Upload release binary artifact
       if: inputs.artifact == 'binary'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.package }}-binary
         path: target/release/${{ inputs.binary }}
         if-no-files-found: error
 
-    - uses: docker/setup-buildx-action@v3
+    - uses: docker/setup-buildx-action@v4
       if: inputs.artifact == 'container'
 
     # ── Build the per-crate ci-tools image ──────────────────────────────────
@@ -433,7 +433,7 @@ jobs:
         fi
 
     - name: Upload per-crate coverage artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ env.CRATE_SLUG }}-coverage
         # Upload only the small lcov.info, not raw profraw or binaries.
@@ -664,7 +664,7 @@ jobs:
 
     - name: Upload runtime image artifact
       if: inputs.artifact == 'container'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.service }}-image
         path: .ci-images/${{ inputs.service }}.tar.gz
@@ -676,7 +676,7 @@ jobs:
     # The publish path uses the image artifact above instead.
     - name: Upload container binary artifact
       if: inputs.artifact == 'container'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.crate == 'db/migration' && 'db-migration' || inputs.crate }}-binary
         path: target/release/${{ inputs.binary }}
