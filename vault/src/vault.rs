@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 use chrono::Utc;
-use rand::RngCore;
+use rand::Rng;
 use tracing::{debug, info, trace, warn};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -74,7 +74,7 @@ fn header_core(suite_version: u8, salt: &[u8; SALT_LEN]) -> Vec<u8> {
 
 fn gen_nonce() -> [u8; NONCE_LEN] {
     let mut n = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut n);
+    rand::rng().fill_bytes(&mut n);
     n
 }
 

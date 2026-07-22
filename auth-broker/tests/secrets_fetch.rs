@@ -41,7 +41,7 @@ use botwork_auth_broker::caps::{mint_cap_id, CapEntry};
 use botwork_auth_broker::{build_router, cache_key, CacheEntry, CAP_TTL};
 use botwork_vault::{SecretKind, UnlockedMasterKey, Vault};
 use http::StatusCode;
-use rand::RngCore;
+use rand::Rng;
 use serde::Deserialize;
 use tempfile::tempdir;
 use tokio::time::{advance, Instant};
@@ -365,7 +365,7 @@ async fn secrets_fetch_with_expired_cache_entry_is_401() {
     let tenant = "tenant-idle-expired";
     let tenant_root = vault_root.join(tenant);
     let mut export_key = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut export_key);
+    rand::rng().fill_bytes(&mut export_key);
     let suite_version = botwork_opaque_handshake::SUITE_VERSION;
     let mut vault = Vault::create(&tenant_root, &export_key, suite_version).expect("create vault");
     let raw_master = vault

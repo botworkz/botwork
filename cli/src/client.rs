@@ -77,7 +77,7 @@ pub async fn run_login(
     ca_path: Option<&Path>,
 ) -> Result<LoginOutcome, LoginError> {
     let http = build_http_client_with_ca(ca_path)?;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // ── login/start ────────────────────────────────────────────────
     let cl = opaque_client::login_start(&mut rng, password)?;
@@ -131,7 +131,7 @@ pub async fn run_register(
     ca_path: Option<&Path>,
 ) -> Result<RegisterOutcome, LoginError> {
     let http = build_http_client_with_ca(ca_path)?;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // ── register/start ─────────────────────────────────────────────
     let cr = opaque_client::registration_start(&mut rng, password)?;
@@ -507,7 +507,7 @@ mod tests {
     }
 
     fn fixture_registration() -> (RegistrationRequest, RegistrationUpload) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let input = fixture_input();
         let start = client::registration_start(&mut rng, input.as_slice()).unwrap();
@@ -521,7 +521,7 @@ mod tests {
     }
 
     fn fixture_login() -> (LoginRequest, LoginFinalization) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let input = fixture_input();
         let registration = client::registration_start(&mut rng, input.as_slice()).unwrap();

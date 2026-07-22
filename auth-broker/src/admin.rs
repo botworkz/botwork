@@ -187,7 +187,7 @@ mod tests {
             Arc::new(MockLeaseStore::new()),
             Arc::new(MockTenantStore::new()),
             Arc::new(MockPasswordFileStore::new()),
-            ServerSetup::generate(&mut rand::thread_rng()),
+            ServerSetup::generate(&mut rand::rng()),
         );
         let state = AppState::with_auth(std::env::temp_dir(), auth);
         match admin_key {
