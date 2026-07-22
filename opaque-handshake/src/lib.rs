@@ -119,7 +119,8 @@ impl<R: Rng> OpaqueRngCore for OpaqueKeRng<R> {
     }
 
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
-        self.0.fill_bytes(dst);
+        rand::TryRng::try_fill_bytes(&mut self.0, dst)
+            .expect("rand::Rng implementations are infallible");
         Ok(())
     }
 }
