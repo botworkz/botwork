@@ -710,7 +710,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "prost 0.13.5",
- "prost-types 0.13.5",
+ "prost-types 0.14.4",
  "regex",
  "reqwest",
  "sea-orm",
