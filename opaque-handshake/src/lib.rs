@@ -30,26 +30,7 @@
 //! ```
 //! # use botwork_opaque_handshake::{client, server, PasswordFile, ServerSetup};
 //! # fn try_main() -> Result<(), botwork_opaque_handshake::OpaqueError> {
-//! # struct Rand10Compat<R>(R);
-//! # impl<R: rand::Rng> opaque_ke::rand::RngCore for Rand10Compat<R> {
-//! #     fn next_u32(&mut self) -> u32 {
-//! #         self.0.next_u32()
-//! #     }
-//! #     fn next_u64(&mut self) -> u64 {
-//! #         self.0.next_u64()
-//! #     }
-//! #     fn fill_bytes(&mut self, dst: &mut [u8]) {
-//! #         self.0.fill_bytes(dst);
-//! #     }
-//! #     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
-//! #         self.0
-//! #             .try_fill_bytes(dst)
-//! #             .expect("rand::Rng errors are infallible");
-//! #         Ok(())
-//! #     }
-//! # }
-//! # impl<R: rand::CryptoRng> opaque_ke::rand::CryptoRng for Rand10Compat<R> {}
-//! let mut rng = Rand10Compat(rand::rng());
+//! let mut rng = rand::rng();
 //! let setup = ServerSetup::generate(&mut rng);
 //! let credential_id = b"alice@example.com";
 //!
@@ -86,7 +67,8 @@ use std::fmt;
 
 use opaque_ke::ciphersuite::CipherSuite;
 use opaque_ke::ksf::Ksf;
-use opaque_ke::rand::{CryptoRng, RngCore};
+use opaque_ke::rand::{CryptoRng as OpaqueCryptoRng, RngCore as OpaqueRngCore};
+use rand::{CryptoRng, Rng};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -120,6 +102,29 @@ pub const KEY_LEN: usize = 64;
 /// scope for the `CipherSuite::Ksf` associated type. The `'static`
 /// lifetime falls out of `argon2::Argon2`'s default `Params`.
 type KsfArgon2 = argon2::Argon2<'static>;
+
+struct OpaqueKeRng<R>(R);
+
+impl<R: Rng> OpaqueRngCore for OpaqueKeRng<R> {
+    fn next_u32(&mut self) -> u32 {
+        self.0.next_u32()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0.next_u64()
+    }
+
+    fn fill_bytes(&mut self, dst: &mut [u8]) {
+        self.0.fill_bytes(dst);
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
+        self.0.fill_bytes(dst);
+        Ok(())
+    }
+}
+
+impl<R: CryptoRng> OpaqueCryptoRng for OpaqueKeRng<R> {}
 
 /// The OPAQUE ciphersuite this crate uses verbatim.
 ///
@@ -369,8 +374,9 @@ pub struct ServerSetup {
 
 impl ServerSetup {
     /// Generate a fresh setup from the supplied CSPRNG.
-    pub fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
-        let setup = opaque_ke::ServerSetup::<OpaqueSuite>::new(rng);
+    pub fn generate<R: CryptoRng>(rng: &mut R) -> Self {
+        let mut rng = OpaqueKeRng(rng);
+        let setup = opaque_ke::ServerSetup::<OpaqueSuite>::new(&mut rng);
         Self {
             bytes: setup.serialize().to_vec(),
         }
@@ -703,11 +709,12 @@ pub mod client {
     /// Begin client-side registration. Returns the [`RegistrationRequest`]
     /// to send to the server plus a [`ClientRegistrationState`] to feed
     /// into [`registration_finish`].
-    pub fn registration_start<R: RngCore + CryptoRng>(
+    pub fn registration_start<R: CryptoRng>(
         rng: &mut R,
         password: &[u8],
     ) -> Result<ClientRegistrationStart, OpaqueError> {
-        let start = ClientRegistration::<OpaqueSuite>::start(rng, password)
+        let mut rng = OpaqueKeRng(rng);
+        let start = ClientRegistration::<OpaqueSuite>::start(&mut rng, password)
             .map_err(OpaqueError::from_protocol)?;
         Ok(ClientRegistrationStart {
             request: RegistrationRequest(start.message),
@@ -718,7 +725,7 @@ pub mod client {
     /// Finish client-side registration given the server's
     /// [`RegistrationResponse`]. The returned [`ExportKey`] is the same
     /// one a subsequent successful login will yield.
-    pub fn registration_finish<R: RngCore + CryptoRng>(
+    pub fn registration_finish<R: CryptoRng>(
         rng: &mut R,
         state: ClientRegistrationState,
         password: &[u8],
@@ -729,9 +736,10 @@ pub mod client {
             ksf: Some(&ksf),
             ..Default::default()
         };
+        let mut rng = OpaqueKeRng(rng);
         let finish = state
             .0
-            .finish(rng, password, response.0, params)
+            .finish(&mut rng, password, response.0, params)
             .map_err(OpaqueError::from_protocol)?;
         Ok(ClientRegistrationFinish {
             upload: RegistrationUpload(finish.message),
@@ -746,12 +754,13 @@ pub mod client {
     /// Begin client-side login. Mirrors [`registration_start`]: returns
     /// a [`LoginRequest`] to wire over and a [`ClientLoginState`] to
     /// pass to [`login_finish`].
-    pub fn login_start<R: RngCore + CryptoRng>(
+    pub fn login_start<R: CryptoRng>(
         rng: &mut R,
         password: &[u8],
     ) -> Result<ClientLoginStart, OpaqueError> {
-        let start =
-            ClientLogin::<OpaqueSuite>::start(rng, password).map_err(OpaqueError::from_protocol)?;
+        let mut rng = OpaqueKeRng(rng);
+        let start = ClientLogin::<OpaqueSuite>::start(&mut rng, password)
+            .map_err(OpaqueError::from_protocol)?;
         Ok(ClientLoginStart {
             request: LoginRequest(start.message),
             state: ClientLoginState(start.state),
@@ -833,7 +842,7 @@ pub mod server {
     /// response so the wire-observable timing of "user doesn't exist"
     /// matches "user exists but wrong password", which is the whole
     /// point of OPAQUE's `dummy` flow.
-    pub fn login_start<R: RngCore + CryptoRng>(
+    pub fn login_start<R: CryptoRng>(
         rng: &mut R,
         setup: &ServerSetup,
         password_file: Option<&PasswordFile>,
@@ -845,8 +854,9 @@ pub mod server {
             Some(pf) => Some(pf.to_registration()?),
             None => None,
         };
+        let mut rng = OpaqueKeRng(rng);
         let started = ServerLogin::<OpaqueSuite>::start(
-            rng,
+            &mut rng,
             &inner,
             record,
             request.0,
@@ -889,33 +899,8 @@ pub mod server {
 mod tests {
     use super::*;
 
-    struct Rand10Compat<R>(R);
-
-    impl<R: rand::Rng> RngCore for Rand10Compat<R> {
-        fn next_u32(&mut self) -> u32 {
-            self.0.next_u32()
-        }
-
-        fn next_u64(&mut self) -> u64 {
-            self.0.next_u64()
-        }
-
-        fn fill_bytes(&mut self, dst: &mut [u8]) {
-            self.0.fill_bytes(dst);
-        }
-
-        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), opaque_ke::rand::Error> {
-            self.0
-                .try_fill_bytes(dst)
-                .expect("rand::Rng errors are infallible");
-            Ok(())
-        }
-    }
-
-    impl<R: rand::CryptoRng> CryptoRng for Rand10Compat<R> {}
-
     fn run_registration(
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut impl rand::CryptoRng,
         setup: &ServerSetup,
         credential_id: &[u8],
         password: &[u8],
@@ -929,7 +914,7 @@ mod tests {
     }
 
     fn run_login(
-        rng: &mut (impl RngCore + CryptoRng),
+        rng: &mut impl rand::CryptoRng,
         setup: &ServerSetup,
         credential_id: &[u8],
         password: &[u8],
@@ -944,7 +929,7 @@ mod tests {
 
     #[test]
     fn registration_and_login_yield_matching_session_keys() {
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"alice@example.com";
         let pw = b"correct horse battery staple";
@@ -967,7 +952,7 @@ mod tests {
 
     #[test]
     fn wrong_password_fails_login_cleanly() {
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"bob@example.com";
         let pw = b"hunter2";
@@ -985,7 +970,7 @@ mod tests {
 
     #[test]
     fn export_key_differs_per_password() {
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"carol@example.com";
 
@@ -1001,7 +986,7 @@ mod tests {
 
     #[test]
     fn password_file_round_trips_through_bytes() {
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"dave@example.com";
         let pw = b"a-strong-and-elaborate-password";
@@ -1018,7 +1003,7 @@ mod tests {
 
     #[test]
     fn server_setup_round_trips_through_bytes() {
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let bytes = setup.as_bytes().to_vec();
         let setup2 = ServerSetup::from_bytes(&bytes).unwrap();
@@ -1034,7 +1019,7 @@ mod tests {
 
     #[test]
     fn message_round_trips_through_bytes() {
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"frank@example.com";
         let pw = b"another-password";
@@ -1088,7 +1073,7 @@ mod tests {
         // even when the credential is unknown — the test is that
         // `client::login_finish` then refuses to authenticate without
         // panicking.
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"ghost@example.com";
 
@@ -1111,7 +1096,7 @@ mod tests {
 
     #[test]
     fn debug_impls_do_not_leak_key_material() {
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"hank@example.com";
         let pw = b"a-very-private-password";
@@ -1196,7 +1181,7 @@ mod tests {
     /// work without affinity routing.
     #[test]
     fn server_login_state_round_trips_through_bytes() {
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"ivan@example.com";
         let pw = b"a-password-for-state-round-trip";
@@ -1234,7 +1219,7 @@ mod tests {
         // compiling, the signature changed in a way that breaks the
         // \"key material is wiped on drop\" guarantee in the issue body.
         fn assert_zeroizing<T: zeroize::Zeroize>(_: zeroize::Zeroizing<T>) {}
-        let mut rng = Rand10Compat(rand::rng());
+        let mut rng = rand::rng();
         let setup = ServerSetup::generate(&mut rng);
         let cred = b"jess@example.com";
         let pw = b"another-password-for-the-zeroize-check";

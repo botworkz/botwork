@@ -31,8 +31,8 @@ use std::ops::Add;
 
 use botwork_entity::lease;
 use chrono::{DateTime, Duration, Utc};
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use sea_orm::{
     sea_query::{Expr, OnConflict},
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbErr,
@@ -51,7 +51,7 @@ pub const LEASE_HARD_CAP_SECONDS: u64 = 30 * 86_400;
 /// Idle-window the sliding-extension uses on each successful
 /// `/auth/check`. Equals 1 hour.
 pub const LEASE_IDLE_WINDOW_SECONDS: u64 = 3_600;
-/// Random byte length for the bearer token. `OsRng`-sourced; encoded
+/// Random byte length for the bearer token. `SysRng`-sourced; encoded
 /// as url-safe base64-no-pad for transport.
 pub const BEARER_BYTES: usize = 32;
 /// SHA-256 digest length, in bytes. Matches the `bearer_hash` column
@@ -76,7 +76,9 @@ impl Bearer {
 
     pub fn generate() -> Self {
         let mut bytes = [0u8; BEARER_BYTES];
-        OsRng.fill_bytes(&mut bytes);
+        let mut rng = SysRng;
+        rng.try_fill_bytes(&mut bytes)
+            .expect("SysRng should be available");
         Self::from_bytes(bytes)
     }
 

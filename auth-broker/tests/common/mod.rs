@@ -56,7 +56,7 @@ use botwork_auth_broker::caps::CAP_BYTES;
 use botwork_auth_broker::store::mock::{MockLeaseStore, MockPasswordFileStore, MockTenantStore};
 use botwork_auth_broker::{cache_key, AppState, CacheEntry, CAP_TTL};
 use botwork_vault::{SecretEntry, SecretKey, SecretKind, UnlockedMasterKey, Vault};
-use rand::RngCore;
+use rand::Rng;
 use tokio::time::Instant;
 
 /// Build an [`AuthState`] backed by in-memory mock stores.
@@ -70,7 +70,7 @@ use tokio::time::Instant;
 /// Any test that needs the lease-lookup path to succeed should either
 /// prime the mock stores or use the docker-gated `opaque_e2e` fixture.
 pub async fn offline_auth_state() -> AuthState {
-    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
+    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
     AuthState::from_stores(
         Arc::new(MockLeaseStore::new()),
         Arc::new(MockTenantStore::new()),
@@ -134,7 +134,7 @@ pub async fn seed_synthetic_lease(
     // 1. Stand up a v4 vault.
     let tenant_root = vault_root.join(tenant);
     let mut export_key = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut export_key);
+    rand::rng().fill_bytes(&mut export_key);
     let suite_version = botwork_opaque_handshake::SUITE_VERSION;
     let mut vault =
         Vault::create(&tenant_root, &export_key, suite_version).expect("create v4 vault");

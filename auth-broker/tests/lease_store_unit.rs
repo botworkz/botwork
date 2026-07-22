@@ -208,8 +208,8 @@ async fn tenant_store_db_error() {
 
 fn make_password_file() -> PasswordFile {
     // Generate a real OPAQUE PasswordFile via a full registration round-trip.
-    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng());
-    let mut rng = rand::thread_rng();
+    let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng());
+    let mut rng = rand::rng();
     let cr = botwork_opaque_handshake::client::registration_start(&mut rng, b"password")
         .expect("client registration_start");
     let sr = botwork_opaque_handshake::server::registration_start(&setup, cr.request, b"id")

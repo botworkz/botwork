@@ -128,7 +128,7 @@ async fn spawn() -> Result<Server, String> {
     // The tempdir's drop has to outlive the spawned server.
     std::mem::forget(vault_root_tempdir);
 
-    let setup = ServerSetup::generate(&mut rand::thread_rng());
+    let setup = ServerSetup::generate(&mut rand::rng());
     let auth = AuthState::new_arc(Arc::clone(&db), setup);
     let state = AppState::with_auth(vault_root.clone(), auth);
     let app = build_router(state.clone());
@@ -175,7 +175,7 @@ async fn single_lease_id(db: &DatabaseConnection, tenant_id: Uuid) -> Uuid {
 }
 
 async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
     let cr = client::registration_start(&mut rng, password).unwrap();
@@ -212,7 +212,7 @@ async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
 }
 
 async fn login(base: &str, tenant: &str, cred: &str, password: &[u8]) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
     let cl = client::login_start(&mut rng, password).unwrap();
@@ -404,7 +404,7 @@ async fn wrong_password_fails_login_with_401() {
     seed_tenant(&srv.db, "phlax").await;
     register(&srv.base, "phlax", "phlax", b"hunter2").await;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let cl = client::login_start(&mut rng, b"definitely-the-wrong-password").unwrap();
     let resp = reqwest::Client::new()
         .post(format!("{}/auth/login/start", srv.base))

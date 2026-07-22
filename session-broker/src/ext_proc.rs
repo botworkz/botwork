@@ -15,7 +15,7 @@ use envoy_proto::envoy::service::ext_proc::v3::{
     HeaderMutation, HeadersResponse, HttpBody, HttpHeaders, ImmediateResponse, ProcessingRequest,
     ProcessingResponse,
 };
-use rand::RngCore;
+use rand::Rng;
 use regex::Regex;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -92,7 +92,7 @@ pub struct PerStreamState {
 impl Default for PerStreamState {
     fn default() -> Self {
         let mut bytes = [0u8; 8];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         Self {
             stream_id: bytes.iter().map(|b| format!("{b:02x}")).collect(),
             method: "POST".to_string(),
@@ -977,7 +977,7 @@ async fn spawn_new_container(
     secrets: &[(String, String)],
 ) -> Result<PendingInit, LauncherError> {
     let mut token_bytes = [0u8; 6];
-    rand::thread_rng().fill_bytes(&mut token_bytes);
+    rand::rng().fill_bytes(&mut token_bytes);
     let token: String = token_bytes.iter().map(|b| format!("{b:02x}")).collect();
     let container_name = format!("mcp_session_{token}");
     let staging_path = staging_path(tenant_name, &token);

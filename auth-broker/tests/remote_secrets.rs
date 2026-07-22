@@ -117,7 +117,7 @@ async fn spawn() -> Result<Server, String> {
     let vault_root = vault_root_tempdir.path().to_path_buf();
     std::mem::forget(vault_root_tempdir);
 
-    let setup = ServerSetup::generate(&mut rand::thread_rng());
+    let setup = ServerSetup::generate(&mut rand::rng());
     let auth = AuthState::new_arc(Arc::clone(&db), setup);
     let state = AppState::with_auth(vault_root.clone(), auth);
     let app = build_router(state.clone());
@@ -164,7 +164,7 @@ async fn seed_tenant(db: &DatabaseConnection, name: &str) -> Uuid {
 }
 
 async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
     let cr = client::registration_start(&mut rng, password).unwrap();
@@ -201,7 +201,7 @@ async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
 }
 
 async fn login(base: &str, tenant: &str, cred: &str, password: &[u8]) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
     let cl = client::login_start(&mut rng, password).unwrap();
@@ -239,7 +239,7 @@ async fn login(base: &str, tenant: &str, cred: &str, password: &[u8]) -> String 
 }
 
 async fn api_login(base: &str, tenant: &str, cred: &str, password: &[u8]) -> ApiAuthSession {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
     let cl = client::login_start(&mut rng, password).unwrap();

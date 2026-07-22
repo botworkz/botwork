@@ -37,6 +37,7 @@ use botwork_auth_broker::wrap_session_key;
 use botwork_entity::{lease, opaque_password_file, tenant};
 use botwork_opaque_handshake::PasswordFile;
 use chrono::{Duration, Utc};
+use rand::Rng;
 use sea_orm::{DatabaseBackend, DbErr, MockDatabase, MockExecResult};
 use uuid::Uuid;
 
@@ -51,13 +52,13 @@ use uuid::Uuid;
 /// `upsert_password_file`, ensuring `PasswordFile::from_bytes` succeeds on the
 /// re-read path.
 fn make_password_file() -> PasswordFile {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rng);
     // Use a freshly-generated random password for the fixture so static
     // analysis tools don't flag a hard-coded credential (this value is never
     // stored or transmitted anywhere outside the unit test).
     let mut pw = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rng, &mut pw);
+    rng.fill_bytes(&mut pw);
     let cr = botwork_opaque_handshake::client::registration_start(&mut rng, &pw)
         .expect("client registration_start");
     let sr = botwork_opaque_handshake::server::registration_start(&setup, cr.request, b"tenant-id")

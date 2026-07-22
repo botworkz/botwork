@@ -134,7 +134,7 @@ async fn build_auth_state(vault_root: &Path) -> AuthState {
     // in-memory setup is throwaway because no lease lookup can
     // succeed against the black-hole DB anyway.
     let setup = if offline {
-        botwork_opaque_handshake::ServerSetup::generate(&mut rand::thread_rng())
+        botwork_opaque_handshake::ServerSetup::generate(&mut rand::rng())
     } else {
         match opaque::load_or_generate_server_setup(vault_root).await {
             Ok(setup) => setup,

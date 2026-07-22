@@ -49,7 +49,7 @@ state to the client and vice versa):
 ```rust
 use botwork_opaque_handshake::{client, server, ServerSetup};
 
-let mut rng = rand::thread_rng();
+let mut rng = rand::rng();
 let setup = ServerSetup::generate(&mut rng);
 let credential_id = b"alice@example.com";
 
