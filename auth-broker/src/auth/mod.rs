@@ -23,6 +23,7 @@
 //! get the lease path on top.
 
 pub mod endpoints;
+pub mod invitation;
 pub mod lease;
 pub mod lease_kek;
 pub mod opaque;
@@ -30,6 +31,9 @@ pub mod pending;
 pub mod rate_limit;
 
 pub use endpoints::{build_auth_router, AuthState, LEASE_EXPORT_KEY_TTL};
+pub use invitation::{
+    generate_otp, hash_otp, normalize_otp, OtpVerifyError, INVITATION_DEFAULT_TTL_SECONDS,
+};
 pub use lease::{
     cap_lease_seconds, Bearer, BearerHash, LeaseId, LeaseRow, WrappedExportKey,
     LEASE_DEFAULT_SECONDS, LEASE_HARD_CAP_SECONDS, LEASE_IDLE_WINDOW_SECONDS,

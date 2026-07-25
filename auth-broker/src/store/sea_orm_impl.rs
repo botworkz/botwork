@@ -8,6 +8,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
+use crate::auth::invitation::{
+    has_active_invitation as db_has_active_invitation, insert_invitation as db_insert_invitation,
+    verify_and_consume as db_verify_and_consume, OtpVerifyError,
+};
 use crate::auth::lease::{
     insert_lease as db_insert_lease, revoke as db_revoke, revoke_by_id as db_revoke_by_id,
     validate_and_extend as db_validate, Bearer, BearerHash, LeaseRow, ValidatedLease,
@@ -18,7 +22,7 @@ use crate::auth::opaque::{
     lookup_tenant_name_by_id as db_lookup_by_id, upsert_password_file as db_upsert_password_file,
     UpsertError,
 };
-use crate::store::{LeaseStore, PasswordFileStore, TenantStore};
+use crate::store::{InvitationStore, LeaseStore, PasswordFileStore, TenantStore};
 
 /// SeaORM-backed lease store.
 ///
@@ -161,5 +165,54 @@ impl PasswordFileStore for SeaOrmPasswordFileStore {
         suite_version: i32,
     ) -> Result<(), UpsertError> {
         db_upsert_password_file(&*self.db, tenant_id, password_file, suite_version).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InvitationStore
+// ---------------------------------------------------------------------------
+
+/// SeaORM-backed invitation store.
+pub struct SeaOrmInvitationStore {
+    db: Arc<DatabaseConnection>,
+}
+
+impl SeaOrmInvitationStore {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { db: Arc::new(db) }
+    }
+
+    pub(crate) fn new_shared(db: Arc<DatabaseConnection>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl InvitationStore for SeaOrmInvitationStore {
+    async fn insert_invitation(
+        &self,
+        tenant_id: Uuid,
+        otp_hash: &str,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, DbErr> {
+        db_insert_invitation(&*self.db, tenant_id, otp_hash, expires_at, now).await
+    }
+
+    async fn has_active_invitation(
+        &self,
+        tenant_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<bool, DbErr> {
+        db_has_active_invitation(&*self.db, tenant_id, now).await
+    }
+
+    async fn verify_and_consume(
+        &self,
+        tenant_id: Uuid,
+        otp: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), OtpVerifyError> {
+        db_verify_and_consume(&*self.db, tenant_id, otp, now).await
     }
 }

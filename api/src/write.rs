@@ -64,6 +64,7 @@ use sea_orm::{
     EntityTrait, JoinType, QueryFilter, TransactionTrait,
 };
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tracing::info;
 use uuid::Uuid;
@@ -73,6 +74,7 @@ use crate::handler::{
     bad_request, check_tenant_consistency, operator, parse_body, require_admin, resolve_tenant_id,
     ApiError, ApiErrorExt, AppState, PREFIX,
 };
+use crate::invitation_client::InvitationClientError;
 use crate::secret_store::{PutSecretRequest, SecretStoreError};
 use crate::session_broker::signal_evict;
 
@@ -324,9 +326,58 @@ async fn create_tenant(
     let row = state.store.create_tenant(name.clone()).await?;
     let created_id = row.id;
 
+    // Mint an invitation OTP for the new tenant. Auth-broker owns the
+    // `invitations` table; this is a cold-path call (admin-only, rare).
+    // When the invitation client is disabled (test / break-glass) a fixed
+    // placeholder is returned; handlers downstream still construct the
+    // `TenantCreatedResponse` with it so the wire shape is uniform.
+    let otp = match state.invitation_client.mint_invitation(created_id).await {
+        Ok(otp) => otp,
+        Err(InvitationClientError::Disabled) => {
+            // Break-glass / test path — return disabled placeholder.
+            crate::invitation_client::DISABLED_OTP.to_string()
+        }
+        Err(InvitationClientError::Unavailable(msg)) => {
+            // Auth-broker unreachable. Fail the tenant creation so the
+            // admin doesn't end up with a claimable tenant and no OTP.
+            tracing::warn!("{PREFIX} create_tenant: invitation mint failed: {msg}");
+            return Err(ApiError::Internal {
+                detail: format!("invitation service unavailable: {msg}"),
+            });
+        }
+    };
+
     audit_event(&op, "create", "tenant", row.id, &format!("name={name:?}"));
 
-    let mut response = (StatusCode::CREATED, Json(row)).into_response();
+    /// Flat create response — all tenant fields plus the one-time OTP.
+    ///
+    /// The OTP is returned exactly once (here) and never persisted in
+    /// plaintext. The admin must relay it to the tenant out-of-band.
+    #[derive(Serialize)]
+    struct TenantCreatedResponse {
+        id: uuid::Uuid,
+        name: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+        /// Plaintext OTP — returned once, never stored. Admin relays
+        /// this to the tenant out-of-band.
+        otp: String,
+    }
+
+    let created_at = row.created_at;
+    let updated_at = row.updated_at;
+
+    let mut response = (
+        StatusCode::CREATED,
+        Json(TenantCreatedResponse {
+            id: created_id,
+            name,
+            created_at,
+            updated_at,
+            otp,
+        }),
+    )
+        .into_response();
     response.headers_mut().insert(
         LOCATION,
         HeaderValue::from_str(&format!("/api/tenants/{created_id}")).expect("uuid is ascii"),
@@ -1428,7 +1479,9 @@ mod tests {
     use super::*;
     use crate::store::mock::MockApiStore;
     use crate::store::sea_orm_impl::SeaOrmApiStore;
-    use crate::{AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient};
+    use crate::{
+        AppState, ControlPlaneClient, InvitationClient, SecretStoreClient, SessionBrokerClient,
+    };
 
     fn fixed_time() -> chrono::DateTime<Utc> {
         chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
@@ -1563,6 +1616,7 @@ mod tests {
             control_plane,
             secret_store,
             session_broker,
+            invitation_client: InvitationClient::disabled(),
         }
     }
 
@@ -1579,6 +1633,7 @@ mod tests {
             control_plane,
             secret_store,
             session_broker,
+            invitation_client: InvitationClient::disabled(),
         }
     }
 
@@ -3405,6 +3460,7 @@ mod tests {
             control_plane: ControlPlaneClient::with_endpoint("http://127.0.0.1:1"),
             secret_store: SecretStoreClient::disabled(),
             session_broker: SessionBrokerClient::disabled(),
+            invitation_client: InvitationClient::disabled(),
         };
         let app = crate::handler::build_router(state);
 

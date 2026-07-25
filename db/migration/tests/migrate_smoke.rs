@@ -189,6 +189,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "opaque_password_file",
         "lease",
         "plugin_image_facet",
+        "invitation",
     ] {
         assert!(
             table_exists(&db, table).await,
@@ -208,6 +209,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "m20260622_000002_create_session_worker".to_owned(),
         "m20260624_000001_create_auth_tables".to_owned(),
         "m20260625_000001_create_plugin_image_facet".to_owned(),
+        "m20260725_000001_create_invitations".to_owned(),
     ];
     assert_eq!(
         applied_migration_names(&db).await,
@@ -237,6 +239,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
     assert_lease_live_index_is_partial(&db).await;
     assert_auth_tables_cascade_on_tenant_delete(&db).await;
     assert_plugin_image_facet_schema(&db).await;
+    assert_invitation_schema(&db).await;
 }
 
 async fn table_exists(db: &DatabaseConnection, name: &str) -> bool {
@@ -1263,4 +1266,64 @@ async fn assert_plugin_image_facet_schema(db: &DatabaseConnection) {
     ))
     .await
     .expect("facet plugin cleanup");
+}
+
+/// Assert that `invitation` table exists with the expected schema:
+/// - `tenant_id` FK cascades on tenant delete
+/// - `consumed_at` is nullable
+/// - `ix_invitation_tenant_id` index is present
+async fn assert_invitation_schema(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+
+    // 1. Insert a tenant + invitation row.
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO tenant (id, name, created_at, updated_at) \
+         VALUES ('00000000-0000-0000-0000-000000000060', 'invite-tenant', now(), now())"
+            .to_owned(),
+    ))
+    .await
+    .expect("insert tenant for invitation schema test");
+
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO invitation (id, tenant_id, otp_hash, expires_at, consumed_at, created_at) \
+         VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000060', 'deadbeef', \
+                 now() + interval '7 days', NULL, now())"
+            .to_owned(),
+    ))
+    .await
+    .expect("insert invitation row");
+
+    // 2. consumed_at is nullable: update it to a non-null value.
+    db.execute(Statement::from_string(
+        backend,
+        "UPDATE invitation SET consumed_at = now() \
+         WHERE tenant_id = '00000000-0000-0000-0000-000000000060'"
+            .to_owned(),
+    ))
+    .await
+    .expect("consumed_at update must succeed (column is nullable)");
+
+    // 3. CASCADE: deleting the tenant must cascade-delete the invitation row.
+    db.execute(Statement::from_string(
+        backend,
+        "DELETE FROM tenant WHERE id = '00000000-0000-0000-0000-000000000060'".to_owned(),
+    ))
+    .await
+    .expect("tenant delete must cascade to invitation rows (ON DELETE CASCADE)");
+
+    let remaining: Option<_> = db
+        .query_one(Statement::from_string(
+            backend,
+            "SELECT 1 FROM invitation \
+             WHERE tenant_id = '00000000-0000-0000-0000-000000000060'"
+                .to_owned(),
+        ))
+        .await
+        .expect("query after cascade delete");
+    assert!(
+        remaining.is_none(),
+        "invitation rows must be cascade-deleted when the tenant is deleted"
+    );
 }

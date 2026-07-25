@@ -38,6 +38,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use crate::auth::invitation::OtpVerifyError;
 use crate::auth::lease::{
     Bearer, BearerHash, LeaseRow, ValidatedLease, ValidationError, WrappedExportKey,
 };
@@ -123,4 +124,46 @@ pub trait PasswordFileStore: Send + Sync {
         password_file: &PasswordFile,
         suite_version: i32,
     ) -> Result<(), UpsertError>;
+}
+
+/// Invitation CRUD: mint OTP-gated claim credentials and verify+consume them
+/// at registration time.
+///
+/// Owned by auth-broker so the register hot path (verify + consume) stays
+/// single-service with no cross-service write on the hot path.
+///
+/// The default implementation used by [`crate::auth::AuthState::from_stores`]
+/// is a no-op: `has_active_invitation` returns `Ok(false)` (no gate), and
+/// `verify_and_consume` returns `Err(InvalidOtp)`. The production path uses
+/// [`crate::store::sea_orm_impl::SeaOrmInvitationStore`] via
+/// [`crate::auth::AuthState::new`].
+#[async_trait]
+pub trait InvitationStore: Send + Sync {
+    /// INSERT a new invitation row. The caller generates the plaintext OTP
+    /// and passes only its hash. Returns the UUID of the inserted row.
+    async fn insert_invitation(
+        &self,
+        tenant_id: Uuid,
+        otp_hash: &str,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, DbErr>;
+
+    /// Return `true` if the tenant has at least one unconsumed, unexpired
+    /// invitation. Used at `register/finish` to decide whether an OTP is
+    /// required (gate only applies when an invitation exists).
+    async fn has_active_invitation(
+        &self,
+        tenant_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<bool, DbErr>;
+
+    /// Verify an OTP for the tenant and, on success, atomically mark the
+    /// matching invitation as consumed (single-use).
+    async fn verify_and_consume(
+        &self,
+        tenant_id: Uuid,
+        otp: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), OtpVerifyError>;
 }

@@ -30,11 +30,12 @@ use sea_orm::DbErr;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::auth::invitation::OtpVerifyError;
 use crate::auth::lease::{
     Bearer, BearerHash, LeaseRow, ValidatedLease, ValidationError, WrappedExportKey,
 };
 use crate::auth::opaque::UpsertError;
-use crate::store::{LeaseStore, PasswordFileStore, TenantStore};
+use crate::store::{InvitationStore, LeaseStore, PasswordFileStore, TenantStore};
 
 // ---------------------------------------------------------------------------
 // LeaseStore mock
@@ -388,5 +389,137 @@ impl PasswordFileStore for MockPasswordFileStore {
             Some(existing) if existing == &new_bytes => Ok(()),
             Some(_) => Err(UpsertError::Conflict),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InvitationStore mock
+// ---------------------------------------------------------------------------
+
+/// Stored entry in the mock invitation store.
+#[derive(Clone, Debug)]
+pub struct MockInvitation {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub otp_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+}
+
+/// In-memory invitation store for unit tests.
+///
+/// Pre-seed with [`MockInvitationStore::insert`]. Each `verify_and_consume`
+/// call mutates the in-memory state (sets `consumed_at`) on success.
+pub struct MockInvitationStore {
+    invitations: Arc<Mutex<Vec<MockInvitation>>>,
+    insert_error: Option<String>,
+}
+
+impl MockInvitationStore {
+    /// Empty store — no invitations; `has_active_invitation` returns `false`.
+    pub fn new() -> Self {
+        Self {
+            invitations: Arc::new(Mutex::new(Vec::new())),
+            insert_error: None,
+        }
+    }
+
+    /// Pre-seed one invitation.
+    pub fn insert(
+        &self,
+        tenant_id: Uuid,
+        otp_hash: impl Into<String>,
+        expires_at: DateTime<Utc>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        self.invitations.lock().unwrap().push(MockInvitation {
+            id,
+            tenant_id,
+            otp_hash: otp_hash.into(),
+            expires_at,
+            consumed_at: None,
+        });
+        id
+    }
+
+    /// Return a store whose `insert_invitation` always returns a DB error.
+    pub fn always_insert_error(msg: impl Into<String>) -> Self {
+        Self {
+            invitations: Arc::new(Mutex::new(Vec::new())),
+            insert_error: Some(msg.into()),
+        }
+    }
+
+    /// Snapshot current invitations for assertion.
+    pub fn snapshot(&self) -> Vec<MockInvitation> {
+        self.invitations.lock().unwrap().clone()
+    }
+}
+
+impl Default for MockInvitationStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl InvitationStore for MockInvitationStore {
+    async fn insert_invitation(
+        &self,
+        tenant_id: Uuid,
+        otp_hash: &str,
+        expires_at: DateTime<Utc>,
+        _now: DateTime<Utc>,
+    ) -> Result<Uuid, DbErr> {
+        if let Some(msg) = &self.insert_error {
+            return Err(DbErr::Custom(msg.clone()));
+        }
+        Ok(self.insert(tenant_id, otp_hash, expires_at))
+    }
+
+    async fn has_active_invitation(
+        &self,
+        tenant_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<bool, DbErr> {
+        let guard = self.invitations.lock().unwrap();
+        let found = guard.iter().any(|inv| {
+            inv.tenant_id == tenant_id && inv.consumed_at.is_none() && inv.expires_at > now
+        });
+        Ok(found)
+    }
+
+    async fn verify_and_consume(
+        &self,
+        tenant_id: Uuid,
+        otp: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), OtpVerifyError> {
+        use crate::auth::invitation::hash_otp;
+        let otp_hash = hash_otp(otp);
+        let mut guard = self.invitations.lock().unwrap();
+
+        // Find the invitation matching (tenant_id, otp_hash).
+        let pos = guard
+            .iter()
+            .position(|inv| inv.tenant_id == tenant_id && inv.otp_hash == otp_hash);
+
+        let pos = match pos {
+            Some(p) => p,
+            None => return Err(OtpVerifyError::InvalidOtp),
+        };
+
+        let inv = &guard[pos];
+
+        if inv.expires_at <= now {
+            return Err(OtpVerifyError::Expired);
+        }
+        if inv.consumed_at.is_some() {
+            return Err(OtpVerifyError::AlreadyConsumed);
+        }
+
+        // Consume.
+        guard[pos].consumed_at = Some(now);
+        Ok(())
     }
 }
