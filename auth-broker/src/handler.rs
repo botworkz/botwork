@@ -214,16 +214,17 @@ pub async fn check(State(state): State<AppState>, headers: HeaderMap) -> Respons
     };
 
     // ── Genesis admin bearer fast-path ─────────────────────────────────
-    // When the pre-shared admin key is configured and the request carries a
-    // matching bearer, bypass the OPAQUE lease path and inject
-    // `x-botwork-admin: admin`.  The API layer gates admin-only routes
-    // (`/api/tenants`, `/api/plugins`, …) on that header.
+    // When the admin key is configured (read dynamically from the key file,
+    // mtime-cached) and the request carries a matching bearer, bypass the
+    // OPAQUE lease path and inject `x-botwork-admin: admin`.  The API layer
+    // gates admin-only routes (`/api/tenants`, `/api/plugins`, …) on that
+    // header.
     //
     // The check is skipped for the login path (ApiAuthLogin), which is
     // intentionally public.  For every other path a matching admin bearer
     // always wins over the tenant OPAQUE path.
     if !matches!(path, crate::grammar::ParsedPath::ApiAuthLogin) {
-        if let Some(ref admin_key) = state.admin_api_key {
+        if let Some(admin_key) = state.admin_key_source.current_key() {
             let bearer_matches = request_cap(&headers)
                 .ok()
                 .flatten()

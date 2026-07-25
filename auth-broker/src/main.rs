@@ -34,6 +34,16 @@ fn handle_version_flag(args: &[String], out: &mut impl Write) -> Option<i32> {
     }
 }
 
+fn admin_key_file_from_env() -> PathBuf {
+    admin_key_file_from_lookup(|k| std::env::var(k).ok())
+}
+
+fn admin_key_file_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> PathBuf {
+    lookup("BOTWORK_ADMIN_KEY_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/botwork/admin.env"))
+}
+
 fn vault_root_from_env() -> PathBuf {
     vault_root_from_lookup(|k| std::env::var(k).ok())
 }
@@ -234,16 +244,12 @@ async fn main() {
         .await
         .with_rate_limiter(rate_limit_config);
     let mut state = AppState::with_auth_and_ttl_config(vault_root, auth, ttl_config);
-    if let Ok(admin_key) = std::env::var("BOTWORK_ADMIN_API_KEY") {
-        if !admin_key.is_empty() {
-            info!("{PREFIX} admin API key configured; DELETE /admin/api/v1/leases/:id enabled");
-            state = state.with_admin_api_key(admin_key);
-        } else {
-            warn!("{PREFIX} BOTWORK_ADMIN_API_KEY is set but empty — admin surface disabled");
-        }
-    } else {
-        info!("{PREFIX} BOTWORK_ADMIN_API_KEY unset — admin surface disabled");
-    }
+    let admin_key_file = admin_key_file_from_env();
+    info!(
+        "{PREFIX} admin key file configured at {}; admin bearer fast-path enabled on file presence",
+        admin_key_file.display()
+    );
+    state = state.with_admin_key_file(admin_key_file);
     let _prune_task = spawn_prune_task(state.clone());
     let app = build_router(state.clone());
     let api_app = build_user_api_router(state);
@@ -386,5 +392,21 @@ mod tests {
     async fn offline_database_pool_does_not_panic() {
         // Just verify it constructs without panicking; no actual connect.
         let _pool = offline_database_pool();
+    }
+
+    // ------------------------------------------------------------------
+    // admin_key_file_from_lookup
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn admin_key_file_from_lookup_uses_provided_value() {
+        let path = admin_key_file_from_lookup(|_| Some("/tmp/test-admin.env".to_string()));
+        assert_eq!(path, PathBuf::from("/tmp/test-admin.env"));
+    }
+
+    #[test]
+    fn admin_key_file_from_lookup_default_when_absent() {
+        let path = admin_key_file_from_lookup(|_| None);
+        assert_eq!(path, PathBuf::from("/var/lib/botwork/admin.env"));
     }
 }
