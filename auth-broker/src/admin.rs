@@ -8,11 +8,13 @@
 //!
 //! ## Authentication
 //!
-//! All admin endpoints require `Authorization: Bearer <KEY>` where the
-//! key matches `BOTWORK_ADMIN_API_KEY`. If that env var is unset (reflected as
-//! [`AppState::admin_api_key`] being `None`), every admin call returns 401 —
-//! the surface is disabled by default so a freshly deployed broker without the
-//! env var cannot be exploited.
+//! All admin endpoints require `Authorization: ****** where the
+//! key matches the configured admin key. The key is read dynamically
+//! from the admin key file (mtime-cached) so rotation via
+//! `botctl admin-key set/generate --force` takes effect without a
+//! broker restart. If the file is absent or contains no valid key,
+//! every admin call returns 401 — the surface is disabled by default
+//! so a freshly deployed broker without the key file cannot be exploited.
 //!
 //! ## Revocation semantics
 //!
@@ -96,10 +98,10 @@ fn admin_internal(message: &'static str) -> Response {
 /// Returns `Ok(())` if the request carries the correct admin bearer,
 /// `Err(401 response)` otherwise.
 ///
-/// When [`AppState::admin_api_key`] is `None` (env var unset) the admin
-/// surface is disabled and every call returns 401.
+/// When `state.admin_key_source` resolves to `None` (file absent or no key
+/// configured), the admin surface is disabled and every call returns 401.
 fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
-    let Some(admin_key) = state.admin_api_key.as_deref() else {
+    let Some(admin_key) = state.admin_key_source.current_key() else {
         return Err(Box::new(admin_unauthorized()));
     };
     let auth_value = headers
