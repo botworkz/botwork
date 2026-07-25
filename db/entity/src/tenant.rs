@@ -20,6 +20,8 @@
 //!   without the tenant it authenticates (botworkz/botwork#141).
 //! * `lease.tenant_id` → **CASCADE** — same posture; a lease without
 //!   a tenant is meaningless (botworkz/botwork#141).
+//! * `invitation.tenant_id` → **CASCADE** — same posture; an invitation
+//!   without a tenant is meaningless (botworkz/botwork#346).
 //!
 //! [`workspace`]: super::workspace
 
@@ -59,6 +61,10 @@ pub enum Relation {
     /// (lease → tenant) is defined on lease.
     #[sea_orm(has_many = "super::lease::Entity")]
     Lease,
+    /// A tenant has zero-or-more invitations (botworkz/botwork#346).
+    /// Inverse side (invitation → tenant) is defined on invitation.
+    #[sea_orm(has_many = "super::invitation::Entity")]
+    Invitation,
 }
 
 impl Related<super::workspace::Entity> for Entity {
@@ -82,6 +88,12 @@ impl Related<super::opaque_password_file::Entity> for Entity {
 impl Related<super::lease::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Lease.def()
+    }
+}
+
+impl Related<super::invitation::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Invitation.def()
     }
 }
 
