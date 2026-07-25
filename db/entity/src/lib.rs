@@ -108,6 +108,7 @@
 
 pub mod agent_session;
 pub mod connection;
+pub mod invitation;
 pub mod lease;
 pub mod opaque_password_file;
 pub mod plugin;

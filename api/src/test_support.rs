@@ -4,7 +4,9 @@ use sea_orm::{DatabaseConnection, MockDatabase};
 
 use crate::store::mock::MockApiStore;
 use crate::store::sea_orm_impl::SeaOrmApiStore;
-use crate::{AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient};
+use crate::{
+    AppState, ControlPlaneClient, InvitationClient, SecretStoreClient, SessionBrokerClient,
+};
 
 pub(crate) fn app_state_with_db(db: DatabaseConnection) -> AppState {
     let db = Arc::new(db);
@@ -14,6 +16,7 @@ pub(crate) fn app_state_with_db(db: DatabaseConnection) -> AppState {
         control_plane: ControlPlaneClient::disabled(),
         secret_store: SecretStoreClient::disabled(),
         session_broker: SessionBrokerClient::disabled(),
+        invitation_client: InvitationClient::disabled(),
     }
 }
 
@@ -28,5 +31,6 @@ pub(crate) fn app_state_with_mock_store(store: MockApiStore) -> AppState {
         control_plane: ControlPlaneClient::disabled(),
         secret_store: SecretStoreClient::disabled(),
         session_broker: SessionBrokerClient::disabled(),
+        invitation_client: InvitationClient::disabled(),
     }
 }

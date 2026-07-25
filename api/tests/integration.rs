@@ -29,7 +29,8 @@ use std::time::Duration;
 
 use botwork_api::store::sea_orm_impl::SeaOrmApiStore;
 use botwork_api::{
-    build_router, AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient,
+    build_router, AppState, ControlPlaneClient, InvitationClient, SecretStoreClient,
+    SessionBrokerClient,
 };
 use botwork_bootstrap::{apply, BootstrapConfig, BootstrapConfigRaw};
 use botwork_entity::connection::connect;
@@ -181,6 +182,7 @@ async fn spawn_server_with(control_plane: Option<ControlPlaneClient>) -> Option<
         control_plane: control_plane.unwrap_or_else(ControlPlaneClient::disabled),
         secret_store: SecretStoreClient::disabled(),
         session_broker: SessionBrokerClient::disabled(),
+        invitation_client: InvitationClient::disabled(),
     };
     let app = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
