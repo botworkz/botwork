@@ -186,7 +186,7 @@ impl AdminKeySource {
     /// `subtle::ConstantTimeEq` against the returned value.
     pub fn current_key(&self) -> Option<Arc<str>> {
         match self {
-            AdminKeySource::None => Option::None,
+            AdminKeySource::None => None,
             AdminKeySource::Static(key) => Some(key.clone()),
             AdminKeySource::File(f) => f.current_key(),
         }
