@@ -71,9 +71,14 @@ pub fn normalize_otp(otp: &str) -> String {
 ///
 /// Called at both mint time (to store the hash) and verify time (to compare).
 pub fn hash_otp(otp: &str) -> String {
+    use std::fmt::Write as _;
     let normalised = normalize_otp(otp);
     let digest = Sha256::digest(normalised.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    let mut out = String::with_capacity(64);
+    for b in digest.iter() {
+        write!(out, "{b:02x}").unwrap();
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

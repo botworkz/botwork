@@ -311,6 +311,21 @@ struct TenantUpdate {
     if_unmodified_since: DateTime<Utc>,
 }
 
+/// Flat response for `POST /api/tenants` — all tenant fields plus the
+/// one-time OTP claim credential.
+///
+/// The OTP is returned exactly once and never persisted in plaintext.
+/// The admin must relay it to the tenant out-of-band.
+#[derive(Debug, Serialize)]
+struct TenantCreatedResponse {
+    id: Uuid,
+    name: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    /// Plaintext OTP — returned once, never stored.
+    otp: String,
+}
+
 async fn create_tenant(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -349,31 +364,13 @@ async fn create_tenant(
 
     audit_event(&op, "create", "tenant", row.id, &format!("name={name:?}"));
 
-    /// Flat create response — all tenant fields plus the one-time OTP.
-    ///
-    /// The OTP is returned exactly once (here) and never persisted in
-    /// plaintext. The admin must relay it to the tenant out-of-band.
-    #[derive(Serialize)]
-    struct TenantCreatedResponse {
-        id: uuid::Uuid,
-        name: String,
-        created_at: chrono::DateTime<chrono::Utc>,
-        updated_at: chrono::DateTime<chrono::Utc>,
-        /// Plaintext OTP — returned once, never stored. Admin relays
-        /// this to the tenant out-of-band.
-        otp: String,
-    }
-
-    let created_at = row.created_at;
-    let updated_at = row.updated_at;
-
     let mut response = (
         StatusCode::CREATED,
         Json(TenantCreatedResponse {
             id: created_id,
             name,
-            created_at,
-            updated_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
             otp,
         }),
     )
