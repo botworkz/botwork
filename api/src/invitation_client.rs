@@ -190,19 +190,20 @@ impl InvitationClient {
 
     /// Side-effect-free readiness probe.
     ///
-    /// Uses a method-mismatch request against `/internal/invitations`
-    /// so no invitation is ever minted.
+    /// GETs `/health` on the auth-broker endpoint. A `2xx` response means
+    /// the service is up; a transport error, timeout, or non-2xx means unready.
+    /// Disabled clients are immediately ready.
     pub async fn ready(&self) -> Result<(), String> {
         if self.disabled {
             return Ok(());
         }
-        let url = format!("{}/internal/invitations", self.endpoint);
+        let url = format!("{}/health", self.endpoint);
         let resp = tokio::time::timeout(READINESS_TIMEOUT, self.http.get(&url).send())
             .await
             .map_err(|_| format!("timeout contacting {url}"))?
             .map_err(|err| format!("transport error contacting {url}: {err}"))?;
         let status = resp.status();
-        if status.is_success() || status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        if status.is_success() {
             Ok(())
         } else {
             Err(format!("GET {url} returned {status}"))
@@ -357,11 +358,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_reachable_method_mismatch_is_ready() {
+    async fn ready_health_200_is_ready() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/internal/invitations"))
-            .respond_with(ResponseTemplate::new(405))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
         let client = InvitationClient::with_endpoint(server.uri());
@@ -369,11 +370,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_probe_is_side_effect_free_no_mint_call() {
+    async fn ready_health_non_2xx_is_unready() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/internal/invitations"))
-            .respond_with(ResponseTemplate::new(405))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = InvitationClient::with_endpoint(server.uri());
+        let err = client.ready().await.expect_err("unready on 500");
+        assert!(err.contains("500"));
+    }
+
+    #[tokio::test]
+    async fn ready_probe_does_not_call_operational_routes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;

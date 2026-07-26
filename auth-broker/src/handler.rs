@@ -889,6 +889,10 @@ async fn api_auth_whoami(State(state): State<AppState>, headers: HeaderMap) -> R
     }
 }
 
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+}
+
 pub fn build_router(state: AppState) -> Router {
     // /auth/{register,login}/* are mounted via the auth subrouter
     // (which is generic over `AuthState`). We compose the
@@ -897,6 +901,7 @@ pub fn build_router(state: AppState) -> Router {
     // round 1a used, kept here so the merge into a fresh
     // `Router::<AppState>` resolves.
     let core = Router::new()
+        .route("/health", get(health))
         .route("/secrets/fetch", post(fetch))
         .route("/auth/lease/wrapped-export-key", get(wrapped_export_key))
         .route("/api/auth/login", post(api_auth_login))
@@ -1419,5 +1424,20 @@ mod tests {
     #[test]
     fn log_fetch_unauthorized_with_some_cap_does_not_panic() {
         log_fetch_unauthorized("test-reason", Some("abc123def456"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // health
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_returns_200_with_status_ok() {
+        let response = health().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["status"], "ok");
     }
 }

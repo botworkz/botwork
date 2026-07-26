@@ -166,13 +166,14 @@ impl ControlPlaneClient {
 
     /// Side-effect-free readiness probe.
     ///
-    /// Checks whether control-plane is reachable on its read path.
+    /// GETs `/health` on the control-plane endpoint. A `2xx` response means
+    /// the service is up; a transport error, timeout, or non-2xx means unready.
     /// Disabled clients are intentionally bypassed and therefore ready.
     pub async fn ready(&self) -> Result<(), String> {
         if self.disabled {
             return Ok(());
         }
-        let url = format!("{}/sessions", self.endpoint);
+        let url = format!("{}/health", self.endpoint);
         let resp = tokio::time::timeout(READINESS_TIMEOUT, self.http.get(&url).send())
             .await
             .map_err(|_| format!("timeout contacting {url}"))?
@@ -454,17 +455,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_reachable_is_ready() {
+    async fn ready_health_200_is_ready() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/sessions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "sessions": []
-            })))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
         let client = ControlPlaneClient::with_endpoint(server.uri());
         client.ready().await.expect("ready");
+    }
+
+    #[tokio::test]
+    async fn ready_health_non_2xx_is_unready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = ControlPlaneClient::with_endpoint(server.uri());
+        let err = client.ready().await.expect_err("unready on 500");
+        assert!(err.contains("500"));
     }
 
     #[test]
