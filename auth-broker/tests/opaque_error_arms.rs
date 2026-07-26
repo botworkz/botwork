@@ -19,7 +19,7 @@ use botwork_opaque_handshake::{
 };
 use chrono::Utc;
 use rand::Rng;
-use sea_orm::{DatabaseBackend, DbErr, MockDatabase, MockExecResult};
+use sea_orm::{DatabaseBackend, DbErr, MockDatabase};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::time::{advance, pause};
@@ -455,19 +455,16 @@ async fn register_finish_conflict_returns_409() {
     let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let setup = ServerSetup::generate(&mut rng);
-    let upload_password = random_password();
+    let upload_password = b"upload-password".to_vec();
     let upload = make_registration_upload_b64(&setup, &upload_password);
-    let stored_password = random_password();
+    let stored_password = b"stored-password".to_vec();
     let stored = make_password_file(&setup, &stored_password);
-    let db = MockDatabase::new(DatabaseBackend::Postgres)
-        .append_query_results(vec![vec![tenant_model(tenant_id, "acme")]])
-        .append_exec_results(vec![MockExecResult {
-            last_insert_id: 0,
-            rows_affected: 0,
-        }])
-        .append_query_results(vec![vec![password_file_model(tenant_id, &stored)]])
-        .into_connection();
-    let app = build_auth_router(AuthState::new(db, setup));
+    let app = build_auth_router(AuthState::from_stores(
+        Arc::new(MockLeaseStore::new()),
+        Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
+        Arc::new(MockPasswordFileStore::with_file(tenant_id, &stored)),
+        setup,
+    ));
 
     let response = send_json(
         &app,
@@ -496,11 +493,12 @@ async fn register_finish_db_error_returns_500() {
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
     let upload = make_registration_upload_b64(&setup, &password);
-    let db = MockDatabase::new(DatabaseBackend::Postgres)
-        .append_query_results(vec![vec![tenant_model(tenant_id, "acme")]])
-        .append_exec_errors(vec![DbErr::Custom("write failed".to_string())])
-        .into_connection();
-    let app = build_auth_router(AuthState::new(db, setup));
+    let app = build_auth_router(AuthState::from_stores(
+        Arc::new(MockLeaseStore::new()),
+        Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
+        Arc::new(MockPasswordFileStore::always_error("write failed")),
+        setup,
+    ));
 
     let response = send_json(
         &app,
