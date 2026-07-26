@@ -217,18 +217,16 @@ impl Args {
             operator: operator.unwrap_or_else(|| DEFAULT_OPERATOR.to_string()),
             dry_run,
             no_wait,
-            ready_timeout_secs: ready_timeout.unwrap_or_else(|| {
-                ready_timeout_env
-                    .as_deref()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(DEFAULT_READY_TIMEOUT_SECS)
-            }),
-            ready_interval_secs: ready_interval.unwrap_or_else(|| {
-                ready_interval_env
-                    .as_deref()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(DEFAULT_READY_INTERVAL_SECS)
-            }),
+            ready_timeout_secs: flag_or_env_secs(
+                ready_timeout,
+                ready_timeout_env,
+                DEFAULT_READY_TIMEOUT_SECS,
+            ),
+            ready_interval_secs: flag_or_env_secs(
+                ready_interval,
+                ready_interval_env,
+                DEFAULT_READY_INTERVAL_SECS,
+            ),
         })
     }
 
@@ -242,6 +240,16 @@ impl Args {
             std::env::var(READY_INTERVAL_ENV).ok(),
         )
     }
+}
+
+/// Resolve a seconds value: explicit flag beats env-var fallback beats default.
+/// Invalid env-var values are silently ignored and fall back to `default`.
+fn flag_or_env_secs(flag: Option<u64>, env: Option<String>, default: u64) -> u64 {
+    flag.unwrap_or_else(|| {
+        env.as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default)
+    })
 }
 
 pub fn help_text() -> &'static str {

@@ -538,7 +538,7 @@ async fn readyz_200_on_first_probe_returns_ok() {
 
     let endpoint = server.uri();
     let result = tokio::task::spawn_blocking(move || {
-        let c = AdminClient::new(&endpoint, OPERATOR).unwrap();
+        let c = client(&endpoint);
         c.wait_until_ready(Duration::from_secs(10), Duration::from_millis(10))
     })
     .await
@@ -572,7 +572,7 @@ async fn readyz_503_then_200_retries_and_succeeds() {
 
     let endpoint = server.uri();
     let result = tokio::task::spawn_blocking(move || {
-        let c = AdminClient::new(&endpoint, OPERATOR).unwrap();
+        let c = client(&endpoint);
         c.wait_until_ready(Duration::from_secs(10), Duration::from_millis(10))
     })
     .await
@@ -611,7 +611,7 @@ async fn readyz_timeout_returns_err_and_apply_not_called() {
 
     let endpoint = server.uri();
     let result = tokio::task::spawn_blocking(move || {
-        let c = AdminClient::new(&endpoint, OPERATOR).unwrap();
+        let c = client(&endpoint);
         c.wait_until_ready(Duration::from_millis(100), Duration::from_millis(10))
     })
     .await
@@ -642,7 +642,7 @@ async fn readyz_transport_error_retried_then_times_out() {
     drop(server);
 
     let result = tokio::task::spawn_blocking(move || {
-        let c = AdminClient::new(&endpoint, OPERATOR).unwrap();
+        let c = client(&endpoint);
         // Short overall timeout so the test finishes quickly.
         c.wait_until_ready(Duration::from_millis(200), Duration::from_millis(10))
     })
