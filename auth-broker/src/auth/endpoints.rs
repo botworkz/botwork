@@ -1360,4 +1360,208 @@ mod tests {
     fn extract_client_ip_defaults_to_unknown() {
         assert_eq!(extract_client_ip(&HeaderMap::new()), "unknown");
     }
+
+    // ---------------------------------------------------------------------------
+    // POST /internal/invitations/renew
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn renew_internal_invitation_returns_200_with_otp_and_expires_at() {
+        let tenant_id = Uuid::new_v4();
+        let mut rng = rand::rng();
+        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rng);
+        use crate::store::mock::MockInvitationStore;
+        let state = AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::new()),
+            Arc::new(MockPasswordFileStore::new()),
+            setup,
+        )
+        .with_invitation_store(Arc::new(MockInvitationStore::new()));
+
+        let response = renew_internal_invitation(
+            State(state),
+            Json(RenewInvitationRequest {
+                tenant_id,
+                ttl_seconds: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["otp"].is_string(), "response must include otp field");
+        assert!(
+            body["expires_at"].is_string(),
+            "response must include expires_at field"
+        );
+        // The OTP must be non-empty and UUID-formatted.
+        let otp = body["otp"].as_str().unwrap();
+        assert!(!otp.is_empty(), "returned OTP must be non-empty");
+        assert_eq!(otp.len(), 36, "OTP must be UUID-formatted (36 chars)");
+    }
+
+    /// A fresh renew generates a different OTP each time.
+    #[tokio::test]
+    async fn renew_internal_invitation_rotates_otp() {
+        let tenant_id = Uuid::new_v4();
+        let mut rng = rand::rng();
+        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rng);
+        use crate::store::mock::MockInvitationStore;
+        let inv_store = Arc::new(MockInvitationStore::new());
+        let state = AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::new()),
+            Arc::new(MockPasswordFileStore::new()),
+            setup,
+        )
+        .with_invitation_store(
+            Arc::clone(&inv_store) as Arc<dyn crate::store::InvitationStore + Send + Sync>
+        );
+
+        let r1 = renew_internal_invitation(
+            State(state.clone()),
+            Json(RenewInvitationRequest {
+                tenant_id,
+                ttl_seconds: None,
+            }),
+        )
+        .await;
+        let r2 = renew_internal_invitation(
+            State(state.clone()),
+            Json(RenewInvitationRequest {
+                tenant_id,
+                ttl_seconds: None,
+            }),
+        )
+        .await;
+
+        let otp1 = response_json(r1).await;
+        let otp2 = response_json(r2).await;
+        assert_ne!(
+            otp1["otp"], otp2["otp"],
+            "successive renews must produce different OTPs"
+        );
+
+        // After two renews there is exactly one active invitation (the last one).
+        let snap = inv_store.snapshot();
+        let active: Vec<_> = snap
+            .iter()
+            .filter(|inv| {
+                inv.tenant_id == tenant_id && inv.consumed_at.is_none() && inv.revoked_at.is_none()
+            })
+            .collect();
+        assert_eq!(
+            active.len(),
+            1,
+            "after two renews exactly one invitation must be active"
+        );
+    }
+
+    #[tokio::test]
+    async fn renew_internal_invitation_db_error_returns_500() {
+        let tenant_id = Uuid::new_v4();
+        let mut rng = rand::rng();
+        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rng);
+        use crate::store::mock::MockInvitationStore;
+        // always_insert_error makes renew_invitation return Err on the insert step.
+        let state = AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::new()),
+            Arc::new(MockPasswordFileStore::new()),
+            setup,
+        )
+        .with_invitation_store(Arc::new(MockInvitationStore::always_insert_error(
+            "db boom",
+        )));
+
+        let response = renew_internal_invitation(
+            State(state),
+            Json(RenewInvitationRequest {
+                tenant_id,
+                ttl_seconds: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "internal");
+    }
+
+    // ---------------------------------------------------------------------------
+    // POST /internal/invitations/revoke
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn revoke_internal_invitations_returns_200_with_revoked_count() {
+        let tenant_id = Uuid::new_v4();
+        let mut rng = rand::rng();
+        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rng);
+        use crate::store::mock::MockInvitationStore;
+
+        // Pre-seed two active invitations so the revoke returns count=2.
+        let inv_store = Arc::new(MockInvitationStore::new());
+        {
+            use crate::auth::invitation::hash_otp;
+            let expires = chrono::Utc::now() + chrono::Duration::days(7);
+            inv_store.insert(tenant_id, hash_otp("OTP-A"), expires);
+            inv_store.insert(tenant_id, hash_otp("OTP-B"), expires);
+        }
+
+        let state = AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::new()),
+            Arc::new(MockPasswordFileStore::new()),
+            setup,
+        )
+        .with_invitation_store(inv_store);
+
+        let response =
+            revoke_internal_invitations(State(state), Json(RevokeInvitationsRequest { tenant_id }))
+                .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(
+            body["revoked"], 2,
+            "revoke must report the number of affected rows"
+        );
+    }
+
+    /// Revoking when there are no active invitations must return `{ revoked: 0 }`
+    /// (idempotent — not an error).
+    #[tokio::test]
+    async fn revoke_internal_invitations_idempotent_returns_zero_when_none_active() {
+        let tenant_id = Uuid::new_v4();
+        let mut rng = rand::rng();
+        let setup = botwork_opaque_handshake::ServerSetup::generate(&mut rng);
+        use crate::store::mock::MockInvitationStore;
+        let state = AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::new()),
+            Arc::new(MockPasswordFileStore::new()),
+            setup,
+        )
+        .with_invitation_store(Arc::new(MockInvitationStore::new()));
+
+        let r1 = revoke_internal_invitations(
+            State(state.clone()),
+            Json(RevokeInvitationsRequest { tenant_id }),
+        )
+        .await;
+        assert_eq!(r1.status(), StatusCode::OK);
+        assert_eq!(response_json(r1).await["revoked"], 0);
+
+        // Second call (already-revoked state) must also succeed with 0.
+        let r2 =
+            revoke_internal_invitations(State(state), Json(RevokeInvitationsRequest { tenant_id }))
+                .await;
+        assert_eq!(r2.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(r2).await["revoked"],
+            0,
+            "second revoke must be idempotent"
+        );
+    }
 }

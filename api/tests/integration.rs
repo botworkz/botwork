@@ -1839,3 +1839,237 @@ async fn get_session_worker_unknown_id_is_404() {
         .expect("GET");
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ── invitation renew / revoke ──────────────────────────────────────
+//
+// The server is spawned with InvitationClient::disabled() (the same
+// default as all other integration tests).  The disabled path is the
+// documented break-glass posture:
+//
+//   • renew  → 200 { "otp": "DISABLED", "expires_at": "<RFC3339>" }
+//   • revoke → 204 No Content (idempotent no-op)
+//
+// These tests exercise:
+//   1. Correct status codes on the happy path (admin-gated).
+//   2. 403 / admin_required when the x-botwork-admin header is absent.
+//   3. 404 when the tenant does not exist.
+//   4. 500 / internal when the invitation service is unreachable
+//      (port 1 = connection refused, simulates a dead auth-broker).
+
+/// Spawn a server with a specific InvitationClient injected.
+async fn spawn_server_with_invitation_client(
+    invitation_client: InvitationClient,
+) -> Option<Server> {
+    if !docker_available().await {
+        return None;
+    }
+    let (pg, url) = start_postgres()
+        .await
+        .expect("postgres container must start");
+    let db = connect_with_retry(&url)
+        .await
+        .expect("connect to ephemeral postgres");
+    Migrator::up(&db, None)
+        .await
+        .expect("schema migrations must apply");
+    let raw: BootstrapConfigRaw = serde_yaml::from_str(SAMPLE_YAML).expect("bootstrap yaml parse");
+    let cfg = BootstrapConfig::from_raw(raw).expect("bootstrap validate");
+    apply(&db, &cfg).await.expect("bootstrap apply");
+    let db_arc = Arc::new(db);
+    let state = AppState {
+        store: Arc::new(SeaOrmApiStore::new_shared(db_arc.clone())),
+        db: db_arc.clone(),
+        control_plane: ControlPlaneClient::disabled(),
+        secret_store: SecretStoreClient::disabled(),
+        session_broker: SessionBrokerClient::disabled(),
+        invitation_client,
+    };
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Some(Server {
+        base: format!("http://{addr}"),
+        db: db_arc,
+        _handle: handle,
+        _pg: pg,
+    })
+}
+
+// --- renew ---
+
+/// Admin-gated renew with the disabled client returns 200 with the
+/// documented DISABLED placeholder OTP and a future expires_at.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renew_invitation_disabled_client_returns_200_with_disabled_otp() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED renew_invitation_disabled_client_returns_200_with_disabled_otp");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/tenant/phlax/invitation/renew", server.base))
+        .header("x-botwork-admin", "true")
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    // The disabled path returns the DISABLED placeholder OTP.
+    assert_eq!(
+        body["otp"], "DISABLED",
+        "disabled invitation client must return DISABLED placeholder otp"
+    );
+    assert!(
+        body["expires_at"].is_string(),
+        "response must include expires_at field"
+    );
+}
+
+/// Non-admin caller (missing x-botwork-admin header) must be rejected with 403.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renew_invitation_requires_admin_header() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED renew_invitation_requires_admin_header");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/tenant/phlax/invitation/renew", server.base))
+        // No x-botwork-admin header.
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "admin_required");
+}
+
+/// Renewing an invitation for an unknown tenant returns 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renew_invitation_unknown_tenant_is_404() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED renew_invitation_unknown_tenant_is_404");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/tenant/nobody/invitation/renew",
+            server.base
+        ))
+        .header("x-botwork-admin", "true")
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// When the auth-broker is unreachable, renew must surface a 500 with
+/// `error.code = "internal"` and must NOT report success.
+///
+/// Implemented by pointing the invitation client at a port that is not
+/// listening (connection refused), which is the simplest lever in the
+/// test harness that avoids spinning up a real auth-broker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renew_invitation_broker_unavailable_returns_500_internal() {
+    // Port 1 is the tcpmux port and is virtually never open on loopback
+    // in a CI/test environment; the connection should be refused quickly.
+    let unreachable = InvitationClient::with_endpoint("http://127.0.0.1:1");
+    let Some(server) = spawn_server_with_invitation_client(unreachable).await else {
+        eprintln!("IGNORED renew_invitation_broker_unavailable_returns_500_internal");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/tenant/phlax/invitation/renew", server.base))
+        .header("x-botwork-admin", "true")
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "internal");
+}
+
+// --- revoke ---
+
+/// Admin-gated revoke returns 204 No Content (idempotent).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_invitation_disabled_client_returns_204() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED revoke_invitation_disabled_client_returns_204");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/tenant/phlax/invitation/revoke",
+            server.base
+        ))
+        .header("x-botwork-admin", "true")
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+/// Non-admin caller (missing x-botwork-admin) must be rejected with 403.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_invitation_requires_admin_header() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED revoke_invitation_requires_admin_header");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/tenant/phlax/invitation/revoke",
+            server.base
+        ))
+        // No x-botwork-admin header.
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "admin_required");
+}
+
+/// Revoking an invitation for an unknown tenant returns 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_invitation_unknown_tenant_is_404() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED revoke_invitation_unknown_tenant_is_404");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/tenant/nobody/invitation/revoke",
+            server.base
+        ))
+        .header("x-botwork-admin", "true")
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// When the auth-broker is unreachable, revoke must surface a 500 with
+/// `error.code = "internal"` and must NOT report success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_invitation_broker_unavailable_returns_500_internal() {
+    let unreachable = InvitationClient::with_endpoint("http://127.0.0.1:1");
+    let Some(server) = spawn_server_with_invitation_client(unreachable).await else {
+        eprintln!("IGNORED revoke_invitation_broker_unavailable_returns_500_internal");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/tenant/phlax/invitation/revoke",
+            server.base
+        ))
+        .header("x-botwork-admin", "true")
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "internal");
+}

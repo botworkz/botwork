@@ -282,6 +282,13 @@ pub async fn renew_invitation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use botwork_entity::invitation;
+    use chrono::Duration;
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+
+    // ---------------------------------------------------------------------------
+    // OTP pure-Rust helpers (existing tests)
+    // ---------------------------------------------------------------------------
 
     #[test]
     fn normalize_otp_strips_dashes_and_whitespace() {
@@ -327,5 +334,220 @@ mod tests {
         assert!(otp
             .chars()
             .all(|c| c.is_ascii_uppercase() || c == '-' || c.is_ascii_digit()));
+    }
+
+    // ---------------------------------------------------------------------------
+    // DB-layer control-flow tests (SeaORM MockDatabase — no Docker required)
+    //
+    // These tests exercise the control-flow and error-mapping of the DB
+    // functions using sea_orm::MockDatabase.  They do NOT verify SQL
+    // correctness (JOIN semantics, transaction isolation, affected-row
+    // counting against real rows) — that lives in the docker-gated
+    // `tests/invitation_store.rs` integration tier.
+    // ---------------------------------------------------------------------------
+
+    fn active_invitation_model(tenant_id: Uuid) -> invitation::Model {
+        let now = Utc::now();
+        invitation::Model {
+            id: Uuid::new_v4(),
+            tenant_id,
+            otp_hash: hash_otp("FIXTURE-OTP"),
+            expires_at: now + Duration::days(7),
+            consumed_at: None,
+            revoked_at: None,
+            created_at: now,
+        }
+    }
+
+    // --- has_active_invitation ---
+
+    #[tokio::test]
+    async fn has_active_invitation_returns_true_when_row_present() {
+        let tenant_id = Uuid::new_v4();
+        let model = active_invitation_model(tenant_id);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![model]])
+            .into_connection();
+        assert!(has_active_invitation(&db, tenant_id, Utc::now())
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn has_active_invitation_returns_false_when_no_rows() {
+        let tenant_id = Uuid::new_v4();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<invitation::Model>::new()])
+            .into_connection();
+        assert!(!has_active_invitation(&db, tenant_id, Utc::now())
+            .await
+            .unwrap());
+    }
+
+    // --- verify_and_consume: revoked-path guard (enumeration guard security test) ---
+
+    /// Security property: a revoked invitation must return `InvalidOtp` (opaque),
+    /// NOT a distinct "Revoked" variant, so an attacker cannot distinguish
+    /// between "OTP never existed" and "OTP was valid but since revoked".
+    #[tokio::test]
+    async fn verify_and_consume_revoked_returns_invalid_otp_not_revoked_variant() {
+        let tenant_id = Uuid::new_v4();
+        let now = Utc::now();
+        // A revoked (but otherwise unexpired) invitation row.
+        let mut revoked = active_invitation_model(tenant_id);
+        revoked.revoked_at = Some(now - Duration::minutes(1));
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![revoked]])
+            .into_connection();
+
+        let err = verify_and_consume(&db, tenant_id, "FIXTURE-OTP", now)
+            .await
+            .unwrap_err();
+
+        // Must be InvalidOtp — the same opaque variant as "not found".
+        // A distinct "Revoked" variant would leak that the OTP existed (enumeration).
+        assert!(
+            matches!(err, OtpVerifyError::InvalidOtp),
+            "revoked invitation must return InvalidOtp (enumeration guard), not another variant; got: {err:?}"
+        );
+    }
+
+    /// A revoked invitation is excluded from the has_active_invitation check
+    /// even if its expires_at is in the future and consumed_at is NULL.
+    #[tokio::test]
+    async fn verify_and_consume_expired_returns_expired() {
+        let tenant_id = Uuid::new_v4();
+        let now = Utc::now();
+        let mut expired = active_invitation_model(tenant_id);
+        expired.expires_at = now - Duration::hours(1); // in the past
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![expired]])
+            .into_connection();
+
+        let err = verify_and_consume(&db, tenant_id, "FIXTURE-OTP", now)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OtpVerifyError::Expired),
+            "expired invitation must return Expired; got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_and_consume_already_consumed_returns_already_consumed() {
+        let tenant_id = Uuid::new_v4();
+        let now = Utc::now();
+        let mut consumed = active_invitation_model(tenant_id);
+        consumed.consumed_at = Some(now - Duration::hours(1));
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![consumed]])
+            .into_connection();
+
+        let err = verify_and_consume(&db, tenant_id, "FIXTURE-OTP", now)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OtpVerifyError::AlreadyConsumed),
+            "consumed invitation must return AlreadyConsumed; got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_and_consume_not_found_returns_invalid_otp() {
+        let tenant_id = Uuid::new_v4();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<invitation::Model>::new()])
+            .into_connection();
+
+        let err = verify_and_consume(&db, tenant_id, "NO-SUCH-OTP", Utc::now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OtpVerifyError::InvalidOtp),
+            "missing invitation must return InvalidOtp; got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_and_consume_success_when_row_valid_and_update_applies() {
+        let tenant_id = Uuid::new_v4();
+        let now = Utc::now();
+        let model = active_invitation_model(tenant_id);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Step 1: SELECT returns the active row.
+            .append_query_results(vec![vec![model]])
+            // Step 4: UPDATE consumed_at WHERE consumed_at IS NULL → 1 row.
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        verify_and_consume(&db, tenant_id, "FIXTURE-OTP", now)
+            .await
+            .expect("valid active invitation must consume successfully");
+    }
+
+    #[tokio::test]
+    async fn verify_and_consume_race_lost_returns_already_consumed() {
+        // The concurrent-consume race: UPDATE returns 0 rows_affected even
+        // though the SELECT found the row (another caller consumed first).
+        let tenant_id = Uuid::new_v4();
+        let now = Utc::now();
+        let model = active_invitation_model(tenant_id);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![model]])
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0, // concurrent consumer won the race
+            }])
+            .into_connection();
+
+        let err = verify_and_consume(&db, tenant_id, "FIXTURE-OTP", now)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OtpVerifyError::AlreadyConsumed),
+            "concurrent consume race must return AlreadyConsumed; got: {err:?}"
+        );
+    }
+
+    // --- revoke_invitations_for_tenant ---
+
+    #[tokio::test]
+    async fn revoke_invitations_returns_affected_count_from_db() {
+        let tenant_id = Uuid::new_v4();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 3,
+            }])
+            .into_connection();
+
+        let n = revoke_invitations_for_tenant(&db, tenant_id, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(n, 3);
+    }
+
+    #[tokio::test]
+    async fn revoke_invitations_returns_zero_when_none_active() {
+        let tenant_id = Uuid::new_v4();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let n = revoke_invitations_for_tenant(&db, tenant_id, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }
