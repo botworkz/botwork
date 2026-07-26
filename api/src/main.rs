@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use botwork_api::store::sea_orm_impl::SeaOrmApiStore;
 use botwork_api::{
-    build_router, AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient,
+    build_router, AppState, ControlPlaneClient, InvitationClient, SecretStoreClient,
+    SessionBrokerClient,
 };
 use botwork_entity::connection::{connect_from_env, ConnectError, DATABASE_URL_ENV};
 use tokio::net::TcpListener;
@@ -110,6 +111,17 @@ async fn main() -> ExitCode {
         session_broker.is_disabled(),
     );
 
+    // Invitation minting client. InvitationClient reads
+    // BOTWORK_AUTH_BROKER_ENDPOINT (default http://auth_broker:9600) and the
+    // break-glass BOTWORK_AUTH_BROKER_INVITATIONS_DISABLE flag.
+    let invitation_client = InvitationClient::from_env();
+    let inv_endpoint = std::env::var(botwork_api::invitation_client::ENDPOINT_ENV)
+        .unwrap_or_else(|_| botwork_api::invitation_client::ENDPOINT_DEFAULT.to_string());
+    info!(
+        "{PREFIX} invitation endpoint={inv_endpoint} disabled={}",
+        invitation_client.is_disabled(),
+    );
+
     let bind = bind_from_env();
     let app = build_router(AppState {
         store: Arc::new(SeaOrmApiStore::new_shared(db.clone())),
@@ -117,6 +129,7 @@ async fn main() -> ExitCode {
         control_plane,
         secret_store,
         session_broker,
+        invitation_client,
     });
 
     let listener = match TcpListener::bind(&bind).await {

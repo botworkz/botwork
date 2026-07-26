@@ -50,6 +50,7 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::control_plane::ControlPlaneClient;
+use crate::invitation_client::InvitationClient;
 use crate::secret_store::SecretStoreClient;
 use crate::session_broker::SessionBrokerClient;
 use crate::store::ApiStore;
@@ -72,6 +73,10 @@ pub(crate) const PREFIX: &str = "[api]";
 ///   interface on `botwork-internal`. Called after a successful secret
 ///   mutation to evict stale-credential containers for the tenant. See
 ///   [`crate::session_broker`] for the failure semantics.
+/// * `invitation_client` — HTTP client targeting the auth-broker
+///   internal invitation endpoint on `botwork-internal`. Called from
+///   `POST /api/tenants` to mint a single-use OTP claim credential.
+///   See [`crate::invitation_client`] for the failure semantics.
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<DatabaseConnection>,
@@ -79,6 +84,7 @@ pub struct AppState {
     pub control_plane: ControlPlaneClient,
     pub secret_store: SecretStoreClient,
     pub session_broker: SessionBrokerClient,
+    pub invitation_client: InvitationClient,
 }
 
 /// Wire-shape for non-2xx responses.

@@ -42,13 +42,14 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::auth::{
+    invitation::{generate_otp, hash_otp, OtpVerifyError, INVITATION_DEFAULT_TTL_SECONDS},
     lease::{Bearer, WrappedExportKey, LEASE_DEFAULT_SECONDS},
     lease_kek::wrap_session_key,
     opaque::UpsertError,
     pending::{Pending, PendingError, PendingMap},
     rate_limit::{RateLimitConfig, RateLimiter},
 };
-use crate::store::{LeaseStore, PasswordFileStore, TenantStore};
+use crate::store::{InvitationStore, LeaseStore, PasswordFileStore, TenantStore};
 
 const PREFIX: &str = "[auth-broker]";
 
@@ -87,6 +88,7 @@ pub struct AuthState {
     pub lease_store: Arc<dyn LeaseStore + Send + Sync>,
     pub tenant_store: Arc<dyn TenantStore + Send + Sync>,
     pub password_file_store: Arc<dyn PasswordFileStore + Send + Sync>,
+    pub invitation_store: Arc<dyn InvitationStore + Send + Sync>,
     pub setup: Arc<botwork_opaque_handshake::ServerSetup>,
     pub pending: PendingMap,
     /// Per-lease OPAQUE export-key cache. Each entry carries the
@@ -102,14 +104,57 @@ pub struct AuthState {
     pub rate_limiter: RateLimiter,
 }
 
+/// No-op invitation store used as the default for [`AuthState::from_stores`].
+///
+/// `has_active_invitation` always returns `Ok(false)` (no gate), so
+/// tenants that were created before the invitation system was introduced
+/// can still register without presenting an OTP.
+///
+/// `insert_invitation` and `verify_and_consume` return errors; the
+/// former is only reached via the new `POST /internal/invitations`
+/// endpoint, which requires the real SeaORM store in production.
+struct NoopInvitationStore;
+
+#[async_trait::async_trait]
+impl InvitationStore for NoopInvitationStore {
+    async fn insert_invitation(
+        &self,
+        _tenant_id: Uuid,
+        _otp_hash: &str,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Uuid, sea_orm::DbErr> {
+        Err(sea_orm::DbErr::Custom(
+            "NoopInvitationStore: invitation creation disabled".into(),
+        ))
+    }
+
+    async fn has_active_invitation(
+        &self,
+        _tenant_id: Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, sea_orm::DbErr> {
+        Ok(false)
+    }
+
+    async fn verify_and_consume(
+        &self,
+        _tenant_id: Uuid,
+        _otp: &str,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), OtpVerifyError> {
+        Err(OtpVerifyError::InvalidOtp)
+    }
+}
+
 impl AuthState {
     /// Production constructor: wraps a [`DatabaseConnection`] in the
     /// three SeaORM-backed store implementations.
     pub fn new(db: DatabaseConnection, setup: botwork_opaque_handshake::ServerSetup) -> Self {
         use crate::store::sea_orm_impl::{
-            SeaOrmLeaseStore, SeaOrmPasswordFileStore, SeaOrmTenantStore,
+            SeaOrmInvitationStore, SeaOrmLeaseStore, SeaOrmPasswordFileStore, SeaOrmTenantStore,
         };
-        // Wrap in Arc once so all three stores share the same underlying
+        // Wrap in Arc once so all four stores share the same underlying
         // connection without requiring DatabaseConnection: Clone.  (sea-orm's
         // `mock` feature removes the Clone impl from DatabaseConnection, so
         // using Arc-clone is the compatible path for both prod and test builds.)
@@ -117,9 +162,10 @@ impl AuthState {
         Self::from_stores(
             Arc::new(SeaOrmLeaseStore::new_shared(Arc::clone(&db))),
             Arc::new(SeaOrmTenantStore::new_shared(Arc::clone(&db))),
-            Arc::new(SeaOrmPasswordFileStore::new_shared(db)),
+            Arc::new(SeaOrmPasswordFileStore::new_shared(Arc::clone(&db))),
             setup,
         )
+        .with_invitation_store(Arc::new(SeaOrmInvitationStore::new_shared(db)))
     }
 
     /// Like [`AuthState::new`] but accepts a pre-shared
@@ -135,14 +181,15 @@ impl AuthState {
         setup: botwork_opaque_handshake::ServerSetup,
     ) -> Self {
         use crate::store::sea_orm_impl::{
-            SeaOrmLeaseStore, SeaOrmPasswordFileStore, SeaOrmTenantStore,
+            SeaOrmInvitationStore, SeaOrmLeaseStore, SeaOrmPasswordFileStore, SeaOrmTenantStore,
         };
         Self::from_stores(
             Arc::new(SeaOrmLeaseStore::new_shared(Arc::clone(&db))),
             Arc::new(SeaOrmTenantStore::new_shared(Arc::clone(&db))),
-            Arc::new(SeaOrmPasswordFileStore::new_shared(db)),
+            Arc::new(SeaOrmPasswordFileStore::new_shared(Arc::clone(&db))),
             setup,
         )
+        .with_invitation_store(Arc::new(SeaOrmInvitationStore::new_shared(db)))
     }
 
     /// Construct from explicit store implementations.
@@ -154,6 +201,11 @@ impl AuthState {
     /// Rate limiting is **disabled** by default so the in-process test
     /// harness is unaffected. Call [`AuthState::with_rate_limiter`] to
     /// enable it (the production binary does this from env config).
+    ///
+    /// The invitation store defaults to [`NoopInvitationStore`] (always
+    /// returns `Ok(false)` for `has_active_invitation`). Call
+    /// [`AuthState::with_invitation_store`] to override — the production
+    /// path does this via [`AuthState::new`] / [`AuthState::new_arc`].
     pub fn from_stores(
         lease_store: Arc<dyn LeaseStore + Send + Sync>,
         tenant_store: Arc<dyn TenantStore + Send + Sync>,
@@ -164,11 +216,21 @@ impl AuthState {
             lease_store,
             tenant_store,
             password_file_store,
+            invitation_store: Arc::new(NoopInvitationStore),
             setup: Arc::new(setup),
             pending: PendingMap::new(),
             lease_export_keys: Arc::new(Mutex::new(HashMap::new())),
             rate_limiter: RateLimiter::new(RateLimitConfig::disabled()),
         }
+    }
+
+    /// Builder-style setter for the invitation store. Replaces the
+    /// default [`NoopInvitationStore`] with the supplied implementation.
+    /// The production binary sets this via [`AuthState::new`] /
+    /// [`AuthState::new_arc`] using [`SeaOrmInvitationStore`].
+    pub fn with_invitation_store(mut self, store: Arc<dyn InvitationStore + Send + Sync>) -> Self {
+        self.invitation_store = store;
+        self
     }
 
     /// Builder-style setter for the rate limiter config. Replaces the
@@ -246,6 +308,7 @@ pub fn build_auth_router(state: AuthState) -> Router {
         .route("/auth/register/finish", post(register_finish))
         .route("/auth/login/start", post(login_start))
         .route("/auth/login/finish", post(login_finish))
+        .route("/internal/invitations", post(create_internal_invitation))
         .with_state(state)
 }
 
@@ -464,6 +527,10 @@ struct RegisterFinishRequest {
     #[serde(default, rename = "credential_identifier")]
     _credential_identifier: Option<String>,
     registration_upload: String,
+    /// OTP issued by the admin at tenant-creation time. Required when the
+    /// tenant has an active (unconsumed, unexpired) invitation.
+    #[serde(default)]
+    otp: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -504,6 +571,67 @@ async fn register_finish(
             return internal(format!("database error: {err}"));
         }
     };
+
+    // OTP gate: if the tenant has an active invitation, the presented OTP
+    // must match. Tenants without any active invitation can register freely
+    // (backward-compat for tenants created before the invitation system).
+    let now = Utc::now();
+    let has_invitation = match state
+        .invitation_store
+        .has_active_invitation(tenant_id, now)
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            warn!("{PREFIX} auth/register/finish: invitation store error: {err}");
+            return internal(format!("database error: {err}"));
+        }
+    };
+
+    if has_invitation {
+        let otp = match &body.otp {
+            Some(o) => o.as_str(),
+            None => {
+                warn!(
+                    "{PREFIX} auth/register/finish: rejected — OTP required for tenant={}",
+                    body.tenant
+                );
+                return bad_request("an invitation OTP is required to register this tenant");
+            }
+        };
+        match state
+            .invitation_store
+            .verify_and_consume(tenant_id, otp, now)
+            .await
+        {
+            Ok(()) => {}
+            Err(OtpVerifyError::InvalidOtp) => {
+                warn!(
+                    "{PREFIX} auth/register/finish: rejected — invalid OTP for tenant={}",
+                    body.tenant
+                );
+                return bad_request("invalid OTP");
+            }
+            Err(OtpVerifyError::Expired) => {
+                warn!(
+                    "{PREFIX} auth/register/finish: rejected — expired OTP for tenant={}",
+                    body.tenant
+                );
+                return bad_request("invitation OTP has expired");
+            }
+            Err(OtpVerifyError::AlreadyConsumed) => {
+                warn!(
+                    "{PREFIX} auth/register/finish: rejected — already-consumed OTP for tenant={}",
+                    body.tenant
+                );
+                return bad_request("invitation OTP has already been used");
+            }
+            Err(OtpVerifyError::Db(err)) => {
+                warn!("{PREFIX} auth/register/finish: invitation db error: {err}");
+                return internal(format!("database error: {err}"));
+            }
+        }
+    }
 
     let upload_bytes = match b64_decode("registration_upload", &body.registration_upload) {
         Ok(b) => b,
@@ -900,6 +1028,69 @@ pub(crate) async fn login_finish_inner(
         expires_at: row.expires_at,
         lease_id: row.id,
     })
+}
+
+// ---------------------------------------------------------------------------
+// POST /internal/invitations
+// ---------------------------------------------------------------------------
+//
+// Internal endpoint (no auth required — callers must be network-isolated).
+// API calls this when `POST /api/tenants` creates a new tenant to mint a
+// single-use, time-limited OTP for the tenant to claim their reserved name.
+//
+// Returns the plaintext OTP in the response body **once**. The hash is stored
+// in the DB; the plaintext is never persisted.
+
+#[derive(Debug, Deserialize)]
+struct CreateInvitationRequest {
+    tenant_id: Uuid,
+    /// Optional TTL override in seconds. Defaults to
+    /// [`INVITATION_DEFAULT_TTL_SECONDS`].
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateInvitationResponse {
+    /// The plaintext OTP. Returned once; never stored. Admin must relay
+    /// this to the tenant out-of-band.
+    otp: String,
+    /// UTC expiry time of the invitation.
+    expires_at: chrono::DateTime<Utc>,
+}
+
+async fn create_internal_invitation(
+    State(state): State<AuthState>,
+    Json(body): Json<CreateInvitationRequest>,
+) -> Response {
+    let now = Utc::now();
+    let ttl_seconds = body.ttl_seconds.unwrap_or(INVITATION_DEFAULT_TTL_SECONDS);
+    let expires_at = now + chrono::Duration::seconds(ttl_seconds as i64);
+
+    let otp = generate_otp();
+    let otp_hash = hash_otp(&otp);
+
+    match state
+        .invitation_store
+        .insert_invitation(body.tenant_id, &otp_hash, expires_at, now)
+        .await
+    {
+        Ok(_id) => {
+            info!(
+                "{PREFIX} internal/invitations: created invitation for tenant_id={}",
+                body.tenant_id
+            );
+            (
+                StatusCode::CREATED,
+                Json(CreateInvitationResponse { otp, expires_at }),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            warn!("{PREFIX} internal/invitations: db error: {err}");
+            internal(format!("database error: {err}"))
+        }
+    }
 }
 
 #[cfg(test)]

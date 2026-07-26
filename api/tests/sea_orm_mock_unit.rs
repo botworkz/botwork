@@ -7,7 +7,8 @@ use axum::response::IntoResponse;
 use botwork_api::store::sea_orm_impl::SeaOrmApiStore;
 use botwork_api::store::ApiStore;
 use botwork_api::{
-    build_router, AppState, ControlPlaneClient, SecretStoreClient, SessionBrokerClient,
+    build_router, AppState, ControlPlaneClient, InvitationClient, SecretStoreClient,
+    SessionBrokerClient,
 };
 use botwork_entity::{agent_session, plugin, session_worker, tenant, workspace, workspace_plugin};
 use chrono::{DateTime, Utc};
@@ -23,6 +24,7 @@ fn app_state_with_db(db: DatabaseConnection) -> AppState {
         control_plane: ControlPlaneClient::disabled(),
         secret_store: SecretStoreClient::disabled(),
         session_broker: SessionBrokerClient::disabled(),
+        invitation_client: InvitationClient::disabled(),
     }
 }
 
