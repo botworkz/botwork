@@ -597,7 +597,6 @@ impl InvitationStore for MockInvitationStore {
 // endpoint-level unit tests rely on, so its parity with the real store
 // matters for those tests to be meaningful.
 
-#[cfg(any(test, feature = "test-support"))]
 #[cfg(test)]
 mod tests {
     use super::*;

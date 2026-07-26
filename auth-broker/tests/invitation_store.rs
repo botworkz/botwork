@@ -81,7 +81,7 @@ async fn start_postgres() -> Result<
         .get_host_port_ipv4(5432)
         .await
         .map_err(|err| format!("port: {err}"))?;
-    let url = format!("******{host}:{port}/botwork");
+    let url = format!("postgres://botwork:test@{host}:{port}/botwork");
     Ok((container, url))
 }
 
