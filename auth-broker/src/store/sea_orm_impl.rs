@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 use crate::auth::invitation::{
     has_active_invitation as db_has_active_invitation, insert_invitation as db_insert_invitation,
+    renew_invitation as db_renew_invitation,
+    revoke_invitations_for_tenant as db_revoke_invitations_for_tenant,
     verify_and_consume as db_verify_and_consume, OtpVerifyError,
 };
 use crate::auth::lease::{
@@ -214,5 +216,23 @@ impl InvitationStore for SeaOrmInvitationStore {
         now: DateTime<Utc>,
     ) -> Result<(), OtpVerifyError> {
         db_verify_and_consume(&*self.db, tenant_id, otp, now).await
+    }
+
+    async fn revoke_invitations_for_tenant(
+        &self,
+        tenant_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<u64, DbErr> {
+        db_revoke_invitations_for_tenant(&*self.db, tenant_id, now).await
+    }
+
+    async fn renew_invitation(
+        &self,
+        tenant_id: Uuid,
+        otp_hash: &str,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, DbErr> {
+        db_renew_invitation(&*self.db, tenant_id, otp_hash, expires_at, now).await
     }
 }

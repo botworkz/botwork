@@ -10,6 +10,7 @@
 //! ```text
 //!    (create_tenant)                              (register/finish)
 //!    INSERT ──► consumed_at IS NULL ──► UPDATE consumed_at ──► (audit retain)
+//!               revoked_at IS NULL ──► UPDATE revoked_at ──► (audit retain)
 //! ```
 //!
 //! ## Hash, not OTP plaintext
@@ -25,6 +26,14 @@
 //! The verify+consume step atomically UPDATEs to non-NULL via a conditional
 //! UPDATE that checks `consumed_at IS NULL`. A claimed invitation is retained
 //! for audit; the GC reaper (fast-follow, not v1) will sweep old rows.
+//!
+//! ## Revocation
+//!
+//! [`Model::revoked_at`] is `NULL` while the invitation is live. An admin can
+//! revoke outstanding invitations via `POST /api/tenant/{tenant}/invitation/revoke`,
+//! which sets `revoked_at` to the current timestamp on all active rows for the
+//! tenant. A revoked invitation is retained for audit. Revoked rows are excluded
+//! from the active-invitation check and rejected by verify+consume.
 //!
 //! ## `ON DELETE` semantics
 //!
@@ -50,6 +59,10 @@ pub struct Model {
     /// `NULL` while unclaimed. Set to a wall-clock timestamp on first successful
     /// verify+consume; the row then sits as terminal audit state.
     pub consumed_at: Option<ChronoDateTimeUtc>,
+    /// `NULL` while the invitation is live. Set to a wall-clock timestamp when
+    /// an admin revokes the invitation via the renew/revoke endpoints. A non-NULL
+    /// value is terminal (invitation inert but retained for audit).
+    pub revoked_at: Option<ChronoDateTimeUtc>,
     /// Row creation time. Immutable.
     pub created_at: ChronoDateTimeUtc,
 }

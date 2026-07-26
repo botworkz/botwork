@@ -210,6 +210,7 @@ async fn migrator_up_lands_v0_schema_and_is_idempotent() {
         "m20260624_000001_create_auth_tables".to_owned(),
         "m20260625_000001_create_plugin_image_facet".to_owned(),
         "m20260725_000001_create_invitations".to_owned(),
+        "m20260726_000001_add_revoked_at_to_invitation".to_owned(),
     ];
     assert_eq!(
         applied_migration_names(&db).await,
@@ -1287,9 +1288,9 @@ async fn assert_invitation_schema(db: &DatabaseConnection) {
 
     db.execute(Statement::from_string(
         backend,
-        "INSERT INTO invitation (id, tenant_id, otp_hash, expires_at, consumed_at, created_at) \
+        "INSERT INTO invitation (id, tenant_id, otp_hash, expires_at, consumed_at, revoked_at, created_at) \
          VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000060', 'deadbeef', \
-                 now() + interval '7 days', NULL, now())"
+                 now() + interval '7 days', NULL, NULL, now())"
             .to_owned(),
     ))
     .await
@@ -1304,6 +1305,16 @@ async fn assert_invitation_schema(db: &DatabaseConnection) {
     ))
     .await
     .expect("consumed_at update must succeed (column is nullable)");
+
+    // 2a. revoked_at is nullable: verify it can be set to a non-null value.
+    db.execute(Statement::from_string(
+        backend,
+        "UPDATE invitation SET revoked_at = now() \
+         WHERE tenant_id = '00000000-0000-0000-0000-000000000060'"
+            .to_owned(),
+    ))
+    .await
+    .expect("revoked_at update must succeed (column is nullable)");
 
     // 3. CASCADE: deleting the tenant must cascade-delete the invitation row.
     db.execute(Statement::from_string(
