@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbErr, EntityTrait,
-    QueryFilter,
+    QueryFilter, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -130,6 +130,7 @@ pub async fn insert_invitation(
         otp_hash: Set(otp_hash.to_owned()),
         expires_at: Set(expires_at),
         consumed_at: Set(None),
+        revoked_at: Set(None),
         created_at: Set(now),
     }
     .insert(db)
@@ -137,8 +138,8 @@ pub async fn insert_invitation(
     Ok(id)
 }
 
-/// Returns `true` if the tenant has at least one unconsumed, unexpired
-/// invitation row.
+/// Returns `true` if the tenant has at least one unconsumed, unexpired,
+/// unrevoked invitation row.
 pub async fn has_active_invitation(
     db: &impl ConnectionTrait,
     tenant_id: Uuid,
@@ -148,6 +149,7 @@ pub async fn has_active_invitation(
         .filter(invitation::Column::TenantId.eq(tenant_id))
         .filter(invitation::Column::ConsumedAt.is_null())
         .filter(invitation::Column::ExpiresAt.gt(now))
+        .filter(invitation::Column::RevokedAt.is_null())
         .one(db)
         .await?;
     Ok(row.is_some())
@@ -199,6 +201,12 @@ pub async fn verify_and_consume(
         return Err(OtpVerifyError::Expired);
     }
 
+    // Step 2.5: check not revoked. Treat as opaque "invalid" to avoid leaking
+    // that the OTP was valid but subsequently revoked (enumeration guard).
+    if row.revoked_at.is_some() {
+        return Err(OtpVerifyError::InvalidOtp);
+    }
+
     // Step 3: check not already consumed.
     if row.consumed_at.is_some() {
         return Err(OtpVerifyError::AlreadyConsumed);
@@ -220,6 +228,55 @@ pub async fn verify_and_consume(
     }
 
     Ok(())
+}
+
+/// Mark all outstanding (unconsumed, unexpired, unrevoked) invitations for a
+/// tenant as revoked.
+///
+/// Returns the number of rows affected. Idempotent: returns `Ok(0)` when
+/// there are no active invitations to revoke.
+pub async fn revoke_invitations_for_tenant(
+    db: &impl ConnectionTrait,
+    tenant_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, DbErr> {
+    let result = invitation::Entity::update_many()
+        .col_expr(invitation::Column::RevokedAt, Expr::value(now))
+        .filter(invitation::Column::TenantId.eq(tenant_id))
+        .filter(invitation::Column::ConsumedAt.is_null())
+        .filter(invitation::Column::ExpiresAt.gt(now))
+        .filter(invitation::Column::RevokedAt.is_null())
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected)
+}
+
+/// Atomically revoke all outstanding invitations for the tenant and insert a
+/// fresh one.
+///
+/// The revoke + insert is performed inside a single database transaction so
+/// the tenant never transitions through a state with no live invitation; the
+/// caller sees one all-or-nothing result.
+///
+/// `otp_hash` is the caller-computed SHA-256 hex string (see [`hash_otp`]).
+/// Returns the UUID of the newly inserted row.
+pub async fn renew_invitation(
+    db: &impl TransactionTrait,
+    tenant_id: Uuid,
+    otp_hash: &str,
+    expires_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<Uuid, DbErr> {
+    let txn = db.begin().await?;
+
+    // Revoke all outstanding invitations first.
+    revoke_invitations_for_tenant(&txn, tenant_id, now).await?;
+
+    // Insert the fresh invitation.
+    let id = insert_invitation(&txn, tenant_id, otp_hash, expires_at, now).await?;
+
+    txn.commit().await?;
+    Ok(id)
 }
 
 #[cfg(test)]

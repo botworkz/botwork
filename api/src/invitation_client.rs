@@ -94,6 +94,22 @@ struct MintInvitationResponse {
     expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Serialize)]
+struct RenewInvitationRequest {
+    tenant_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+struct RenewInvitationResponse {
+    otp: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct RevokeInvitationsRequest {
+    tenant_id: Uuid,
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -206,6 +222,91 @@ impl InvitationClient {
         } else {
             let text = resp.text().await.unwrap_or_default();
             warn!("{PREFIX} invitation_client: auth-broker returned {status}: {text}");
+            Err(InvitationClientError::Unavailable(format!(
+                "auth-broker returned {status}: {text}"
+            )))
+        }
+    }
+
+    /// Renew an invitation OTP for `tenant_id`.
+    ///
+    /// Calls `POST {endpoint}/internal/invitations/renew`. Atomically revokes
+    /// any outstanding invitation and mints a fresh one. Returns the new
+    /// plaintext OTP and its expiry time on success.
+    ///
+    /// When disabled, returns the fixed placeholder [`DISABLED_OTP`]
+    /// without making a network call.
+    pub async fn renew_invitation(
+        &self,
+        tenant_id: Uuid,
+    ) -> Result<(String, chrono::DateTime<chrono::Utc>), InvitationClientError> {
+        if self.disabled {
+            info!("{PREFIX} invitation_client: disabled — returning placeholder OTP for renew tenant_id={tenant_id}");
+            let placeholder_expires = chrono::Utc::now() + chrono::Duration::days(7);
+            return Ok((DISABLED_OTP.to_string(), placeholder_expires));
+        }
+
+        let url = format!("{}/internal/invitations/renew", self.endpoint);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&RenewInvitationRequest { tenant_id })
+            .send()
+            .await
+            .map_err(|e| {
+                warn!("{PREFIX} invitation_client: transport error on renew: {e}");
+                InvitationClientError::Unavailable(e.to_string())
+            })?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let body: RenewInvitationResponse = resp.json().await.map_err(|e| {
+                warn!("{PREFIX} invitation_client: failed to parse renew response: {e}");
+                InvitationClientError::Unavailable(format!("parse error: {e}"))
+            })?;
+            Ok((body.otp, body.expires_at))
+        } else {
+            let text = resp.text().await.unwrap_or_default();
+            warn!("{PREFIX} invitation_client: auth-broker returned {status} on renew: {text}");
+            Err(InvitationClientError::Unavailable(format!(
+                "auth-broker returned {status}: {text}"
+            )))
+        }
+    }
+
+    /// Revoke all outstanding invitations for `tenant_id`.
+    ///
+    /// Calls `POST {endpoint}/internal/invitations/revoke`. Idempotent:
+    /// succeeds even if there are no active invitations to revoke.
+    ///
+    /// When disabled, returns `Ok(())` without making a network call
+    /// (no active invitations exist in the disabled/break-glass state).
+    pub async fn revoke_invitations(&self, tenant_id: Uuid) -> Result<(), InvitationClientError> {
+        if self.disabled {
+            info!(
+                "{PREFIX} invitation_client: disabled — skipping revoke for tenant_id={tenant_id}"
+            );
+            return Ok(());
+        }
+
+        let url = format!("{}/internal/invitations/revoke", self.endpoint);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&RevokeInvitationsRequest { tenant_id })
+            .send()
+            .await
+            .map_err(|e| {
+                warn!("{PREFIX} invitation_client: transport error on revoke: {e}");
+                InvitationClientError::Unavailable(e.to_string())
+            })?;
+
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            let text = resp.text().await.unwrap_or_default();
+            warn!("{PREFIX} invitation_client: auth-broker returned {status} on revoke: {text}");
             Err(InvitationClientError::Unavailable(format!(
                 "auth-broker returned {status}: {text}"
             )))

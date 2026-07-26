@@ -34,6 +34,7 @@ pub mod m20260622_000002_create_session_worker;
 pub mod m20260624_000001_create_auth_tables;
 pub mod m20260625_000001_create_plugin_image_facet;
 pub mod m20260725_000001_create_invitations;
+pub mod m20260726_000001_add_revoked_at_to_invitation;
 
 /// The migrator.
 pub struct Migrator;
@@ -49,6 +50,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260624_000001_create_auth_tables::Migration),
             Box::new(m20260625_000001_create_plugin_image_facet::Migration),
             Box::new(m20260725_000001_create_invitations::Migration),
+            Box::new(m20260726_000001_add_revoked_at_to_invitation::Migration),
         ]
     }
 }
