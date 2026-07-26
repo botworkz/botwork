@@ -64,6 +64,7 @@ pub const DISABLE_ENV: &str = "BOTWORK_API_DISABLE_SECRET_STORE";
 /// to respond is broken; returning 503 immediately is the right
 /// operator-facing behaviour.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Failure modes for secret-store calls. Each variant maps 1:1 onto
 /// an [`ApiError`] in the handler layer.
@@ -181,6 +182,28 @@ impl SecretStoreClient {
     /// the disabled path is unambiguous in the journal.
     pub fn is_disabled(&self) -> bool {
         self.disabled
+    }
+
+    /// Side-effect-free readiness probe.
+    ///
+    /// Uses `GET /secrets` as a connectivity check; method-mismatch
+    /// (405) still proves the backend is reachable and routing.
+    /// Disabled clients are intentionally bypassed and therefore ready.
+    pub async fn ready(&self) -> Result<(), String> {
+        if self.disabled {
+            return Ok(());
+        }
+        let url = format!("{}/secrets", self.endpoint);
+        let resp = tokio::time::timeout(READINESS_TIMEOUT, self.http.get(&url).send())
+            .await
+            .map_err(|_| format!("timeout contacting {url}"))?
+            .map_err(|err| format!("transport error contacting {url}: {err}"))?;
+        let status = resp.status();
+        if status.is_success() || status == StatusCode::METHOD_NOT_ALLOWED {
+            Ok(())
+        } else {
+            Err(format!("GET {url} returned {status}"))
+        }
     }
 
     /// Store a secret in the backend.
@@ -640,5 +663,30 @@ mod tests {
             format!("{}", SecretStoreError::BadRequest("bad".to_string())),
             "bad_request: bad"
         );
+    }
+
+    #[tokio::test]
+    async fn ready_disabled_is_ready() {
+        let client = SecretStoreClient::disabled();
+        client.ready().await.expect("disabled is ready");
+    }
+
+    #[tokio::test]
+    async fn ready_unreachable_is_unready() {
+        let client = SecretStoreClient::with_endpoint("http://127.0.0.1:1");
+        let err = client.ready().await.expect_err("unready");
+        assert!(err.contains("transport error") || err.contains("timeout"));
+    }
+
+    #[tokio::test]
+    async fn ready_reachable_method_mismatch_is_ready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/secrets"))
+            .respond_with(ResponseTemplate::new(405))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        client.ready().await.expect("ready");
     }
 }
