@@ -110,9 +110,10 @@ pub struct AuthState {
 /// tenants that were created before the invitation system was introduced
 /// can still register without presenting an OTP.
 ///
-/// `insert_invitation` and `verify_and_consume` return errors; the
-/// former is only reached via the new `POST /internal/invitations`
-/// endpoint, which requires the real SeaORM store in production.
+/// `insert_invitation`, `verify_and_consume`, `renew_invitation`, and
+/// `revoke_invitations_for_tenant` return errors; they are only reached via
+/// the internal invitation endpoints, which require the real SeaORM store in
+/// production.
 struct NoopInvitationStore;
 
 #[async_trait::async_trait]
@@ -144,6 +145,28 @@ impl InvitationStore for NoopInvitationStore {
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), OtpVerifyError> {
         Err(OtpVerifyError::InvalidOtp)
+    }
+
+    async fn revoke_invitations_for_tenant(
+        &self,
+        _tenant_id: Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, sea_orm::DbErr> {
+        Err(sea_orm::DbErr::Custom(
+            "NoopInvitationStore: invitation revocation disabled".into(),
+        ))
+    }
+
+    async fn renew_invitation(
+        &self,
+        _tenant_id: Uuid,
+        _otp_hash: &str,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Uuid, sea_orm::DbErr> {
+        Err(sea_orm::DbErr::Custom(
+            "NoopInvitationStore: invitation renewal disabled".into(),
+        ))
     }
 }
 
@@ -309,6 +332,14 @@ pub fn build_auth_router(state: AuthState) -> Router {
         .route("/auth/login/start", post(login_start))
         .route("/auth/login/finish", post(login_finish))
         .route("/internal/invitations", post(create_internal_invitation))
+        .route(
+            "/internal/invitations/renew",
+            post(renew_internal_invitation),
+        )
+        .route(
+            "/internal/invitations/revoke",
+            post(revoke_internal_invitations),
+        )
         .with_state(state)
 }
 
@@ -1088,6 +1119,105 @@ async fn create_internal_invitation(
         }
         Err(err) => {
             warn!("{PREFIX} internal/invitations: db error: {err}");
+            internal(format!("database error: {err}"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /internal/invitations/renew
+// ---------------------------------------------------------------------------
+//
+// Atomically revoke all outstanding invitations for the tenant and mint a
+// fresh one. Returns the new plaintext OTP once; the hash is stored, the
+// plaintext is never persisted.
+
+#[derive(Debug, Deserialize)]
+struct RenewInvitationRequest {
+    tenant_id: Uuid,
+    /// Optional TTL override in seconds. Defaults to
+    /// [`INVITATION_DEFAULT_TTL_SECONDS`].
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+
+async fn renew_internal_invitation(
+    State(state): State<AuthState>,
+    Json(body): Json<RenewInvitationRequest>,
+) -> Response {
+    let now = Utc::now();
+    let ttl_seconds = body.ttl_seconds.unwrap_or(INVITATION_DEFAULT_TTL_SECONDS);
+    let expires_at = now + chrono::Duration::seconds(ttl_seconds as i64);
+
+    let otp = generate_otp();
+    let otp_hash = hash_otp(&otp);
+
+    match state
+        .invitation_store
+        .renew_invitation(body.tenant_id, &otp_hash, expires_at, now)
+        .await
+    {
+        Ok(_id) => {
+            info!(
+                "{PREFIX} internal/invitations/renew: renewed invitation for tenant_id={}",
+                body.tenant_id
+            );
+            (
+                StatusCode::OK,
+                Json(CreateInvitationResponse { otp, expires_at }),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            warn!("{PREFIX} internal/invitations/renew: db error: {err}");
+            internal(format!("database error: {err}"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /internal/invitations/revoke
+// ---------------------------------------------------------------------------
+//
+// Revoke all outstanding (unconsumed, unexpired) invitations for the tenant
+// without minting a replacement. Idempotent: revoking when there are none
+// is a success (returns 0 affected rows).
+
+#[derive(Debug, Deserialize)]
+struct RevokeInvitationsRequest {
+    tenant_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+struct RevokeInvitationsResponse {
+    /// Number of invitation rows that were revoked.
+    revoked: u64,
+}
+
+async fn revoke_internal_invitations(
+    State(state): State<AuthState>,
+    Json(body): Json<RevokeInvitationsRequest>,
+) -> Response {
+    let now = Utc::now();
+
+    match state
+        .invitation_store
+        .revoke_invitations_for_tenant(body.tenant_id, now)
+        .await
+    {
+        Ok(n) => {
+            info!(
+                "{PREFIX} internal/invitations/revoke: revoked {n} invitation(s) for tenant_id={}",
+                body.tenant_id
+            );
+            (
+                StatusCode::OK,
+                Json(RevokeInvitationsResponse { revoked: n }),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            warn!("{PREFIX} internal/invitations/revoke: db error: {err}");
             internal(format!("database error: {err}"))
         }
     }

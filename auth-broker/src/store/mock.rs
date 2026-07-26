@@ -404,6 +404,7 @@ pub struct MockInvitation {
     pub otp_hash: String,
     pub expires_at: DateTime<Utc>,
     pub consumed_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 /// In-memory invitation store for unit tests.
@@ -438,6 +439,7 @@ impl MockInvitationStore {
             otp_hash: otp_hash.into(),
             expires_at,
             consumed_at: None,
+            revoked_at: None,
         });
         id
     }
@@ -484,7 +486,10 @@ impl InvitationStore for MockInvitationStore {
     ) -> Result<bool, DbErr> {
         let guard = self.invitations.lock().unwrap();
         let found = guard.iter().any(|inv| {
-            inv.tenant_id == tenant_id && inv.consumed_at.is_none() && inv.expires_at > now
+            inv.tenant_id == tenant_id
+                && inv.consumed_at.is_none()
+                && inv.revoked_at.is_none()
+                && inv.expires_at > now
         });
         Ok(found)
     }
@@ -514,6 +519,10 @@ impl InvitationStore for MockInvitationStore {
         if inv.expires_at <= now {
             return Err(OtpVerifyError::Expired);
         }
+        // Treat revoked as invalid (opaque — don't leak that the OTP existed).
+        if inv.revoked_at.is_some() {
+            return Err(OtpVerifyError::InvalidOtp);
+        }
         if inv.consumed_at.is_some() {
             return Err(OtpVerifyError::AlreadyConsumed);
         }
@@ -521,5 +530,59 @@ impl InvitationStore for MockInvitationStore {
         // Consume.
         guard[pos].consumed_at = Some(now);
         Ok(())
+    }
+
+    async fn revoke_invitations_for_tenant(
+        &self,
+        tenant_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<u64, DbErr> {
+        let mut guard = self.invitations.lock().unwrap();
+        let mut count = 0u64;
+        for inv in guard.iter_mut() {
+            if inv.tenant_id == tenant_id
+                && inv.consumed_at.is_none()
+                && inv.revoked_at.is_none()
+                && inv.expires_at > now
+            {
+                inv.revoked_at = Some(now);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn renew_invitation(
+        &self,
+        tenant_id: Uuid,
+        otp_hash: &str,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, DbErr> {
+        if let Some(msg) = &self.insert_error {
+            return Err(DbErr::Custom(msg.clone()));
+        }
+        // Revoke existing, then insert. The mutex guard covers both steps
+        // atomically within the in-process test environment.
+        let mut guard = self.invitations.lock().unwrap();
+        for inv in guard.iter_mut() {
+            if inv.tenant_id == tenant_id
+                && inv.consumed_at.is_none()
+                && inv.revoked_at.is_none()
+                && inv.expires_at > now
+            {
+                inv.revoked_at = Some(now);
+            }
+        }
+        let id = Uuid::new_v4();
+        guard.push(MockInvitation {
+            id,
+            tenant_id,
+            otp_hash: otp_hash.to_owned(),
+            expires_at,
+            consumed_at: None,
+            revoked_at: None,
+        });
+        Ok(id)
     }
 }

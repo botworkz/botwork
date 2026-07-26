@@ -149,9 +149,9 @@ pub trait InvitationStore: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<Uuid, DbErr>;
 
-    /// Return `true` if the tenant has at least one unconsumed, unexpired
-    /// invitation. Used at `register/finish` to decide whether an OTP is
-    /// required (gate only applies when an invitation exists).
+    /// Return `true` if the tenant has at least one unconsumed, unexpired,
+    /// unrevoked invitation. Used at `register/finish` to decide whether an
+    /// OTP is required (gate only applies when an invitation exists).
     async fn has_active_invitation(
         &self,
         tenant_id: Uuid,
@@ -166,4 +166,27 @@ pub trait InvitationStore: Send + Sync {
         otp: &str,
         now: DateTime<Utc>,
     ) -> Result<(), OtpVerifyError>;
+
+    /// Mark all outstanding (unconsumed, unexpired, unrevoked) invitations for
+    /// the tenant as revoked. Returns the number of rows affected. Idempotent:
+    /// returns `Ok(0)` when there are no active invitations to revoke.
+    async fn revoke_invitations_for_tenant(
+        &self,
+        tenant_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<u64, DbErr>;
+
+    /// Atomically revoke all outstanding invitations for the tenant and insert
+    /// a fresh one. The caller generates the plaintext OTP and passes only its
+    /// hash. Returns the UUID of the newly inserted row.
+    ///
+    /// Revoke + insert is performed as a single transaction so the tenant never
+    /// has no live invitation on a partial failure.
+    async fn renew_invitation(
+        &self,
+        tenant_id: Uuid,
+        otp_hash: &str,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, DbErr>;
 }
