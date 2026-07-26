@@ -52,6 +52,12 @@ pub const DISABLED_OTP: &str = "DISABLED";
 /// client timeouts in this crate.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Short timeout used by the `/readyz` reachability probe.
+///
+/// Intentionally shorter than `HTTP_TIMEOUT` so `/readyz` stays
+/// snappy even when auth-broker is hanging.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Failure modes for invitation mint calls.
 #[derive(Debug)]
 pub enum InvitationClientError {
@@ -187,6 +193,34 @@ impl InvitationClient {
         self.disabled
     }
 
+    /// Side-effect-free reachability probe used by `/readyz`.
+    ///
+    /// Returns `Ok(())` immediately when the client is disabled.
+    /// Otherwise performs a bounded `GET` to the auth-broker base
+    /// endpoint; any HTTP response (even 4xx/5xx) means the server
+    /// is up and the TCP/HTTP stack is functional. Only a transport
+    /// error (connection refused, timeout) returns `Err`.
+    ///
+    /// This probe intentionally does NOT `POST /internal/invitations`
+    /// — that would mint an invitation, which is a side-effecting
+    /// operation that must not happen on a readiness check.
+    pub async fn ready(&self) -> Result<(), InvitationClientError> {
+        if self.disabled {
+            return Ok(());
+        }
+        let probe = reqwest::Client::builder()
+            .timeout(PROBE_TIMEOUT)
+            .build()
+            .expect("probe client build");
+        match probe.get(&self.endpoint).send().await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                warn!("{PREFIX} invitation_client: ready() probe failed: {e}");
+                Err(InvitationClientError::Unavailable(e.to_string()))
+            }
+        }
+    }
+
     /// Mint an invitation OTP for `tenant_id`.
     ///
     /// Calls `POST {endpoint}/internal/invitations`, returns the
@@ -311,5 +345,76 @@ impl InvitationClient {
                 "auth-broker returned {status}: {text}"
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn ready_disabled_is_ok_without_network_call() {
+        let client = InvitationClient::disabled();
+        // Must return Ok immediately — no network required.
+        client
+            .ready()
+            .await
+            .expect("disabled client is always ready");
+    }
+
+    #[tokio::test]
+    async fn ready_unreachable_endpoint_is_err() {
+        // Port 1 (tcpmux) is virtually never open — connection will be refused.
+        let client = InvitationClient::with_endpoint("http://127.0.0.1:1");
+        let err = client
+            .ready()
+            .await
+            .expect_err("unreachable must be unready");
+        assert!(
+            matches!(err, InvitationClientError::Unavailable(_)),
+            "unreachable must produce Unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_reachable_server_is_ok() {
+        let server = MockServer::start().await;
+        // Mount a catch-all GET handler; any response means reachable.
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = InvitationClient::with_endpoint(server.uri());
+        client.ready().await.expect("reachable server must be ok");
+    }
+
+    /// Confirm the probe is side-effect-free: calling `ready()` must
+    /// not issue a POST to /internal/invitations (which would mint an
+    /// invitation).
+    #[tokio::test]
+    async fn ready_probe_does_not_mint_invitation() {
+        let server = MockServer::start().await;
+        // Only register a GET handler; a POST would fall through to
+        // wiremock's default 404 — but more importantly we assert
+        // zero requests to /internal/invitations below.
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = InvitationClient::with_endpoint(server.uri());
+        client.ready().await.expect("probe ok");
+        // Assert no call was made to the invitation-mint path.
+        let received = server.received_requests().await.expect("requests");
+        assert!(
+            received
+                .iter()
+                .all(|r| r.url.path() != "/internal/invitations"),
+            "ready() must not POST to /internal/invitations"
+        );
     }
 }

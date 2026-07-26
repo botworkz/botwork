@@ -561,6 +561,92 @@ mod tests {
         assert_eq!(unreachable_json["status"], "ok");
         assert_eq!(unreachable_json["db"], "unreachable");
     }
+
+    #[tokio::test]
+    async fn livez_always_returns_200() {
+        // livez must return 200 regardless of any state — no dependencies checked.
+        let state = crate::test_support::app_state_with_mock_db(MockDatabase::new(
+            DatabaseBackend::Postgres,
+        ));
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/livez")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_200_when_all_deps_disabled_and_db_reachable() {
+        // With all external clients disabled and a healthy mock DB,
+        // /readyz must return 200 "ready".
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }]),
+        );
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["checks"]["db"], "ok");
+        // All external clients are disabled in the mock app state.
+        assert_eq!(body["checks"]["auth_broker"], "disabled");
+        assert_eq!(body["checks"]["control_plane"], "disabled");
+        assert_eq!(body["checks"]["secret_store"], "disabled");
+        assert_eq!(body["checks"]["session_broker"], "disabled");
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_503_when_db_unreachable() {
+        // DB probe failure must produce 503 "not_ready".
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_exec_errors([DbErr::Custom("db down".to_string())]),
+        );
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["checks"]["db"], "unready");
+    }
 }
 
 // ── helpers used by read + write handlers ──────────────────────────
@@ -737,10 +823,141 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(body))
 }
 
+// ── livez (process is up; no dependency checks) ────────────────────
+
+/// Liveness probe.
+///
+/// Returns `200 OK` unconditionally once the process is serving.
+/// Does NOT check any downstream dependencies. Use this for
+/// container restart decisions (liveness != readiness).
+async fn livez() -> impl IntoResponse {
+    StatusCode::OK
+}
+
+// ── readyz (all required dependencies reachable) ───────────────────
+
+/// Readiness probe response body.
+#[derive(Debug, Serialize)]
+struct ReadyzResponse {
+    /// `"ready"` when all checks pass, `"not_ready"` otherwise.
+    status: &'static str,
+    /// Per-dependency status: `"ok"`, `"disabled"`, or `"unready"`.
+    checks: ReadyzChecks,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadyzChecks {
+    db: &'static str,
+    auth_broker: &'static str,
+    control_plane: &'static str,
+    secret_store: &'static str,
+    session_broker: &'static str,
+}
+
+/// Run a `SELECT 1` probe against the DB pool.
+async fn probe_db(db: &DatabaseConnection) -> bool {
+    let backend = db.get_database_backend();
+    let stmt = Statement::from_string(backend, "SELECT 1".to_owned());
+    db.execute(stmt).await.is_ok()
+}
+
+/// Readiness probe.
+///
+/// Runs all dependency probes concurrently and returns:
+/// * `200 OK` — all required deps are ready or explicitly disabled.
+/// * `503 Service Unavailable` — at least one dep is unready; the
+///   body names it so orchestrators can act on the specific failure.
+///
+/// The endpoint is unauthenticated and safe to poll in a tight loop:
+/// all probes are side-effect-free and bounded by short timeouts so
+/// the handler always returns promptly even when a dep is hanging.
+async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    // Snapshot disabled flags synchronously before spawning concurrent probes
+    // so the status field can distinguish "disabled" from "ok".
+    let inv_disabled = state.invitation_client.is_disabled();
+    let cp_disabled = state.control_plane.is_disabled();
+    let ss_disabled = state.secret_store.is_disabled();
+    let sb_disabled = state.session_broker.is_disabled();
+
+    // Run all probes concurrently; each carries its own short timeout.
+    let (db_ok, inv_ok, cp_ok, ss_ok, sb_ok) = tokio::join!(
+        probe_db(&state.db),
+        async { state.invitation_client.ready().await.is_ok() },
+        async { state.control_plane.ready().await.is_ok() },
+        async { state.secret_store.ready().await.is_ok() },
+        async { state.session_broker.ready().await.is_ok() },
+    );
+
+    // Map each result to a display string.
+    let db_status = if db_ok { "ok" } else { "unready" };
+    let auth_broker_status = if inv_disabled {
+        "disabled"
+    } else if inv_ok {
+        "ok"
+    } else {
+        "unready"
+    };
+    let control_plane_status = if cp_disabled {
+        "disabled"
+    } else if cp_ok {
+        "ok"
+    } else {
+        "unready"
+    };
+    let secret_store_status = if ss_disabled {
+        "disabled"
+    } else if ss_ok {
+        "ok"
+    } else {
+        "unready"
+    };
+    let session_broker_status = if sb_disabled {
+        "disabled"
+    } else if sb_ok {
+        "ok"
+    } else {
+        "unready"
+    };
+
+    let all_ready = [
+        db_status,
+        auth_broker_status,
+        control_plane_status,
+        secret_store_status,
+        session_broker_status,
+    ]
+    .iter()
+    .all(|&s| s == "ok" || s == "disabled");
+
+    let (status_code, status_str) = if all_ready {
+        (StatusCode::OK, "ready")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "not_ready")
+    };
+
+    (
+        status_code,
+        Json(ReadyzResponse {
+            status: status_str,
+            checks: ReadyzChecks {
+                db: db_status,
+                auth_broker: auth_broker_status,
+                control_plane: control_plane_status,
+                secret_store: secret_store_status,
+                session_broker: session_broker_status,
+            },
+        }),
+    )
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         // Unauthed liveness probe.
         .route("/api/health", get(health))
+        // Process-up liveness probe (no dependency checks).
+        .route("/livez", get(livez))
+        // Dependency-aware readiness probe.
+        .route("/readyz", get(readyz))
         .merge(read::router())
         .merge(write::router())
         .with_state(state)

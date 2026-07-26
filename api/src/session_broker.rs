@@ -49,6 +49,9 @@ pub const DISABLE_ENV: &str = "BOTWORK_API_DISABLE_SESSION_BROKER_EVICT";
 /// Per-request timeout for the session-broker eviction call.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Short timeout used by the `/readyz` reachability probe.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Lightweight HTTP client that signals session-broker to evict all live
 /// sessions for a given tenant.
 ///
@@ -117,6 +120,29 @@ impl SessionBrokerClient {
     /// `true` if the client is disabled.
     pub fn is_disabled(&self) -> bool {
         self.disabled
+    }
+
+    /// Side-effect-free reachability probe used by `/readyz`.
+    ///
+    /// Returns `Ok(())` immediately when the client is disabled.
+    /// Otherwise performs a bounded `GET` to the session-broker base
+    /// endpoint; any HTTP response means the server is reachable.
+    /// Only a transport error (connection refused, timeout) returns `Err`.
+    pub async fn ready(&self) -> Result<(), EvictError> {
+        if self.disabled {
+            return Ok(());
+        }
+        let probe = reqwest::Client::builder()
+            .timeout(PROBE_TIMEOUT)
+            .build()
+            .expect("probe client build");
+        match probe.get(&self.endpoint).send().await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                warn!("{PREFIX} session-broker: ready() probe failed: {e}");
+                Err(EvictError(e.to_string()))
+            }
+        }
     }
 
     /// Signal session-broker to evict all live sessions for `tenant`.
@@ -255,5 +281,36 @@ mod tests {
     fn evict_error_display_is_prefixed_for_logs() {
         let err = EvictError("POST http://x returned 503: down".into());
         assert!(format!("{err}").starts_with("session-broker evict failed: "));
+    }
+
+    #[tokio::test]
+    async fn ready_disabled_is_ok_without_network_call() {
+        let client = SessionBrokerClient::disabled();
+        client
+            .ready()
+            .await
+            .expect("disabled client is always ready");
+    }
+
+    #[tokio::test]
+    async fn ready_unreachable_endpoint_is_err() {
+        let client = SessionBrokerClient::with_endpoint("http://127.0.0.1:1");
+        let err = client
+            .ready()
+            .await
+            .expect_err("unreachable must be unready");
+        assert!(err.0.contains("error") || !err.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ready_reachable_server_is_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = SessionBrokerClient::with_endpoint(server.uri());
+        client.ready().await.expect("reachable server must be ok");
     }
 }

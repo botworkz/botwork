@@ -65,6 +65,9 @@ pub const DISABLE_ENV: &str = "BOTWORK_API_DISABLE_SECRET_STORE";
 /// operator-facing behaviour.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Short timeout used by the `/readyz` reachability probe.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Failure modes for secret-store calls. Each variant maps 1:1 onto
 /// an [`ApiError`] in the handler layer.
 ///
@@ -181,6 +184,29 @@ impl SecretStoreClient {
     /// the disabled path is unambiguous in the journal.
     pub fn is_disabled(&self) -> bool {
         self.disabled
+    }
+
+    /// Side-effect-free reachability probe used by `/readyz`.
+    ///
+    /// Returns `Ok(())` immediately when the client is disabled.
+    /// Otherwise performs a bounded `GET` to the secret-store base
+    /// endpoint; any HTTP response means the server is reachable.
+    /// Only a transport error (connection refused, timeout) returns `Err`.
+    pub async fn ready(&self) -> Result<(), SecretStoreError> {
+        if self.disabled {
+            return Ok(());
+        }
+        let probe = reqwest::Client::builder()
+            .timeout(PROBE_TIMEOUT)
+            .build()
+            .expect("probe client build");
+        match probe.get(&self.endpoint).send().await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                warn!("{PREFIX} secret-store: ready() probe failed: {e}");
+                Err(SecretStoreError::Unavailable(e.to_string()))
+            }
+        }
     }
 
     /// Store a secret in the backend.
@@ -640,5 +666,36 @@ mod tests {
             format!("{}", SecretStoreError::BadRequest("bad".to_string())),
             "bad_request: bad"
         );
+    }
+
+    #[tokio::test]
+    async fn ready_disabled_is_ok_without_network_call() {
+        let client = SecretStoreClient::disabled();
+        client
+            .ready()
+            .await
+            .expect("disabled client is always ready");
+    }
+
+    #[tokio::test]
+    async fn ready_unreachable_endpoint_is_err() {
+        let client = SecretStoreClient::with_endpoint("http://127.0.0.1:1");
+        let err = client
+            .ready()
+            .await
+            .expect_err("unreachable must be unready");
+        assert!(matches!(err, SecretStoreError::Unavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn ready_reachable_server_is_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = SecretStoreClient::with_endpoint(server.uri());
+        client.ready().await.expect("reachable server must be ok");
     }
 }

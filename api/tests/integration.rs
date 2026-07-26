@@ -2073,3 +2073,97 @@ async fn revoke_invitation_broker_unavailable_returns_500_internal() {
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["error"]["code"], "internal");
 }
+
+// ── livez / readyz ─────────────────────────────────────────────────
+//
+// These tests exercise the truthful readiness surface added to give
+// orchestrators (systemd, the import preflight, load balancers) a
+// signal for when api can actually service dependency-bearing write
+// paths, not merely when it has bound its port.
+//
+// Test matrix:
+//   1. /livez always 200 (no dependency checks).
+//   2. /readyz 200 when all deps are disabled-or-ready.
+//   3. /readyz 503 naming auth-broker when invitation client is unreachable
+//      (this is the exact incident condition that caused the boot failure).
+
+/// `/livez` must return 200 regardless of downstream state.
+///
+/// The standard spawn_server() uses disabled clients; livez must not
+/// contact any of them — it must be a pure process-up signal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn livez_returns_200() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED livez_returns_200: docker not reachable");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!("{}/livez", server.base))
+        .send()
+        .await
+        .expect("GET /livez");
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// `/readyz` must return 200 when all deps are disabled (break-glass
+/// or test posture) and the DB is reachable.
+///
+/// `spawn_server()` already uses disabled clients for all external
+/// services, so this directly tests the all-ready path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readyz_returns_200_when_all_deps_disabled() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("IGNORED readyz_returns_200_when_all_deps_disabled: docker not reachable");
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!("{}/readyz", server.base))
+        .send()
+        .await
+        .expect("GET /readyz");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["checks"]["db"], "ok");
+    assert_eq!(body["checks"]["auth_broker"], "disabled");
+    assert_eq!(body["checks"]["control_plane"], "disabled");
+    assert_eq!(body["checks"]["secret_store"], "disabled");
+    assert_eq!(body["checks"]["session_broker"], "disabled");
+}
+
+/// `/readyz` must return 503 naming `auth_broker` as `"unready"` when
+/// the invitation client points at an unreachable endpoint.
+///
+/// This pins the exact incident condition: api has bound its port and
+/// reports ready to systemd, but auth-broker is not yet up so the
+/// first `POST /api/tenants` returns 500. With `/readyz`, orchestrators
+/// can gate on this check instead of relying on the port-bind signal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readyz_returns_503_with_auth_broker_unready_when_invitation_client_unreachable() {
+    // Port 1 (tcpmux) is virtually never open — connection will be refused.
+    let unreachable = InvitationClient::with_endpoint("http://127.0.0.1:1");
+    let Some(server) = spawn_server_with_invitation_client(unreachable).await else {
+        eprintln!(
+            "IGNORED readyz_returns_503_with_auth_broker_unready_when_invitation_client_unreachable: \
+             docker not reachable"
+        );
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!("{}/readyz", server.base))
+        .send()
+        .await
+        .expect("GET /readyz");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["status"], "not_ready");
+    assert_eq!(
+        body["checks"]["auth_broker"], "unready",
+        "auth_broker must be named unready when invitation client is unreachable"
+    );
+    // DB and all other disabled deps must still report correctly.
+    assert_eq!(body["checks"]["db"], "ok");
+    assert_eq!(body["checks"]["control_plane"], "disabled");
+    assert_eq!(body["checks"]["secret_store"], "disabled");
+    assert_eq!(body["checks"]["session_broker"], "disabled");
+}
