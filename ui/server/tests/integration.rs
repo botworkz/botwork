@@ -2,7 +2,7 @@
 //!
 //! Asserts:
 //!
-//! * `/healthz` returns 200 + the JSON `{ "status": "ok" }`.
+//! * `/health` returns 200 + the JSON `{ "status": "ok" }`.
 //! * `/admin/` returns 200 with `content-type: text/html` AND
 //!   the body contains a marker string from the trunk-emitted
 //!   `index.html`. If trunk hasn't been run before `cargo test`
@@ -46,11 +46,11 @@ async fn spawn_server() -> Server {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn healthz_responds_ok() {
+async fn health_responds_ok() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/healthz", server.base))
+        .get(format!("{}/health", server.base))
         .send()
         .await
         .expect("GET");

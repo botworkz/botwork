@@ -24,7 +24,7 @@ ui/
     ├── Cargo.toml
     ├── src/
     │   ├── lib.rs        ← module docs + build_router export
-    │   ├── handler.rs    ← include_dir! + /healthz, /login, /{tenant}/*
+    │   ├── handler.rs    ← include_dir! + /health, /login, /{tenant}/*
     │   └── main.rs       ← env-driven bind + axum::serve
     └── tests/
         └── integration.rs
@@ -47,7 +47,7 @@ ui/
 
 | Path | Behaviour |
 |------|-----------|
-| `GET /healthz` | `{ "status": "ok" }` — liveness probe |
+| `GET /health` | `{ "status": "ok" }` — liveness probe |
 | `GET /login` | SPA shell (login page) |
 | `GET /static/*` | Static assets from embedded bundle |
 | `GET /{tenant}` | SPA shell (redirects to `/{tenant}/` client-side) |

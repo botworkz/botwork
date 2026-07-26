@@ -2,7 +2,7 @@
 //!
 //! # Routes (Phase 2 reshape — botworkz/space#311)
 //!
-//! * `GET /healthz` — liveness probe. Returns `{ "status": "ok" }`.
+//! * `GET /health` — liveness probe. Returns `{ "status": "ok" }`.
 //! * `GET /login` and `GET /login/` — serve the SPA shell from the
 //!   embedded `dist/index.html`. The SPA client-side router handles
 //!   the login page at this path.
@@ -21,7 +21,7 @@
 //! The bundle is pulled from `ui/wasm/dist/` at compile time via
 //! [`include_dir!`]. If `dist/` is missing or empty at compile time
 //! the build still succeeds but the resulting binary serves only
-//! `/healthz` — every SPA path 404s. The integration test asserts
+//! `/health` — every SPA path 404s. The integration test asserts
 //! that `index.html` is actually present so this failure mode is loud
 //! in CI, not a runtime mystery.
 
@@ -41,7 +41,7 @@ const PREFIX: &str = "[ui]";
 /// `ui/server/`; up one level and across into `wasm/dist/`.
 ///
 /// If this path doesn't exist at compile time the macro produces an
-/// empty `Dir`, and only `/healthz` will respond.
+/// empty `Dir`, and only `/health` will respond.
 static BUNDLE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../wasm/dist");
 
 #[derive(Debug, Serialize)]
@@ -49,7 +49,7 @@ struct HealthBody {
     status: &'static str,
 }
 
-async fn healthz() -> impl IntoResponse {
+async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(HealthBody { status: "ok" }))
 }
 
@@ -122,7 +122,7 @@ fn serve_path(rel: &str) -> Response {
 /// the same routes against `127.0.0.1:0`.
 pub fn build_router() -> Router {
     Router::new()
-        .route("/healthz", get(healthz))
+        .route("/health", get(health))
         // Login page — serves SPA shell; client-side router handles login UI.
         .route("/login", get(index))
         .route("/login/", get(index))

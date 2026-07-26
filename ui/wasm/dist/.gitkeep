@@ -11,7 +11,7 @@
 #      populated directory via `include_dir!`.
 #
 # If `cargo build` runs before `trunk build` the server binary still
-# compiles but only `/healthz` works. The integration test asserts a
+# compiles but only `/health` works. The integration test asserts a
 # marker string from a real index.html and emits an IGNORED line when
 # the marker is missing, so this failure mode is loud in CI (which
 # always runs trunk first) and silent locally for contributors who
