@@ -14,6 +14,8 @@ tenant layout described below.
 
 ```text
 GET /api/health                                          → { status, db }   (unauthed)
+GET /livez                                               → { status }       (unauthed)
+GET /readyz                                              → { status, dependencies, unready } (unauthed)
 
 # Admin-gated (requires x-botwork-admin: true from auth-broker)
 GET  /api/tenants                                        → { items: [...], total }

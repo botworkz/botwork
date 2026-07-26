@@ -10,7 +10,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -310,8 +310,13 @@ pub async fn delete_secret(
     }
 }
 
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+}
+
 pub fn build_secrets_router(state: AppState) -> Router {
     Router::new()
+        .route("/health", get(health))
         .route("/secrets", post(store))
         .route("/secrets/{service}/{name}", delete(delete_secret))
         .with_state(state)
@@ -362,4 +367,47 @@ async fn resolve_active_lease(state: &AppState, tenant: &str) -> Result<ActiveLe
         tenant_id,
         export_key,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use botwork_opaque_handshake::ServerSetup;
+    use http::Request;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    use crate::store::mock::{MockLeaseStore, MockPasswordFileStore, MockTenantStore};
+
+    fn bare_state() -> AppState {
+        let auth = crate::auth::AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::new()),
+            Arc::new(MockPasswordFileStore::new()),
+            ServerSetup::generate(&mut rand::rng()),
+        );
+        AppState::with_auth(std::env::temp_dir(), auth)
+    }
+
+    #[tokio::test]
+    async fn health_returns_200_with_status_ok() {
+        let app = build_secrets_router(bare_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["status"], "ok");
+    }
 }

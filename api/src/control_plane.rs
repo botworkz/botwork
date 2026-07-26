@@ -71,6 +71,7 @@ pub const DISABLE_ENV: &str = "BOTWORK_API_DISABLE_LIVE_GATE";
 /// right operator-facing behaviour — a control-plane that's >8s
 /// behind on writes is already broken.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Failure modes for the live-state gate. Each variant maps 1:1 onto
 /// an [`ApiError`] in the handler layer.
@@ -161,6 +162,28 @@ impl ControlPlaneClient {
     /// the disabled path is unambiguous in the journal.
     pub fn is_disabled(&self) -> bool {
         self.disabled
+    }
+
+    /// Side-effect-free readiness probe.
+    ///
+    /// GETs `/health` on the control-plane endpoint. A `2xx` response means
+    /// the service is up; a transport error, timeout, or non-2xx means unready.
+    /// Disabled clients are intentionally bypassed and therefore ready.
+    pub async fn ready(&self) -> Result<(), String> {
+        if self.disabled {
+            return Ok(());
+        }
+        let url = format!("{}/health", self.endpoint);
+        let resp = tokio::time::timeout(READINESS_TIMEOUT, self.http.get(&url).send())
+            .await
+            .map_err(|_| format!("timeout contacting {url}"))?
+            .map_err(|err| format!("transport error contacting {url}: {err}"))?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(format!("GET {url} returned {status}"))
+        }
     }
 
     /// List live sessions matching the `(tenant, workspace, plugin)`
@@ -416,6 +439,44 @@ mod tests {
             .await
             .expect_err("unavailable");
         assert!(matches!(err, GateError::Unavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn ready_disabled_is_ready() {
+        let client = ControlPlaneClient::disabled();
+        client.ready().await.expect("disabled is ready");
+    }
+
+    #[tokio::test]
+    async fn ready_unreachable_is_unready() {
+        let client = ControlPlaneClient::with_endpoint("http://127.0.0.1:1");
+        let err = client.ready().await.expect_err("unready");
+        assert!(err.contains("transport error") || err.contains("timeout"));
+    }
+
+    #[tokio::test]
+    async fn ready_health_200_is_ready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = ControlPlaneClient::with_endpoint(server.uri());
+        client.ready().await.expect("ready");
+    }
+
+    #[tokio::test]
+    async fn ready_health_non_2xx_is_unready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = ControlPlaneClient::with_endpoint(server.uri());
+        let err = client.ready().await.expect_err("unready on 500");
+        assert!(err.contains("500"));
     }
 
     #[test]

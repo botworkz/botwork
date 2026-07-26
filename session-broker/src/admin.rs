@@ -12,9 +12,14 @@ use crate::AppState;
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/health", get(health))
         .route("/sessions", get(get_sessions))
         .route("/evict-tenant/{tenant}", post(evict_tenant))
         .with_state(state)
+}
+
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
 
 pub async fn serve_admin(state: AppState, addr: &str) -> Result<(), String> {
@@ -235,5 +240,26 @@ mod tests {
             .await
             .expect_err("invalid address should fail");
         assert!(err.contains("failed to bind admin HTTP server"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn health_returns_200_with_status_ok() {
+        let app = build_router(bare_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["status"], "ok");
     }
 }
