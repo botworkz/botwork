@@ -75,7 +75,6 @@ enum Command {
         password_stdin: bool,
     },
     /// Operator-flow OPAQUE registration. Run once per tenant.
-    /// Registration is invitation-gated; `--invitation` is required.
     Register {
         /// Read the password from stdin (no prompt, no confirm).
         #[arg(long)]
