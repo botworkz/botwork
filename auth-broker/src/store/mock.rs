@@ -404,6 +404,7 @@ pub struct MockInvitation {
     pub otp_hash: String,
     pub expires_at: DateTime<Utc>,
     pub consumed_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 /// In-memory invitation store for unit tests.
@@ -438,6 +439,7 @@ impl MockInvitationStore {
             otp_hash: otp_hash.into(),
             expires_at,
             consumed_at: None,
+            revoked_at: None,
         });
         id
     }
@@ -484,7 +486,10 @@ impl InvitationStore for MockInvitationStore {
     ) -> Result<bool, DbErr> {
         let guard = self.invitations.lock().unwrap();
         let found = guard.iter().any(|inv| {
-            inv.tenant_id == tenant_id && inv.consumed_at.is_none() && inv.expires_at > now
+            inv.tenant_id == tenant_id
+                && inv.consumed_at.is_none()
+                && inv.revoked_at.is_none()
+                && inv.expires_at > now
         });
         Ok(found)
     }
@@ -514,6 +519,10 @@ impl InvitationStore for MockInvitationStore {
         if inv.expires_at <= now {
             return Err(OtpVerifyError::Expired);
         }
+        // Treat revoked as invalid (opaque — don't leak that the OTP existed).
+        if inv.revoked_at.is_some() {
+            return Err(OtpVerifyError::InvalidOtp);
+        }
         if inv.consumed_at.is_some() {
             return Err(OtpVerifyError::AlreadyConsumed);
         }
@@ -521,5 +530,345 @@ impl InvitationStore for MockInvitationStore {
         // Consume.
         guard[pos].consumed_at = Some(now);
         Ok(())
+    }
+
+    async fn revoke_invitations_for_tenant(
+        &self,
+        tenant_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<u64, DbErr> {
+        let mut guard = self.invitations.lock().unwrap();
+        let mut count = 0u64;
+        for inv in guard.iter_mut() {
+            if inv.tenant_id == tenant_id
+                && inv.consumed_at.is_none()
+                && inv.revoked_at.is_none()
+                && inv.expires_at > now
+            {
+                inv.revoked_at = Some(now);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn renew_invitation(
+        &self,
+        tenant_id: Uuid,
+        otp_hash: &str,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, DbErr> {
+        if let Some(msg) = &self.insert_error {
+            return Err(DbErr::Custom(msg.clone()));
+        }
+        // Revoke existing, then insert. The mutex guard covers both steps
+        // atomically within the in-process test environment.
+        let mut guard = self.invitations.lock().unwrap();
+        for inv in guard.iter_mut() {
+            if inv.tenant_id == tenant_id
+                && inv.consumed_at.is_none()
+                && inv.revoked_at.is_none()
+                && inv.expires_at > now
+            {
+                inv.revoked_at = Some(now);
+            }
+        }
+        let id = Uuid::new_v4();
+        guard.push(MockInvitation {
+            id,
+            tenant_id,
+            otp_hash: otp_hash.to_owned(),
+            expires_at,
+            consumed_at: None,
+            revoked_at: None,
+        });
+        Ok(id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockInvitationStore parity tests
+// ---------------------------------------------------------------------------
+//
+// These tests verify that MockInvitationStore's in-memory semantics match
+// the SeaORM-backed production behaviour (idempotency, tenant isolation,
+// revoked → InvalidOtp, renew rotation).  The mock is what api-side and
+// endpoint-level unit tests rely on, so its parity with the real store
+// matters for those tests to be meaningful.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::invitation::{hash_otp, OtpVerifyError};
+
+    fn future() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() + chrono::Duration::days(7)
+    }
+
+    fn past() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() - chrono::Duration::hours(1)
+    }
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+
+    // --- has_active_invitation ---
+
+    #[tokio::test]
+    async fn has_active_invitation_returns_false_when_empty() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        assert!(!store.has_active_invitation(tenant_id, now()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn has_active_invitation_returns_true_for_active() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        store.insert(tenant_id, hash_otp("FIXTURE-OTP"), future());
+        assert!(store.has_active_invitation(tenant_id, now()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn has_active_invitation_returns_false_for_expired_row() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        store.insert(tenant_id, hash_otp("OTP"), past());
+        assert!(!store.has_active_invitation(tenant_id, now()).await.unwrap());
+    }
+
+    /// A revoked invitation must be excluded from `has_active_invitation`
+    /// even when it is unexpired and unconsumed.
+    #[tokio::test]
+    async fn has_active_invitation_returns_false_after_revoke() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        store.insert(tenant_id, hash_otp("OTP"), future());
+        store
+            .revoke_invitations_for_tenant(tenant_id, now())
+            .await
+            .unwrap();
+        assert!(
+            !store.has_active_invitation(tenant_id, now()).await.unwrap(),
+            "has_active_invitation must return false after revoke"
+        );
+    }
+
+    #[tokio::test]
+    async fn has_active_invitation_returns_false_after_consume() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        let otp = "CONSUME-ME";
+        store.insert(tenant_id, hash_otp(otp), future());
+        store
+            .verify_and_consume(tenant_id, otp, now())
+            .await
+            .unwrap();
+        assert!(!store.has_active_invitation(tenant_id, now()).await.unwrap());
+    }
+
+    // --- revoke_invitations_for_tenant ---
+
+    #[tokio::test]
+    async fn revoke_returns_affected_count() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        store.insert(tenant_id, hash_otp("OTP1"), future());
+        store.insert(tenant_id, hash_otp("OTP2"), future());
+        let count = store
+            .revoke_invitations_for_tenant(tenant_id, now())
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn revoke_is_idempotent_second_call_returns_zero() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        store.insert(tenant_id, hash_otp("OTP"), future());
+        let first = store
+            .revoke_invitations_for_tenant(tenant_id, now())
+            .await
+            .unwrap();
+        assert_eq!(first, 1);
+        let second = store
+            .revoke_invitations_for_tenant(tenant_id, now())
+            .await
+            .unwrap();
+        assert_eq!(second, 0, "second revoke must be idempotent (Ok(0))");
+    }
+
+    #[tokio::test]
+    async fn revoke_tenant_with_no_active_invitations_returns_zero() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        let count = store
+            .revoke_invitations_for_tenant(tenant_id, now())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "revoking with no active rows must return Ok(0)");
+    }
+
+    #[tokio::test]
+    async fn revoke_does_not_affect_other_tenants() {
+        let store = MockInvitationStore::new();
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+        store.insert(tenant_a, hash_otp("OTP-A"), future());
+        store.insert(tenant_b, hash_otp("OTP-B"), future());
+        let count = store
+            .revoke_invitations_for_tenant(tenant_a, now())
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        // Tenant B must still have an active invitation.
+        assert!(
+            store.has_active_invitation(tenant_b, now()).await.unwrap(),
+            "revoke for tenant_a must not touch tenant_b's invitations"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_does_not_touch_consumed_rows() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        let otp = "ALREADY-CONSUMED";
+        store.insert(tenant_id, hash_otp(otp), future());
+        store
+            .verify_and_consume(tenant_id, otp, now())
+            .await
+            .unwrap();
+        // Now there's a consumed (inactive) row — revoke should return 0.
+        let count = store
+            .revoke_invitations_for_tenant(tenant_id, now())
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "revoke must not touch already-consumed rows (they are not active)"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_does_not_touch_expired_rows() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        // Seed an already-expired invitation (expires_at in the past).
+        store.insert(tenant_id, hash_otp("EXPIRED-OTP"), past());
+        let count = store
+            .revoke_invitations_for_tenant(tenant_id, now())
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "revoke must not touch already-expired rows (they are not active)"
+        );
+    }
+
+    // --- renew_invitation ---
+
+    #[tokio::test]
+    async fn renew_revokes_old_and_inserts_new_leaves_exactly_one_active() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        store.insert(tenant_id, hash_otp("OLD-OTP"), future());
+
+        let new_hash = hash_otp("NEW-OTP");
+        store
+            .renew_invitation(tenant_id, &new_hash, future(), now())
+            .await
+            .unwrap();
+
+        let snap = store.snapshot();
+        let n = now();
+        let active: Vec<_> = snap
+            .iter()
+            .filter(|inv| {
+                inv.tenant_id == tenant_id
+                    && inv.consumed_at.is_none()
+                    && inv.revoked_at.is_none()
+                    && inv.expires_at > n
+            })
+            .collect();
+        assert_eq!(
+            active.len(),
+            1,
+            "renew must leave exactly one active invitation"
+        );
+        assert_eq!(
+            active[0].otp_hash, new_hash,
+            "the surviving invitation must carry the new OTP hash"
+        );
+    }
+
+    /// After renew, the old OTP must return `InvalidOtp` — the same opaque
+    /// variant as "OTP not found" — so an attacker cannot tell whether the
+    /// OTP was revoked or never existed (enumeration guard).
+    #[tokio::test]
+    async fn renew_old_otp_returns_invalid_otp_not_distinct_revoked_variant() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        let old_otp = "OLD-OTP-REVOKED-BY-RENEW";
+        store.insert(tenant_id, hash_otp(old_otp), future());
+
+        store
+            .renew_invitation(tenant_id, &hash_otp("NEW-OTP"), future(), now())
+            .await
+            .unwrap();
+
+        let err = store
+            .verify_and_consume(tenant_id, old_otp, now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OtpVerifyError::InvalidOtp),
+            "old (revoked-by-renew) OTP must return InvalidOtp (enumeration guard), got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn renew_new_otp_verifies_successfully() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        store.insert(tenant_id, hash_otp("OLD-OTP"), future());
+
+        let new_otp = "FRESH-OTP-AFTER-RENEW";
+        let new_hash = hash_otp(new_otp);
+        store
+            .renew_invitation(tenant_id, &new_hash, future(), now())
+            .await
+            .unwrap();
+
+        store
+            .verify_and_consume(tenant_id, new_otp, now())
+            .await
+            .expect("new OTP issued by renew must verify successfully");
+    }
+
+    // --- verify_and_consume: revoked-path guards ---
+
+    /// Explicit revoke (not via renew) must cause the same InvalidOtp response.
+    #[tokio::test]
+    async fn verify_and_consume_revoked_returns_invalid_otp() {
+        let store = MockInvitationStore::new();
+        let tenant_id = Uuid::new_v4();
+        let otp = "WILL-BE-REVOKED";
+        store.insert(tenant_id, hash_otp(otp), future());
+        store
+            .revoke_invitations_for_tenant(tenant_id, now())
+            .await
+            .unwrap();
+
+        let err = store
+            .verify_and_consume(tenant_id, otp, now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OtpVerifyError::InvalidOtp),
+            "explicitly revoked OTP must return InvalidOtp (not a distinct Revoked variant); got: {err:?}"
+        );
     }
 }

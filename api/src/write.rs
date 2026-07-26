@@ -261,6 +261,15 @@ pub fn router() -> Router<AppState> {
         .route("/api/tenants", post(create_tenant))
         .route("/api/tenants/{id}", put(update_tenant))
         .route("/api/tenants/{id}", delete(delete_tenant))
+        // Admin-gated invitation management (renew / revoke OTP for a tenant).
+        .route(
+            "/api/tenant/{tenant}/invitation/renew",
+            post(renew_tenant_invitation),
+        )
+        .route(
+            "/api/tenant/{tenant}/invitation/revoke",
+            post(revoke_tenant_invitation),
+        )
         // Admin-gated plugin CRUD (plugins are globally shared resources).
         .route("/api/plugins", post(create_plugin))
         .route("/api/plugins/{id}", put(update_plugin))
@@ -513,6 +522,102 @@ pub(crate) async fn db_delete_tenant(
     tenant::Entity::delete_by_id(id).exec(&tx).await?;
     tx.commit().await?; // MockDatabase cannot model commit; exercised by api/tests/integration.rs against real Postgres.
     Ok(live)
+}
+
+// ── invitation management ──────────────────────────────────────────
+
+/// Response for `POST /api/tenant/{tenant}/invitation/renew`.
+///
+/// The OTP is returned exactly once and never persisted in plaintext.
+/// The admin must relay it to the tenant out-of-band.
+#[derive(Debug, Serialize)]
+struct InvitationRenewedResponse {
+    /// Plaintext OTP — returned once, never stored.
+    otp: String,
+    /// UTC expiry time of the new invitation.
+    expires_at: DateTime<Utc>,
+}
+
+/// `POST /api/tenant/{tenant}/invitation/renew`
+///
+/// Admin-only. Atomically revokes any outstanding invitation for the tenant
+/// and mints a fresh one. Returns the new plaintext OTP once so it can be
+/// relayed out-of-band. Mirrors the OTP-delivery posture of `create_tenant`.
+async fn renew_tenant_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant_name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&headers)?;
+    let op = operator(&headers);
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
+
+    let (otp, expires_at) = match state.invitation_client.renew_invitation(tenant_id).await {
+        Ok(pair) => pair,
+        Err(InvitationClientError::Disabled) => {
+            // Break-glass / test path — return disabled placeholder.
+            let placeholder_expires = Utc::now() + chrono::Duration::days(7);
+            (
+                crate::invitation_client::DISABLED_OTP.to_string(),
+                placeholder_expires,
+            )
+        }
+        Err(InvitationClientError::Unavailable(msg)) => {
+            tracing::warn!("{PREFIX} renew_tenant_invitation: invitation renew failed: {msg}");
+            return Err(ApiError::Internal {
+                detail: format!("invitation service unavailable: {msg}"),
+            });
+        }
+    };
+
+    audit_event(
+        &op,
+        "renew",
+        "invitation",
+        tenant_id,
+        &format!("tenant={tenant_name:?}"),
+    );
+    Ok((
+        StatusCode::OK,
+        Json(InvitationRenewedResponse { otp, expires_at }),
+    ))
+}
+
+/// `POST /api/tenant/{tenant}/invitation/revoke`
+///
+/// Admin-only. Revokes all outstanding invitations for the tenant without
+/// minting a replacement. Idempotent: succeeds even if there are none.
+/// Returns 204 No Content.
+async fn revoke_tenant_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tenant_name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&headers)?;
+    let op = operator(&headers);
+    let tenant_id = resolve_tenant_id(&state.store, &tenant_name).await?;
+
+    match state.invitation_client.revoke_invitations(tenant_id).await {
+        Ok(()) => {}
+        Err(InvitationClientError::Disabled) => {
+            // Break-glass / test path — no-op success (nothing to revoke).
+        }
+        Err(InvitationClientError::Unavailable(msg)) => {
+            tracing::warn!("{PREFIX} revoke_tenant_invitation: invitation revoke failed: {msg}");
+            return Err(ApiError::Internal {
+                detail: format!("invitation service unavailable: {msg}"),
+            });
+        }
+    }
+
+    audit_event(
+        &op,
+        "revoke",
+        "invitation",
+        tenant_id,
+        &format!("tenant={tenant_name:?}"),
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── workspace ──────────────────────────────────────────────────────
