@@ -365,7 +365,7 @@ fn register_status_error(
     if status == reqwest::StatusCode::CONFLICT {
         return Some(LoginError::AlreadyRegistered(tenant.to_string()));
     }
-    if status == reqwest::StatusCode::BAD_REQUEST && url.ends_with("/auth/register/finish") {
+    if status == reqwest::StatusCode::BAD_REQUEST && is_register_finish_endpoint(url) {
         return Some(LoginError::InvalidInvitation(tenant.to_string()));
     }
     Some(LoginError::UnexpectedStatus {
@@ -378,6 +378,12 @@ fn register_status_error(
 fn truncate_body_bytes(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     truncate_body(text.into_owned())
+}
+
+fn is_register_finish_endpoint(url: &str) -> bool {
+    Url::parse(url)
+        .map(|parsed| parsed.path() == "/auth/register/finish")
+        .unwrap_or(false)
 }
 
 fn truncate_body(mut body: String) -> String {
@@ -671,6 +677,24 @@ mod tests {
                 "phlax"
             ),
             Some(LoginError::InvalidInvitation(ref tenant)) if tenant == "phlax"
+        ));
+        assert!(matches!(
+            register_status_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                "http://x/auth/register/finish?x=1",
+                b"",
+                "phlax"
+            ),
+            Some(LoginError::InvalidInvitation(ref tenant)) if tenant == "phlax"
+        ));
+        assert!(matches!(
+            register_status_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                "http://x/auth/register/start",
+                b"",
+                "phlax"
+            ),
+            Some(LoginError::UnexpectedStatus { status: 400, .. })
         ));
         assert!(register_status_error(reqwest::StatusCode::OK, "http://x", b"", "phlax").is_none());
     }
