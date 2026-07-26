@@ -490,8 +490,13 @@ async fn rollback_after_ack_failure(state: &AppState, session_id: &str, op: &str
     }
 }
 
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/health", get(health))
         .route("/sessions", post(post_session).get(list_sessions))
         .route(
             "/sessions/{session_id}",
@@ -858,5 +863,30 @@ mod tests {
         // Rollback: record is back in the store because envoy never
         // confirmed its removal.
         assert!(sessions.get("mcp_session_abc").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn health_returns_200_with_status_ok() {
+        use axum::body::{to_bytes, Body};
+        use http::Request;
+        use tower::ServiceExt;
+
+        let app = build_router(empty_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["status"], "ok");
     }
 }

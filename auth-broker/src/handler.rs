@@ -889,6 +889,10 @@ async fn api_auth_whoami(State(state): State<AppState>, headers: HeaderMap) -> R
     }
 }
 
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+}
+
 pub fn build_router(state: AppState) -> Router {
     // /auth/{register,login}/* are mounted via the auth subrouter
     // (which is generic over `AuthState`). We compose the
@@ -897,6 +901,7 @@ pub fn build_router(state: AppState) -> Router {
     // round 1a used, kept here so the merge into a fresh
     // `Router::<AppState>` resolves.
     let core = Router::new()
+        .route("/health", get(health))
         .route("/secrets/fetch", post(fetch))
         .route("/auth/lease/wrapped-export-key", get(wrapped_export_key))
         .route("/api/auth/login", post(api_auth_login))
@@ -1202,6 +1207,7 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use chrono::TimeZone;
+    use std::sync::Arc;
 
     // ---------------------------------------------------------------------------
     // success_admin
@@ -1419,5 +1425,43 @@ mod tests {
     #[test]
     fn log_fetch_unauthorized_with_some_cap_does_not_panic() {
         log_fetch_unauthorized("test-reason", Some("abc123def456"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // health
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_returns_200_with_status_ok() {
+        use crate::store::mock::{MockLeaseStore, MockPasswordFileStore, MockTenantStore};
+        use axum::body::Body;
+        use botwork_opaque_handshake::ServerSetup;
+        use http::Request;
+        use tower::ServiceExt;
+
+        let auth = crate::auth::AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::new()),
+            Arc::new(MockPasswordFileStore::new()),
+            ServerSetup::generate(&mut rand::rng()),
+        );
+        let state = crate::cache::AppState::with_auth(std::env::temp_dir(), auth);
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["status"], "ok");
     }
 }
