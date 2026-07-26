@@ -299,7 +299,7 @@ mod tests {
             .ready()
             .await
             .expect_err("unreachable must be unready");
-        assert!(err.0.contains("error") || !err.0.is_empty());
+        assert!(!err.0.is_empty(), "error message should be present");
     }
 
     #[tokio::test]
