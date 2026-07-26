@@ -8,6 +8,12 @@
 //! exactly: idempotent upsert against `(tenant, workspace,
 //! plugin, workspace_plugin)`.
 //!
+//! Before issuing any writes the subcommand polls api's `/readyz`
+//! until it returns 200 (bounded by `--ready-timeout`). This closes
+//! the boot race where `POST /api/tenants` fires before auth-broker
+//! is reachable. The gate is skipped when `--dry-run` or `--no-wait`
+//! is set.
+//!
 //! # Cutover plan
 //!
 //! Round 1 (this commit): adds the subcommand, leaves the old
@@ -19,20 +25,22 @@
 //!
 //! # Exit codes (matches `botwork-bootstrap` for systemd swap-in)
 //!
-//! | Code | Meaning                                                    |
-//! |------|------------------------------------------------------------|
-//! | 0    | apply succeeded (no-op or mutations both count as success) |
-//! | 2    | invalid CLI usage                                          |
-//! | 4    | bootstrap config file missing / read failure               |
-//! | 5    | bootstrap config validation failure                        |
-//! | 6    | api write failed mid-apply                           |
-//! | 7    | api unreachable / 5xx                                |
+//! | Code | Meaning                                                         |
+//! |------|-----------------------------------------------------------------|
+//! | 0    | apply succeeded (no-op or mutations both count as success)      |
+//! | 2    | invalid CLI usage                                               |
+//! | 4    | bootstrap config file missing / read failure                    |
+//! | 5    | bootstrap config validation failure                             |
+//! | 6    | api write failed mid-apply                                      |
+//! | 7    | api unreachable / 5xx / readiness timeout before `apply()`     |
 //!
 //! # CLI shape
 //!
 //! ```text
 //! botctl bootstrap [--config <path>] [--endpoint <url>]
 //!                         [--operator <name>] [--dry-run]
+//!                         [--ready-timeout <secs>] [--ready-interval <secs>]
+//!                         [--no-wait]
 //! ```
 //!
 //! Defaults match the old bootstrap binary's env contract:
@@ -47,7 +55,14 @@
 //!   machine-driven imports from operator UI writes.
 //! * `--dry-run` — validate yaml + plan diffs but issue no writes.
 //!   Exit 0 if the plan would succeed, exit 6 if anything in the
-//!   plan would be a no-op-on-failure.
+//!   plan would be a no-op-on-failure. Skips the readiness gate.
+//! * `--ready-timeout <secs>` — overall readiness wait budget.
+//!   `BOTWORK_BOOTSTRAP_READY_TIMEOUT` or `120` seconds.
+//! * `--ready-interval <secs>` — poll interval between `/readyz`
+//!   probes. `BOTWORK_BOOTSTRAP_READY_INTERVAL` or `2` seconds.
+//! * `--no-wait` — skip the readiness gate entirely. Useful when
+//!   running against an already-up api. Skipping means `apply()`
+//!   fires immediately; any resulting 5xx maps to exit 7 as usual.
 //!
 //! See [`apply`] for the apply algorithm.
 
@@ -55,6 +70,7 @@ pub mod apply;
 pub mod client;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use botwork_api_core::config::LoadError;
 use thiserror::Error;
@@ -81,6 +97,16 @@ pub const DEFAULT_OPERATOR: &str = "bootstrap-import";
 /// bootstrap binary honoured so the systemd cutover is a 1:1 swap.
 pub const CONFIG_PATH_ENV: &str = "BOTWORK_BOOTSTRAP_CONFIG";
 pub const ENDPOINT_ENV: &str = "BOTWORK_API_ENDPOINT";
+pub const READY_TIMEOUT_ENV: &str = "BOTWORK_BOOTSTRAP_READY_TIMEOUT";
+pub const READY_INTERVAL_ENV: &str = "BOTWORK_BOOTSTRAP_READY_INTERVAL";
+
+/// Default readiness poll budget (seconds). Long enough to cover a
+/// cold auth-broker start; short enough to fail the boot loudly
+/// rather than hang forever.
+pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 120;
+
+/// Default interval between `/readyz` probes (seconds).
+pub const DEFAULT_READY_INTERVAL_SECS: u64 = 2;
 
 /// Parsed bootstrap-subcommand args.
 #[derive(Debug, Clone)]
@@ -89,13 +115,25 @@ pub struct Args {
     pub endpoint: String,
     pub operator: String,
     pub dry_run: bool,
+    /// Skip the `/readyz` readiness gate entirely (e.g. when api is
+    /// known-good or testing against a live cluster). When `true`,
+    /// `apply()` fires immediately without polling.
+    pub no_wait: bool,
+    /// Overall budget (seconds) for the readiness gate. If api has not
+    /// responded 200 to `/readyz` within this window, bootstrap exits
+    /// with code 7 without calling `apply()`.
+    pub ready_timeout_secs: u64,
+    /// Pause (seconds) between successive `/readyz` probes.
+    pub ready_interval_secs: u64,
 }
 
 impl Args {
     /// Pure flag-parsing + env-fallback logic. `config_env` and
     /// `endpoint_env` are the already-read values of
     /// [`CONFIG_PATH_ENV`] and [`ENDPOINT_ENV`] respectively (both
-    /// `None` when the variable is unset).
+    /// `None` when the variable is unset). `ready_timeout_env` and
+    /// `ready_interval_env` are the already-read values of
+    /// [`READY_TIMEOUT_ENV`] and [`READY_INTERVAL_ENV`].
     ///
     /// Extracted so tests can inject explicit values without touching
     /// the process-global environment.
@@ -103,11 +141,16 @@ impl Args {
         argv: &[String],
         config_env: Option<String>,
         endpoint_env: Option<String>,
+        ready_timeout_env: Option<String>,
+        ready_interval_env: Option<String>,
     ) -> Result<Self, BootstrapError> {
         let mut config_path: Option<PathBuf> = None;
         let mut endpoint: Option<String> = None;
         let mut operator: Option<String> = None;
         let mut dry_run = false;
+        let mut no_wait = false;
+        let mut ready_timeout: Option<u64> = None;
+        let mut ready_interval: Option<u64> = None;
 
         let mut iter = argv.iter().peekable();
         while let Some(arg) = iter.next() {
@@ -132,6 +175,29 @@ impl Args {
                     operator = Some(v.clone());
                 }
                 "--dry-run" => dry_run = true,
+                "--no-wait" => no_wait = true,
+                "--ready-timeout" => {
+                    let v = iter.next().ok_or(BootstrapError::InvalidUsage(
+                        "--ready-timeout requires a value",
+                    ))?;
+                    let n: u64 = v.parse().map_err(|_| {
+                        BootstrapError::InvalidUsage(
+                            "--ready-timeout value must be a non-negative integer",
+                        )
+                    })?;
+                    ready_timeout = Some(n);
+                }
+                "--ready-interval" => {
+                    let v = iter.next().ok_or(BootstrapError::InvalidUsage(
+                        "--ready-interval requires a value",
+                    ))?;
+                    let n: u64 = v.parse().map_err(|_| {
+                        BootstrapError::InvalidUsage(
+                            "--ready-interval value must be a non-negative integer",
+                        )
+                    })?;
+                    ready_interval = Some(n);
+                }
                 other => {
                     return Err(BootstrapError::InvalidUsage(Box::leak(
                         format!("unknown flag '{other}'").into_boxed_str(),
@@ -150,6 +216,19 @@ impl Args {
                 .unwrap_or_else(|| endpoint_env.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())),
             operator: operator.unwrap_or_else(|| DEFAULT_OPERATOR.to_string()),
             dry_run,
+            no_wait,
+            ready_timeout_secs: ready_timeout.unwrap_or_else(|| {
+                ready_timeout_env
+                    .as_deref()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(DEFAULT_READY_TIMEOUT_SECS)
+            }),
+            ready_interval_secs: ready_interval.unwrap_or_else(|| {
+                ready_interval_env
+                    .as_deref()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(DEFAULT_READY_INTERVAL_SECS)
+            }),
         })
     }
 
@@ -159,6 +238,8 @@ impl Args {
             argv,
             std::env::var(CONFIG_PATH_ENV).ok(),
             std::env::var(ENDPOINT_ENV).ok(),
+            std::env::var(READY_TIMEOUT_ENV).ok(),
+            std::env::var(READY_INTERVAL_ENV).ok(),
         )
     }
 }
@@ -166,18 +247,25 @@ impl Args {
 pub fn help_text() -> &'static str {
     "Usage: botctl bootstrap [--config <path>] [--endpoint <url>]\n\
      \x20                              [--operator <name>] [--dry-run]\n\
+     \x20                              [--ready-timeout <secs>] [--ready-interval <secs>]\n\
+     \x20                              [--no-wait]\n\
      \n\
      Apply a bootstrap.yaml through api. Idempotent: every operation\n\
      is an upsert. Same yaml shape the legacy botwork-bootstrap binary\n\
      consumed; the only difference is the writer side talks HTTP+JSON to\n\
      api instead of sea-orm-writing the DB directly.\n\
      \n\
-     Defaults:\n\
-       --config    BOTWORK_BOOTSTRAP_CONFIG or /etc/botwork/bootstrap.yaml\n\
-       --endpoint  BOTWORK_API_ENDPOINT or http://admin_api:9400\n\
-       --operator  bootstrap-import\n\
+     Before any writes, polls GET /readyz until 200 (bounded by\n\
+     --ready-timeout). Skipped when --dry-run or --no-wait is set.\n\
      \n\
-     Exit codes: 0=ok, 2=usage, 4=file-io, 5=validation, 6=apply, 7=transport"
+     Defaults:\n\
+       --config          BOTWORK_BOOTSTRAP_CONFIG or /etc/botwork/bootstrap.yaml\n\
+       --endpoint        BOTWORK_API_ENDPOINT or http://admin_api:9400\n\
+       --operator        bootstrap-import\n\
+       --ready-timeout   BOTWORK_BOOTSTRAP_READY_TIMEOUT or 120 (seconds)\n\
+       --ready-interval  BOTWORK_BOOTSTRAP_READY_INTERVAL or 2 (seconds)\n\
+     \n\
+     Exit codes: 0=ok, 2=usage, 4=file-io, 5=validation, 6=apply, 7=transport/not-ready"
 }
 
 /// Entry point dispatched from `cli::dispatch`.
@@ -185,6 +273,22 @@ pub fn run(argv: &[String]) -> Result<i32, BootstrapError> {
     let args = Args::from_argv(argv)?;
     let cfg = botwork_api_core::BootstrapConfig::load(&args.config_path)?;
     let client = AdminClient::new(&args.endpoint, &args.operator)?;
+
+    // Poll api's /readyz before issuing any writes so that transient
+    // boot races (e.g. auth-broker not yet reachable) don't cause
+    // apply() to fail. The gate is skipped in --dry-run mode (no
+    // writes, so gating on live readiness is pointless and would break
+    // dry-run in not-yet-booted environments) and when --no-wait is
+    // explicitly set.
+    if !args.dry_run && !args.no_wait {
+        client
+            .wait_until_ready(
+                Duration::from_secs(args.ready_timeout_secs),
+                Duration::from_secs(args.ready_interval_secs),
+            )
+            .map_err(|_| BootstrapError::NotReady(args.ready_timeout_secs))?;
+    }
+
     let outcome = apply::apply(&client, &cfg, args.dry_run)?;
     print_summary(&outcome, args.dry_run);
     Ok(0)
@@ -226,6 +330,10 @@ pub enum BootstrapError {
     Client(#[from] client::ClientError),
     #[error(transparent)]
     Apply(#[from] apply::ApplyError),
+    /// api did not return 200 from `/readyz` within the configured
+    /// timeout. The u64 is the timeout in seconds for the error message.
+    #[error("api did not become ready within {0}s; aborting bootstrap")]
+    NotReady(u64),
 }
 
 impl BootstrapError {
@@ -236,6 +344,7 @@ impl BootstrapError {
             Self::Load(LoadError::NotFound(_)) | Self::Load(LoadError::Read { .. }) => 4,
             Self::Load(LoadError::Parse(_)) | Self::Load(LoadError::Validation(_)) => 5,
             Self::Apply(_) => 6,
+            Self::NotReady(_) => 7,
             Self::Client(client::ClientError::Transport(_)) => 7,
             Self::Client(_) => 6,
         }
@@ -246,7 +355,7 @@ impl BootstrapError {
 mod tests {
     use super::{
         help_text, summary_message, Args, BootstrapError, DEFAULT_CONFIG_PATH, DEFAULT_ENDPOINT,
-        DEFAULT_OPERATOR,
+        DEFAULT_OPERATOR, DEFAULT_READY_INTERVAL_SECS, DEFAULT_READY_TIMEOUT_SECS,
     };
     use crate::bootstrap::apply::ApplyOutcome;
 
@@ -283,9 +392,9 @@ mod tests {
 
     #[test]
     fn empty_argv_uses_all_defaults() {
-        // Pass None for both env overrides so the test is hermetic
+        // Pass None for all env overrides so the test is hermetic
         // regardless of the runner's environment.
-        let args = Args::resolve(&argv(&[]), None, None).expect("parse");
+        let args = Args::resolve(&argv(&[]), None, None, None, None).expect("parse");
         assert_eq!(
             args.config_path.to_str().unwrap(),
             DEFAULT_CONFIG_PATH,
@@ -294,6 +403,15 @@ mod tests {
         assert_eq!(args.endpoint, DEFAULT_ENDPOINT, "default endpoint");
         assert_eq!(args.operator, DEFAULT_OPERATOR, "default operator");
         assert!(!args.dry_run, "dry_run defaults to false");
+        assert!(!args.no_wait, "no_wait defaults to false");
+        assert_eq!(
+            args.ready_timeout_secs, DEFAULT_READY_TIMEOUT_SECS,
+            "default ready timeout"
+        );
+        assert_eq!(
+            args.ready_interval_secs, DEFAULT_READY_INTERVAL_SECS,
+            "default ready interval"
+        );
     }
 
     #[test]
@@ -388,15 +506,27 @@ mod tests {
 
     #[test]
     fn config_path_env_var_used_when_no_flag() {
-        let args = Args::resolve(&argv(&[]), Some("/env/bootstrap.yaml".to_string()), None)
-            .expect("parse");
+        let args = Args::resolve(
+            &argv(&[]),
+            Some("/env/bootstrap.yaml".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("parse");
         assert_eq!(args.config_path.to_str().unwrap(), "/env/bootstrap.yaml");
     }
 
     #[test]
     fn endpoint_env_var_used_when_no_flag() {
-        let args = Args::resolve(&argv(&[]), None, Some("http://env-api:9400".to_string()))
-            .expect("parse");
+        let args = Args::resolve(
+            &argv(&[]),
+            None,
+            Some("http://env-api:9400".to_string()),
+            None,
+            None,
+        )
+        .expect("parse");
         assert_eq!(args.endpoint, "http://env-api:9400");
     }
 
@@ -406,26 +536,11 @@ mod tests {
             &argv(&["--config", "/flag/override.yaml"]),
             Some("/env/bootstrap.yaml".to_string()),
             None,
+            None,
+            None,
         )
         .expect("parse");
         assert_eq!(args.config_path.to_str().unwrap(), "/flag/override.yaml");
-    }
-
-    // --- help_text ---
-
-    #[test]
-    fn help_text_mentions_all_flags() {
-        let text = help_text();
-        assert!(text.contains("--config"), "{text}");
-        assert!(text.contains("--endpoint"), "{text}");
-        assert!(text.contains("--operator"), "{text}");
-        assert!(text.contains("--dry-run"), "{text}");
-    }
-
-    #[test]
-    fn help_text_mentions_exit_codes() {
-        let text = help_text();
-        assert!(text.contains("Exit codes"), "{text}");
     }
 
     // --- BootstrapError::exit_code ---
@@ -438,5 +553,118 @@ mod tests {
     #[test]
     fn invalid_usage_exit_code_is_2() {
         assert_eq!(BootstrapError::InvalidUsage("bad flag").exit_code(), 2);
+    }
+
+    #[test]
+    fn not_ready_exit_code_is_7() {
+        assert_eq!(BootstrapError::NotReady(120).exit_code(), 7);
+    }
+
+    // --- Args::resolve: readiness gate flags ---
+
+    #[test]
+    fn ready_timeout_flag_overrides_default() {
+        let args = Args::from_argv(&argv(&["--ready-timeout", "60"])).expect("parse");
+        assert_eq!(args.ready_timeout_secs, 60);
+    }
+
+    #[test]
+    fn ready_interval_flag_overrides_default() {
+        let args = Args::from_argv(&argv(&["--ready-interval", "5"])).expect("parse");
+        assert_eq!(args.ready_interval_secs, 5);
+    }
+
+    #[test]
+    fn no_wait_flag_sets_no_wait() {
+        let args = Args::from_argv(&argv(&["--no-wait"])).expect("parse");
+        assert!(args.no_wait);
+    }
+
+    #[test]
+    fn ready_timeout_env_used_when_no_flag() {
+        let args =
+            Args::resolve(&argv(&[]), None, None, Some("90".to_string()), None).expect("parse");
+        assert_eq!(args.ready_timeout_secs, 90);
+    }
+
+    #[test]
+    fn ready_interval_env_used_when_no_flag() {
+        let args =
+            Args::resolve(&argv(&[]), None, None, None, Some("3".to_string())).expect("parse");
+        assert_eq!(args.ready_interval_secs, 3);
+    }
+
+    #[test]
+    fn ready_timeout_flag_beats_env() {
+        let args = Args::resolve(
+            &argv(&["--ready-timeout", "45"]),
+            None,
+            None,
+            Some("90".to_string()),
+            None,
+        )
+        .expect("parse");
+        assert_eq!(args.ready_timeout_secs, 45);
+    }
+
+    #[test]
+    fn ready_interval_flag_beats_env() {
+        let args = Args::resolve(
+            &argv(&["--ready-interval", "1"]),
+            None,
+            None,
+            None,
+            Some("5".to_string()),
+        )
+        .expect("parse");
+        assert_eq!(args.ready_interval_secs, 1);
+    }
+
+    #[test]
+    fn ready_timeout_missing_value_returns_invalid_usage() {
+        let err = Args::from_argv(&argv(&["--ready-timeout"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::InvalidUsage(_)));
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn ready_interval_missing_value_returns_invalid_usage() {
+        let err = Args::from_argv(&argv(&["--ready-interval"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::InvalidUsage(_)));
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn ready_timeout_non_numeric_returns_invalid_usage() {
+        let err = Args::from_argv(&argv(&["--ready-timeout", "abc"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::InvalidUsage(_)));
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn ready_interval_non_numeric_returns_invalid_usage() {
+        let err = Args::from_argv(&argv(&["--ready-interval", "not-a-number"])).unwrap_err();
+        assert!(matches!(err, BootstrapError::InvalidUsage(_)));
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    // --- help_text ---
+
+    #[test]
+    fn help_text_mentions_all_flags() {
+        let text = help_text();
+        assert!(text.contains("--config"), "{text}");
+        assert!(text.contains("--endpoint"), "{text}");
+        assert!(text.contains("--operator"), "{text}");
+        assert!(text.contains("--dry-run"), "{text}");
+        assert!(text.contains("--ready-timeout"), "{text}");
+        assert!(text.contains("--ready-interval"), "{text}");
+        assert!(text.contains("--no-wait"), "{text}");
+    }
+
+    #[test]
+    fn help_text_mentions_exit_codes() {
+        let text = help_text();
+        assert!(text.contains("Exit codes"), "{text}");
     }
 }

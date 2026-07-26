@@ -53,7 +53,7 @@
 //!   records the import operator rather than "anonymous" (the API
 //!   reads it from `x-botwork-admin` for all write paths).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client as HttpClient;
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,11 @@ use uuid::Uuid;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Short per-probe timeout for `GET /readyz` readiness checks. Kept
+/// small so a hung api doesn't stall a whole poll interval; the main
+/// `HTTP_TIMEOUT` applies to operational write requests only.
+const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// api thin client. Cloneable; the underlying reqwest pool is
 /// shared. The bootstrap subcommand is serial so a single client
 /// suffices, but `apply.rs` constructs one and threads it through —
@@ -69,6 +74,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub struct AdminClient {
     http: HttpClient,
+    /// Short-timeout client used exclusively for `/readyz` probes.
+    probe: HttpClient,
     endpoint: String,
     operator: String,
 }
@@ -83,8 +90,13 @@ impl AdminClient {
             .timeout(HTTP_TIMEOUT)
             .build()
             .map_err(|err| ClientError::BuildClient(err.to_string()))?;
+        let probe = HttpClient::builder()
+            .timeout(READY_PROBE_TIMEOUT)
+            .build()
+            .map_err(|err| ClientError::BuildClient(err.to_string()))?;
         Ok(Self {
             http,
+            probe,
             endpoint: endpoint.trim_end_matches('/').to_string(),
             operator: operator.to_string(),
         })
@@ -98,6 +110,42 @@ impl AdminClient {
     /// URL for tenant-scoped routes: `{endpoint}/api/tenant/{tenant}{path}`.
     fn tenant_url(&self, tenant: &str, path: &str) -> String {
         format!("{}/api/tenant/{tenant}{path}", self.endpoint)
+    }
+
+    /// Poll `GET {endpoint}/readyz` until api returns HTTP 200 or
+    /// `overall_timeout` elapses.
+    ///
+    /// Each probe uses [`READY_PROBE_TIMEOUT`] so a hung api doesn't
+    /// stall a full poll interval. Non-200 responses (including 503)
+    /// and transport/connection errors are all treated as "not ready
+    /// yet" and cause a retry after `poll_interval`.
+    ///
+    /// Returns `Ok(())` the moment a 200 is received. Returns
+    /// `Err(ReadyTimeout)` if the deadline elapses before a 200; the
+    /// caller should map that to an appropriate exit-code error.
+    pub fn wait_until_ready(
+        &self,
+        overall_timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<(), ReadyTimeout> {
+        let url = format!("{}/readyz", self.endpoint);
+        let deadline = Instant::now() + overall_timeout;
+        loop {
+            let is_ready = self
+                .probe
+                .get(&url)
+                .send()
+                .map(|resp| resp.status() == reqwest::StatusCode::OK)
+                .unwrap_or(false);
+            if is_ready {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(ReadyTimeout);
+            }
+            std::thread::sleep(poll_interval.min(deadline - now));
+        }
     }
 
     pub fn list_tenants(&self) -> Result<Vec<Tenant>, ClientError> {
@@ -419,6 +467,12 @@ pub struct UpdateWorkspacePlugin {
     pub config: Option<serde_json::Value>,
     pub if_unmodified_since: chrono::DateTime<chrono::Utc>,
 }
+
+/// Returned by [`AdminClient::wait_until_ready`] when the overall
+/// deadline elapses before api returns HTTP 200 from `/readyz`.
+#[derive(Debug, Error)]
+#[error("api readiness timeout")]
+pub struct ReadyTimeout;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
