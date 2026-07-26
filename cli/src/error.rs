@@ -9,6 +9,7 @@
 //! | `InvalidLogin`         | 1    |
 //! | `UnknownTenant`        | 1    |
 //! | `AlreadyRegistered`    | 1    |
+//! | `InvalidInvitation`   | 1    |
 //! | `NoLease`              | 1    |
 //! | `LeaseExpired`         | 1    |
 //! | `Config(_)`            | 1    |
@@ -47,6 +48,11 @@ pub enum LoginError {
     /// through OPAQUE registration. The broker returns 409.
     #[error("tenant '{0}' is already registered; use `login` instead of `register`")]
     AlreadyRegistered(String),
+
+    /// `register` was run without a valid invitation OTP for a tenant
+    /// that requires one.
+    #[error("invitation OTP is invalid, expired, already used, or required for tenant '{0}'")]
+    InvalidInvitation(String),
 
     /// `status` / `env` was run for a tenant with no keyring entry.
     #[error("no active lease for tenant '{0}'; run `bw --tenant {0}` first")]
@@ -175,6 +181,7 @@ pub fn exit_code_for(err: &LoginError) -> i32 {
         LoginError::InvalidLogin(_)
         | LoginError::UnknownTenant(_)
         | LoginError::AlreadyRegistered(_)
+        | LoginError::InvalidInvitation(_)
         | LoginError::NoLease(_)
         | LoginError::LeaseExpired { .. }
         | LoginError::InvalidDuration { .. }
@@ -232,6 +239,7 @@ mod tests {
     fn exit_code_categories() {
         assert_eq!(exit_code_for(&LoginError::InvalidLogin("t".into())), 1);
         assert_eq!(exit_code_for(&LoginError::NoLease("t".into())), 1);
+        assert_eq!(exit_code_for(&LoginError::InvalidInvitation("t".into())), 1);
         assert_eq!(
             exit_code_for(&LoginError::LeaseExpired {
                 tenant: "t".into(),
