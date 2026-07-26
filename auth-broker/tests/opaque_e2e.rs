@@ -37,6 +37,9 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use botwork_auth_broker::auth::invitation::{
+    generate_otp, hash_otp, insert_invitation, INVITATION_DEFAULT_TTL_SECONDS,
+};
 use botwork_auth_broker::auth::AuthState;
 use botwork_auth_broker::{build_router, AppState};
 use botwork_entity::lease as lease_entity;
@@ -163,6 +166,17 @@ async fn seed_tenant(db: &DatabaseConnection, name: &str) -> Uuid {
     inserted.id
 }
 
+/// Insert a fresh invitation for the tenant and return the plaintext OTP.
+async fn seed_invitation(db: &DatabaseConnection, tenant_id: Uuid) -> String {
+    let otp = generate_otp();
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::seconds(INVITATION_DEFAULT_TTL_SECONDS as i64);
+    insert_invitation(db, tenant_id, &hash_otp(&otp), expires_at, now)
+        .await
+        .expect("insert invitation");
+    otp
+}
+
 async fn single_lease_id(db: &DatabaseConnection, tenant_id: Uuid) -> Uuid {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let rows = lease_entity::Entity::find()
@@ -174,7 +188,7 @@ async fn single_lease_id(db: &DatabaseConnection, tenant_id: Uuid) -> Uuid {
     rows[0].id
 }
 
-async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
+async fn register(base: &str, tenant: &str, cred: &str, password: &[u8], otp: &str) {
     let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
@@ -203,6 +217,7 @@ async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
         .json(&json!({
             "tenant": tenant,
             "credential_identifier": cred,
+            "otp": otp,
             "registration_upload": URL_SAFE_NO_PAD.encode(cf.upload.serialize()),
         }))
         .send()
@@ -286,7 +301,8 @@ async fn full_register_login_init_put_check_fetch_round_trip() {
     };
 
     let tenant_id = seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let bearer = login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     // Issue #146 acceptance: client uses the wrapped export_key to
@@ -401,8 +417,9 @@ async fn wrong_password_fails_login_with_401() {
             return;
         }
     };
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
 
     let mut rng = rand::rng();
     let cl = client::login_start(&mut rng, b"definitely-the-wrong-password").unwrap();
@@ -486,8 +503,9 @@ async fn v3_vault_load_surfaces_unsupported_version_with_runbook() {
             return;
         }
     };
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let bearer = login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     // Drop a synthetic v3-looking file at the tenant's vault path.
@@ -544,8 +562,9 @@ async fn fresh_tenant_vault_auto_created_on_first_login() {
         }
     };
 
-    seed_tenant(&srv.db, "fresh-tenant").await;
-    register(&srv.base, "fresh-tenant", "fresh-tenant", b"s3cret").await;
+    let tenant_id = seed_tenant(&srv.db, "fresh-tenant").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "fresh-tenant", "fresh-tenant", b"s3cret", &otp).await;
     let bearer = login(&srv.base, "fresh-tenant", "fresh-tenant", b"s3cret").await;
 
     // At this point no vault exists on disk — we deliberately skip

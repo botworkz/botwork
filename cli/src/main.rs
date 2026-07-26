@@ -75,13 +75,15 @@ enum Command {
         password_stdin: bool,
     },
     /// Operator-flow OPAQUE registration. Run once per tenant.
+    /// Registration is invitation-gated; `--invitation` is required.
     Register {
         /// Read the password from stdin (no prompt, no confirm).
         #[arg(long)]
         password_stdin: bool,
-        /// Invitation OTP for invitation-gated tenant registration.
+        /// Invitation OTP issued by the operator at tenant-creation time.
+        /// Registration is invitation-gated; this argument is required.
         #[arg(long, value_name = "OTP")]
-        invitation: Option<String>,
+        invitation: String,
     },
     /// Show the current lease state from the keyring. Offline.
     Status,
@@ -201,6 +203,23 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    #[test]
+    fn register_requires_invitation_flag() {
+        let err = Cli::try_parse_from(["bw", "--tenant", "phlax", "register", "--password-stdin"])
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            ErrorKind::MissingRequiredArgument,
+            "expected MissingRequiredArgument, got {:?}",
+            err.kind()
+        );
+        assert!(
+            err.to_string().contains("--invitation"),
+            "error message should mention --invitation: {}",
+            err
+        );
     }
 
     #[test]
@@ -339,7 +358,7 @@ mod tests {
             cacert: None,
             command: Some(Command::Register {
                 password_stdin: false,
-                invitation: None,
+                invitation: "test-otp".into(),
             }),
         }))
         .unwrap_err();
