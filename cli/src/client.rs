@@ -391,7 +391,11 @@ fn is_register_finish_endpoint(url: &str) -> bool {
 
 fn is_invitation_bad_request(body: &[u8]) -> bool {
     let body = String::from_utf8_lossy(body).to_ascii_lowercase();
-    body.contains("invitation") || body.contains("otp")
+    (body.contains("invitation") && body.contains("otp"))
+        || body.contains("otp is required")
+        || body.contains("invalid otp")
+        || body.contains("otp expired")
+        || body.contains("already consumed")
 }
 
 fn truncate_body(mut body: String) -> String {
