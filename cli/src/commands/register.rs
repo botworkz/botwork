@@ -26,8 +26,9 @@ pub struct RegisterArgs {
     pub cacert: Option<PathBuf>,
     /// Read the password from stdin.
     pub password_stdin: bool,
-    /// Invitation OTP for invitation-gated tenant registration.
-    pub invitation: Option<String>,
+    /// Invitation OTP issued by the operator at tenant-creation time.
+    /// Registration is invitation-gated; this field is required.
+    pub invitation: String,
     /// Library-supplied password — same shape as
     /// [`crate::commands::login::LoginArgs::password`].
     pub password: Option<Zeroizing<Vec<u8>>>,
@@ -57,7 +58,7 @@ pub async fn run(args: RegisterArgs) -> Result<String, LoginError> {
         &args.tenant,
         &resolved.credential_identifier,
         password.as_slice(),
-        args.invitation.as_deref(),
+        Some(&args.invitation),
         args.cacert.as_deref(),
     )
     .await?;

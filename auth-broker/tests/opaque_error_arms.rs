@@ -10,9 +10,12 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use botwork_auth_broker::auth::invitation::hash_otp;
 use botwork_auth_broker::auth::pending::Pending;
 use botwork_auth_broker::auth::{build_auth_router, AuthState, RateLimitConfig, PENDING_TTL};
-use botwork_auth_broker::store::mock::{MockLeaseStore, MockPasswordFileStore, MockTenantStore};
+use botwork_auth_broker::store::mock::{
+    MockInvitationStore, MockLeaseStore, MockPasswordFileStore, MockTenantStore,
+};
 use botwork_entity::{opaque_password_file, tenant};
 use botwork_opaque_handshake::{
     client, server, ClientLoginState, LoginResponse, PasswordFile, ServerSetup,
@@ -95,6 +98,28 @@ fn mock_auth_with_known_tenant(setup: ServerSetup, tenant_id: Uuid) -> AuthState
         Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
         Arc::new(MockPasswordFileStore::new()),
         setup,
+    )
+}
+
+/// Build an `AuthState` with a known tenant and a pre-seeded active invitation
+/// for that tenant. Returns the state and the plaintext OTP to present at
+/// `register/finish`. Use this helper for tests that need to exercise code
+/// paths *after* the OTP gate.
+fn mock_auth_with_invitation(setup: ServerSetup, tenant_id: Uuid, otp: &str) -> AuthState {
+    let inv_store = Arc::new(MockInvitationStore::new());
+    inv_store.insert(
+        tenant_id,
+        hash_otp(otp),
+        Utc::now() + chrono::Duration::days(7),
+    );
+    AuthState::from_stores(
+        Arc::new(MockLeaseStore::new()),
+        Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
+        Arc::new(MockPasswordFileStore::new()),
+        setup,
+    )
+    .with_invitation_store(
+        inv_store as Arc<dyn botwork_auth_broker::store::InvitationStore + Send + Sync>,
     )
 }
 
@@ -425,9 +450,12 @@ async fn register_finish_tenant_store_db_error_returns_500() {
 #[tokio::test]
 async fn register_finish_bad_base64_returns_400() {
     let mut rng = rand::rng();
-    let app = build_auth_router(mock_auth_with_known_tenant(
+    let tenant_id = Uuid::new_v4();
+    let otp = "test-otp-bad-b64";
+    let app = build_auth_router(mock_auth_with_invitation(
         ServerSetup::generate(&mut rng),
-        Uuid::new_v4(),
+        tenant_id,
+        otp,
     ));
 
     let response = send_json(
@@ -436,6 +464,7 @@ async fn register_finish_bad_base64_returns_400() {
         &[],
         json!({
             "tenant": "acme",
+            "otp": otp,
             "registration_upload": "%%%not-base64%%%",
         }),
     )
@@ -459,12 +488,24 @@ async fn register_finish_conflict_returns_409() {
     let upload = make_registration_upload_b64(&setup, &upload_password);
     let stored_password = b"stored-password".to_vec();
     let stored = make_password_file(&setup, &stored_password);
-    let app = build_auth_router(AuthState::from_stores(
-        Arc::new(MockLeaseStore::new()),
-        Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
-        Arc::new(MockPasswordFileStore::with_file(tenant_id, &stored)),
-        setup,
-    ));
+    let otp = "test-otp-conflict";
+    let inv_store = Arc::new(MockInvitationStore::new());
+    inv_store.insert(
+        tenant_id,
+        hash_otp(otp),
+        Utc::now() + chrono::Duration::days(7),
+    );
+    let app = build_auth_router(
+        AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
+            Arc::new(MockPasswordFileStore::with_file(tenant_id, &stored)),
+            setup,
+        )
+        .with_invitation_store(
+            inv_store as Arc<dyn botwork_auth_broker::store::InvitationStore + Send + Sync>,
+        ),
+    );
 
     let response = send_json(
         &app,
@@ -472,6 +513,7 @@ async fn register_finish_conflict_returns_409() {
         &[],
         json!({
             "tenant": "acme",
+            "otp": otp,
             "registration_upload": upload,
         }),
     )
@@ -493,12 +535,24 @@ async fn register_finish_db_error_returns_500() {
     let password = random_password();
     let setup = ServerSetup::generate(&mut rng);
     let upload = make_registration_upload_b64(&setup, &password);
-    let app = build_auth_router(AuthState::from_stores(
-        Arc::new(MockLeaseStore::new()),
-        Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
-        Arc::new(MockPasswordFileStore::always_error("write failed")),
-        setup,
-    ));
+    let otp = "test-otp-db-err";
+    let inv_store = Arc::new(MockInvitationStore::new());
+    inv_store.insert(
+        tenant_id,
+        hash_otp(otp),
+        Utc::now() + chrono::Duration::days(7),
+    );
+    let app = build_auth_router(
+        AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
+            Arc::new(MockPasswordFileStore::always_error("write failed")),
+            setup,
+        )
+        .with_invitation_store(
+            inv_store as Arc<dyn botwork_auth_broker::store::InvitationStore + Send + Sync>,
+        ),
+    );
 
     let response = send_json(
         &app,
@@ -506,6 +560,7 @@ async fn register_finish_db_error_returns_500() {
         &[],
         json!({
             "tenant": "acme",
+            "otp": otp,
             "registration_upload": upload,
         }),
     )
@@ -887,13 +942,14 @@ async fn register_start_success_returns_200() {
 
 /// Valid base64 string that decodes to bytes which are NOT a valid
 /// `RegistrationUpload`: `RegistrationUpload::deserialize` returns
-/// `OpaqueError::Serialization` → bad_request (lines 514–515).
+/// `OpaqueError::Serialization` → bad_request.
 #[tokio::test]
 async fn register_finish_malformed_upload_bytes_returns_400() {
     let mut rng = rand::rng();
     let tenant_id = Uuid::new_v4();
     let setup = ServerSetup::generate(&mut rng);
-    let app = build_auth_router(mock_auth_with_known_tenant(setup, tenant_id));
+    let otp = "test-otp-malformed";
+    let app = build_auth_router(mock_auth_with_invitation(setup, tenant_id, otp));
 
     // Empty string is valid url-safe-base64 (decodes to []) but is NOT
     // a valid serialized RegistrationUpload → Serialization error.
@@ -903,6 +959,7 @@ async fn register_finish_malformed_upload_bytes_returns_400() {
         &[],
         json!({
             "tenant": "acme",
+            "otp": otp,
             "registration_upload": "",
         }),
     )
@@ -914,13 +971,12 @@ async fn register_finish_malformed_upload_bytes_returns_400() {
 }
 
 // ===========================================================================
-// register_finish success path (lines 531–542)
+// register_finish success path
 // ===========================================================================
 
-/// Full register_finish: `MockPasswordFileStore` is empty so
-/// `upsert_password_file` returns `Ok(())`, reaching the `info!` +
-/// `StatusCode::CREATED` + `Json(RegisterFinishResponse {...})` arm
-/// (lines 531–542).
+/// Full register_finish with a valid invitation OTP: `MockPasswordFileStore`
+/// is empty so `upsert_password_file` returns `Ok(())`, yielding 201.
+/// The invitation is consumed (single-use) after success.
 #[tokio::test]
 async fn register_finish_success_returns_201() {
     let mut rng = rand::rng();
@@ -928,7 +984,23 @@ async fn register_finish_success_returns_201() {
     let setup = ServerSetup::generate(&mut rng);
     let password = random_password();
     let upload_b64 = make_registration_upload_b64(&setup, &password);
-    let app = build_auth_router(mock_auth_with_known_tenant(setup, tenant_id));
+    let otp = "test-otp-success";
+    let inv_store = Arc::new(MockInvitationStore::new());
+    inv_store.insert(
+        tenant_id,
+        hash_otp(otp),
+        Utc::now() + chrono::Duration::days(7),
+    );
+    let app = build_auth_router(
+        AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
+            Arc::new(MockPasswordFileStore::new()),
+            setup,
+        )
+        .with_invitation_store(Arc::clone(&inv_store)
+            as Arc<dyn botwork_auth_broker::store::InvitationStore + Send + Sync>),
+    );
 
     let response = send_json(
         &app,
@@ -936,6 +1008,7 @@ async fn register_finish_success_returns_201() {
         &[],
         json!({
             "tenant": "acme",
+            "otp": otp,
             "registration_upload": upload_b64,
         }),
     )
@@ -945,6 +1018,232 @@ async fn register_finish_success_returns_201() {
     let body = response_json(response).await;
     assert_eq!(body["tenant"], "acme");
     assert!(body["suite_version"].is_number(), "got {body}");
+
+    // The invitation must be consumed (single-use): a second registration
+    // with the same OTP must be refused.
+    let response2 = send_json(
+        &app,
+        "/auth/register/finish",
+        &[],
+        json!({
+            "tenant": "acme",
+            "otp": otp,
+            "registration_upload": upload_b64,
+        }),
+    )
+    .await;
+    assert_eq!(
+        response2.status(),
+        StatusCode::BAD_REQUEST,
+        "second use of consumed OTP must be refused"
+    );
+}
+
+// ===========================================================================
+// register_finish OTP invariant tests — security-critical
+// ===========================================================================
+
+/// No OTP in the request body → 400, regardless of whether the tenant has
+/// an active invitation. The OTP is always required.
+#[tokio::test]
+async fn register_finish_no_otp_returns_400() {
+    let mut rng = rand::rng();
+    let tenant_id = Uuid::new_v4();
+    let setup = ServerSetup::generate(&mut rng);
+    let password = random_password();
+    let upload_b64 = make_registration_upload_b64(&setup, &password);
+    // Even with a valid active invitation, omitting the OTP must be refused.
+    let app = build_auth_router(mock_auth_with_invitation(setup, tenant_id, "any-otp"));
+
+    let response = send_json(
+        &app,
+        "/auth/register/finish",
+        &[],
+        json!({
+            "tenant": "acme",
+            "registration_upload": upload_b64,
+            // "otp" intentionally absent
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_json_error(
+        &body,
+        "bad_request",
+        "an invitation OTP is required to register this tenant",
+    );
+}
+
+/// Tenant has no active invitation at all (NoopInvitationStore, which is the
+/// fail-closed default) → 400. Registration must be refused.
+#[tokio::test]
+async fn register_finish_no_active_invitation_returns_400() {
+    let mut rng = rand::rng();
+    let tenant_id = Uuid::new_v4();
+    let setup = ServerSetup::generate(&mut rng);
+    let password = random_password();
+    let upload_b64 = make_registration_upload_b64(&setup, &password);
+    // mock_auth_with_known_tenant uses the NoopInvitationStore (no real invitations).
+    let app = build_auth_router(mock_auth_with_known_tenant(setup, tenant_id));
+
+    let response = send_json(
+        &app,
+        "/auth/register/finish",
+        &[],
+        json!({
+            "tenant": "acme",
+            "otp": "any-otp",
+            "registration_upload": upload_b64,
+        }),
+    )
+    .await;
+
+    // NoopInvitationStore.verify_and_consume always returns InvalidOtp →
+    // registration fails closed.
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "bad_request");
+}
+
+/// Active invitation exists but the presented OTP is wrong → 400.
+/// The response must be indistinguishable from "no invitation" (enumeration guard).
+#[tokio::test]
+async fn register_finish_wrong_otp_returns_400() {
+    let mut rng = rand::rng();
+    let tenant_id = Uuid::new_v4();
+    let setup = ServerSetup::generate(&mut rng);
+    let password = random_password();
+    let upload_b64 = make_registration_upload_b64(&setup, &password);
+    // Seed the store with one invitation, but present a different OTP.
+    let app = build_auth_router(mock_auth_with_invitation(setup, tenant_id, "correct-otp"));
+
+    let response = send_json(
+        &app,
+        "/auth/register/finish",
+        &[],
+        json!({
+            "tenant": "acme",
+            "otp": "wrong-otp",
+            "registration_upload": upload_b64,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "bad_request");
+}
+
+/// Active invitation exists but the OTP has already been consumed → 400.
+#[tokio::test]
+async fn register_finish_consumed_otp_returns_400() {
+    let mut rng = rand::rng();
+    let tenant_id = Uuid::new_v4();
+    let setup = ServerSetup::generate(&mut rng);
+    let password = random_password();
+    let upload_b64 = make_registration_upload_b64(&setup, &password);
+    let otp = "test-otp-consumed";
+    let inv_store = Arc::new(MockInvitationStore::new());
+    inv_store.insert(
+        tenant_id,
+        hash_otp(otp),
+        Utc::now() + chrono::Duration::days(7),
+    );
+    let app = build_auth_router(
+        AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
+            Arc::new(MockPasswordFileStore::new()),
+            setup,
+        )
+        .with_invitation_store(Arc::clone(&inv_store)
+            as Arc<dyn botwork_auth_broker::store::InvitationStore + Send + Sync>),
+    );
+
+    // First registration: succeeds and consumes the OTP.
+    let r1 = send_json(
+        &app,
+        "/auth/register/finish",
+        &[],
+        json!({
+            "tenant": "acme",
+            "otp": otp,
+            "registration_upload": upload_b64,
+        }),
+    )
+    .await;
+    assert_eq!(
+        r1.status(),
+        StatusCode::CREATED,
+        "first registration must succeed"
+    );
+
+    // Second registration with the same OTP: must fail (consumed).
+    let r2 = send_json(
+        &app,
+        "/auth/register/finish",
+        &[],
+        json!({
+            "tenant": "acme",
+            "otp": otp,
+            "registration_upload": upload_b64,
+        }),
+    )
+    .await;
+    assert_eq!(
+        r2.status(),
+        StatusCode::BAD_REQUEST,
+        "consumed OTP must be refused"
+    );
+    let body = response_json(r2).await;
+    assert_eq!(body["error"]["code"], "bad_request");
+}
+
+/// Active invitation exists but the OTP has expired → 400.
+#[tokio::test]
+async fn register_finish_expired_otp_returns_400() {
+    let mut rng = rand::rng();
+    let tenant_id = Uuid::new_v4();
+    let setup = ServerSetup::generate(&mut rng);
+    let password = random_password();
+    let upload_b64 = make_registration_upload_b64(&setup, &password);
+    let otp = "test-otp-expired";
+    let inv_store = Arc::new(MockInvitationStore::new());
+    // Insert with expiry in the past.
+    inv_store.insert(
+        tenant_id,
+        hash_otp(otp),
+        Utc::now() - chrono::Duration::seconds(1),
+    );
+    let app = build_auth_router(
+        AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::with_tenant("acme", tenant_id)),
+            Arc::new(MockPasswordFileStore::new()),
+            setup,
+        )
+        .with_invitation_store(
+            inv_store as Arc<dyn botwork_auth_broker::store::InvitationStore + Send + Sync>,
+        ),
+    );
+
+    let response = send_json(
+        &app,
+        "/auth/register/finish",
+        &[],
+        json!({
+            "tenant": "acme",
+            "otp": otp,
+            "registration_upload": upload_b64,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "bad_request");
 }
 
 // ===========================================================================

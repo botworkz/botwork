@@ -20,6 +20,9 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use botwork_auth_broker::auth::invitation::{
+    generate_otp, hash_otp, insert_invitation, INVITATION_DEFAULT_TTL_SECONDS,
+};
 use botwork_auth_broker::auth::AuthState;
 use botwork_auth_broker::{build_router, build_user_api_router, AppState};
 use botwork_entity::{lease, tenant};
@@ -163,7 +166,18 @@ async fn seed_tenant(db: &DatabaseConnection, name: &str) -> Uuid {
     inserted.id
 }
 
-async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
+/// Insert a fresh invitation for the tenant and return the plaintext OTP.
+async fn seed_invitation(db: &DatabaseConnection, tenant_id: Uuid) -> String {
+    let otp = generate_otp();
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::seconds(INVITATION_DEFAULT_TTL_SECONDS as i64);
+    insert_invitation(db, tenant_id, &hash_otp(&otp), expires_at, now)
+        .await
+        .expect("insert invitation");
+    otp
+}
+
+async fn register(base: &str, tenant: &str, cred: &str, password: &[u8], otp: &str) {
     let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
@@ -192,6 +206,7 @@ async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
         .json(&json!({
             "tenant": tenant,
             "credential_identifier": cred,
+            "otp": otp,
             "registration_upload": URL_SAFE_NO_PAD.encode(cf.upload.serialize()),
         }))
         .send()
@@ -373,9 +388,10 @@ async fn store_and_fetch_round_trip() {
         }
     };
 
-    seed_tenant(&srv.db, "phlax").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
     // Init a vault first (needed so unlock_master can open the file).
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let bearer = login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     // Pre-create the vault using the existing wrapped-export-key path.
@@ -464,8 +480,9 @@ async fn overwrite_gate() {
         }
     };
 
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let bearer = login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     // Create vault.
@@ -520,8 +537,9 @@ async fn delete_round_trip() {
         }
     };
 
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let bearer = login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     let wek_resp = reqwest::Client::new()
@@ -622,8 +640,9 @@ async fn delete_missing_returns_404() {
         }
     };
 
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let bearer = login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     let wek_resp = reqwest::Client::new()
@@ -662,8 +681,9 @@ async fn concurrent_writes_serialise() {
         }
     };
 
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let bearer = login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     let wek_resp = reqwest::Client::new()
@@ -730,8 +750,9 @@ async fn api_auth_login_whoami_and_cookie_check_round_trip() {
         }
     };
 
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let session = api_login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     let whoami = reqwest::Client::new()
@@ -775,8 +796,9 @@ async fn api_auth_logout_revokes_lease_and_evicts_caps() {
         }
     };
 
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let session = api_login(&srv.base, "phlax", "phlax", b"hunter2").await;
     init_vault(&srv.base, &srv.vault_root.join("phlax"), &session.bearer).await;
 
@@ -865,8 +887,9 @@ async fn api_auth_logout_is_idempotent() {
         }
     };
 
-    seed_tenant(&srv.db, "phlax").await;
-    register(&srv.base, "phlax", "phlax", b"hunter2").await;
+    let tenant_id = seed_tenant(&srv.db, "phlax").await;
+    let otp = seed_invitation(&srv.db, tenant_id).await;
+    register(&srv.base, "phlax", "phlax", b"hunter2", &otp).await;
     let session = api_login(&srv.base, "phlax", "phlax", b"hunter2").await;
 
     let http = reqwest::Client::new();
