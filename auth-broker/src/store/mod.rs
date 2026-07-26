@@ -133,8 +133,9 @@ pub trait PasswordFileStore: Send + Sync {
 /// single-service with no cross-service write on the hot path.
 ///
 /// The default implementation used by [`crate::auth::AuthState::from_stores`]
-/// is a no-op: `has_active_invitation` returns `Ok(false)` (no gate), and
-/// `verify_and_consume` returns `Err(InvalidOtp)`. The production path uses
+/// is a no-op: `has_active_invitation` returns `Ok(false)`, and
+/// `verify_and_consume` returns `Err(InvalidOtp)`, so registration fails closed
+/// with no real invitation store. The production path uses
 /// [`crate::store::sea_orm_impl::SeaOrmInvitationStore`] via
 /// [`crate::auth::AuthState::new`].
 #[async_trait]
@@ -150,8 +151,7 @@ pub trait InvitationStore: Send + Sync {
     ) -> Result<Uuid, DbErr>;
 
     /// Return `true` if the tenant has at least one unconsumed, unexpired,
-    /// unrevoked invitation. Used at `register/finish` to decide whether an
-    /// OTP is required (gate only applies when an invitation exists).
+    /// unrevoked invitation.
     async fn has_active_invitation(
         &self,
         tenant_id: Uuid,

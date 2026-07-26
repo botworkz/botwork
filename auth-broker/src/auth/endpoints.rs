@@ -106,11 +106,12 @@ pub struct AuthState {
 
 /// No-op invitation store used as the default for [`AuthState::from_stores`].
 ///
-/// `has_active_invitation` always returns `Ok(false)` (no gate), so
-/// tenants that were created before the invitation system was introduced
-/// can still register without presenting an OTP.
+/// `has_active_invitation` always returns `Ok(false)`.
+/// `verify_and_consume` always returns `Err(OtpVerifyError::InvalidOtp)`, so
+/// registration via `register_finish` fails closed: no real invitation store
+/// means no registration can succeed.
 ///
-/// `insert_invitation`, `verify_and_consume`, `renew_invitation`, and
+/// `insert_invitation`, `renew_invitation`, and
 /// `revoke_invitations_for_tenant` return errors; they are only reached via
 /// the internal invitation endpoints, which require the real SeaORM store in
 /// production.
@@ -558,8 +559,8 @@ struct RegisterFinishRequest {
     #[serde(default, rename = "credential_identifier")]
     _credential_identifier: Option<String>,
     registration_upload: String,
-    /// OTP issued by the admin at tenant-creation time. Required when the
-    /// tenant has an active (unconsumed, unexpired) invitation.
+    /// Invitation OTP issued by the operator at tenant-creation time. Always
+    /// required: registration is invitation-gated.
     #[serde(default)]
     otp: Option<String>,
 }
@@ -603,64 +604,50 @@ async fn register_finish(
         }
     };
 
-    // OTP gate: if the tenant has an active invitation, the presented OTP
-    // must match. Tenants without any active invitation can register freely
-    // (backward-compat for tenants created before the invitation system).
+    // OTP gate: every registration requires a valid, unconsumed, unexpired
+    // invitation. No active invitation for the tenant → registration refused,
+    // indistinguishable from an invalid OTP (enumeration guard).
     let now = Utc::now();
-    let has_invitation = match state
-        .invitation_store
-        .has_active_invitation(tenant_id, now)
-        .await
-    {
-        Ok(v) => v,
-        Err(err) => {
-            warn!("{PREFIX} auth/register/finish: invitation store error: {err}");
-            return internal(format!("database error: {err}"));
+    let otp = match &body.otp {
+        Some(o) => o.as_str(),
+        None => {
+            warn!(
+                "{PREFIX} auth/register/finish: rejected — OTP required for tenant={}",
+                body.tenant
+            );
+            return bad_request("an invitation OTP is required to register this tenant");
         }
     };
-
-    if has_invitation {
-        let otp = match &body.otp {
-            Some(o) => o.as_str(),
-            None => {
-                warn!(
-                    "{PREFIX} auth/register/finish: rejected — OTP required for tenant={}",
-                    body.tenant
-                );
-                return bad_request("an invitation OTP is required to register this tenant");
-            }
-        };
-        match state
-            .invitation_store
-            .verify_and_consume(tenant_id, otp, now)
-            .await
-        {
-            Ok(()) => {}
-            Err(OtpVerifyError::InvalidOtp) => {
-                warn!(
-                    "{PREFIX} auth/register/finish: rejected — invalid OTP for tenant={}",
-                    body.tenant
-                );
-                return bad_request("invalid OTP");
-            }
-            Err(OtpVerifyError::Expired) => {
-                warn!(
-                    "{PREFIX} auth/register/finish: rejected — expired OTP for tenant={}",
-                    body.tenant
-                );
-                return bad_request("invitation OTP has expired");
-            }
-            Err(OtpVerifyError::AlreadyConsumed) => {
-                warn!(
-                    "{PREFIX} auth/register/finish: rejected — already-consumed OTP for tenant={}",
-                    body.tenant
-                );
-                return bad_request("invitation OTP has already been used");
-            }
-            Err(OtpVerifyError::Db(err)) => {
-                warn!("{PREFIX} auth/register/finish: invitation db error: {err}");
-                return internal(format!("database error: {err}"));
-            }
+    match state
+        .invitation_store
+        .verify_and_consume(tenant_id, otp, now)
+        .await
+    {
+        Ok(()) => {}
+        Err(OtpVerifyError::InvalidOtp) => {
+            warn!(
+                "{PREFIX} auth/register/finish: rejected — invalid OTP for tenant={}",
+                body.tenant
+            );
+            return bad_request("invalid OTP");
+        }
+        Err(OtpVerifyError::Expired) => {
+            warn!(
+                "{PREFIX} auth/register/finish: rejected — expired OTP for tenant={}",
+                body.tenant
+            );
+            return bad_request("invitation OTP has expired");
+        }
+        Err(OtpVerifyError::AlreadyConsumed) => {
+            warn!(
+                "{PREFIX} auth/register/finish: rejected — already-consumed OTP for tenant={}",
+                body.tenant
+            );
+            return bad_request("invitation OTP has already been used");
+        }
+        Err(OtpVerifyError::Db(err)) => {
+            warn!("{PREFIX} auth/register/finish: invitation db error: {err}");
+            return internal(format!("database error: {err}"));
         }
     }
 

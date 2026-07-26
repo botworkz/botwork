@@ -128,6 +128,7 @@ pub async fn run_register(
     tenant: &str,
     credential_identifier: &str,
     password: &[u8],
+    invitation: Option<&str>,
     ca_path: Option<&Path>,
 ) -> Result<RegisterOutcome, LoginError> {
     let http = build_http_client_with_ca(ca_path)?;
@@ -158,7 +159,7 @@ pub async fn run_register(
     let finish_url = base_url
         .join("auth/register/finish")
         .expect("endpoint path is always valid");
-    let finish_body = register_finish_body(tenant, credential_identifier, &cf.upload);
+    let finish_body = register_finish_body(tenant, credential_identifier, &cf.upload, invitation);
     let body: RegisterFinishResponseBody =
         post_json_and_parse_with_tenant_arms(&http, finish_url.as_str(), &finish_body, tenant)
             .await?;
@@ -240,12 +241,17 @@ fn register_finish_body(
     tenant: &str,
     credential_identifier: &str,
     registration_upload: &RegistrationUpload,
+    otp: Option<&str>,
 ) -> serde_json::Value {
-    json!({
+    let mut body = json!({
         "tenant": tenant,
         "credential_identifier": credential_identifier,
         "registration_upload": URL_SAFE_NO_PAD.encode(registration_upload.serialize()),
-    })
+    });
+    if let Some(otp) = otp {
+        body["otp"] = json!(otp);
+    }
+    body
 }
 
 /// One-shot `POST` + JSON-parse helper. The wire-error mapping is
@@ -359,6 +365,9 @@ fn register_status_error(
     if status == reqwest::StatusCode::CONFLICT {
         return Some(LoginError::AlreadyRegistered(tenant.to_string()));
     }
+    if status == reqwest::StatusCode::BAD_REQUEST && is_register_finish_endpoint(url) {
+        return Some(LoginError::InvalidInvitation(tenant.to_string()));
+    }
     Some(LoginError::UnexpectedStatus {
         status: status.as_u16(),
         url: url.to_string(),
@@ -369,6 +378,12 @@ fn register_status_error(
 fn truncate_body_bytes(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     truncate_body(text.into_owned())
+}
+
+fn is_register_finish_endpoint(url: &str) -> bool {
+    Url::parse(url)
+        .map(|parsed| parsed.path().trim_end_matches('/') == "/auth/register/finish")
+        .unwrap_or(false)
 }
 
 fn truncate_body(mut body: String) -> String {
@@ -654,6 +669,51 @@ mod tests {
             register_status_error(reqwest::StatusCode::CONFLICT, "http://x", b"", "phlax"),
             Some(LoginError::AlreadyRegistered(ref tenant)) if tenant == "phlax"
         ));
+        assert!(matches!(
+            register_status_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                "http://x/auth/register/finish",
+                b"an invitation OTP is required to register this tenant",
+                "phlax"
+            ),
+            Some(LoginError::InvalidInvitation(ref tenant)) if tenant == "phlax"
+        ));
+        assert!(matches!(
+            register_status_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                "http://x/auth/register/finish?x=1",
+                b"invalid otp",
+                "phlax"
+            ),
+            Some(LoginError::InvalidInvitation(ref tenant)) if tenant == "phlax"
+        ));
+        assert!(matches!(
+            register_status_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                "http://x/auth/register/finish/",
+                b"otp expired",
+                "phlax"
+            ),
+            Some(LoginError::InvalidInvitation(ref tenant)) if tenant == "phlax"
+        ));
+        assert!(matches!(
+            register_status_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                "http://x/auth/register/finish",
+                b"some other 400 from finish",
+                "phlax"
+            ),
+            Some(LoginError::InvalidInvitation(ref tenant)) if tenant == "phlax"
+        ));
+        assert!(matches!(
+            register_status_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                "http://x/auth/register/start",
+                b"",
+                "phlax"
+            ),
+            Some(LoginError::UnexpectedStatus { status: 400, .. })
+        ));
         assert!(register_status_error(reqwest::StatusCode::OK, "http://x", b"", "phlax").is_none());
     }
 
@@ -760,13 +820,25 @@ mod tests {
             URL_SAFE_NO_PAD.encode(request.serialize())
         );
 
-        let finish_body = register_finish_body("phlax", "phlax@example.com", &upload);
+        let finish_body = register_finish_body("phlax", "phlax@example.com", &upload, None);
         assert_eq!(finish_body["tenant"], "phlax");
         assert_eq!(finish_body["credential_identifier"], "phlax@example.com");
         assert_eq!(
             finish_body["registration_upload"],
             URL_SAFE_NO_PAD.encode(upload.serialize())
         );
+
+        let finish_body =
+            register_finish_body("phlax", "phlax@example.com", &upload, Some("OTP-123"));
+        let finish_obj = finish_body.as_object().expect("json object");
+        assert_eq!(
+            finish_obj.get("otp"),
+            Some(&serde_json::Value::from("OTP-123"))
+        );
+
+        let finish_body = register_finish_body("phlax", "phlax@example.com", &upload, None);
+        let finish_obj = finish_body.as_object().expect("json object");
+        assert!(!finish_obj.contains_key("otp"));
     }
 
     #[test]
@@ -880,6 +952,7 @@ mod tests {
             "phlax@example.com",
             b"hunter2",
             None,
+            None,
         )
         .await
         .expect_err("404 should map to unknown tenant");
@@ -891,6 +964,7 @@ mod tests {
             "phlax",
             "phlax@example.com",
             b"hunter2",
+            None,
             None,
         )
         .await
@@ -905,6 +979,7 @@ mod tests {
             "phlax",
             "phlax@example.com",
             b"hunter2",
+            None,
             None,
         )
         .await

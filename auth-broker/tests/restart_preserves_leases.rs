@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use botwork_auth_broker::auth::invitation::{
+    generate_otp, hash_otp, insert_invitation, INVITATION_DEFAULT_TTL_SECONDS,
+};
 use botwork_auth_broker::auth::AuthState;
 use botwork_auth_broker::{build_router, AppState};
 use botwork_entity::tenant;
@@ -101,7 +104,17 @@ async fn seed_tenant(db: &DatabaseConnection, name: &str) -> Uuid {
     model.insert(db).await.expect("insert tenant").id
 }
 
-async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
+async fn seed_invitation(db: &DatabaseConnection, tenant_id: Uuid) -> String {
+    let otp = generate_otp();
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::seconds(INVITATION_DEFAULT_TTL_SECONDS as i64);
+    insert_invitation(db, tenant_id, &hash_otp(&otp), expires_at, now)
+        .await
+        .expect("insert invitation");
+    otp
+}
+
+async fn register(base: &str, tenant: &str, cred: &str, password: &[u8], otp: &str) {
     let mut rng = rand::rng();
     let http = reqwest::Client::new();
 
@@ -130,6 +143,7 @@ async fn register(base: &str, tenant: &str, cred: &str, password: &[u8]) {
         .json(&json!({
             "tenant": tenant,
             "credential_identifier": cred,
+            "otp": otp,
             "registration_upload": URL_SAFE_NO_PAD.encode(cf.upload.serialize()),
         }))
         .send()
@@ -207,10 +221,11 @@ async fn restart_preserves_leases() {
     let srv1 = spawn_server(Arc::clone(&db), vault_root.clone())
         .await
         .expect("spawn initial broker");
-    seed_tenant(&db, "phlax").await;
+    let tenant_id = seed_tenant(&db, "phlax").await;
     let mut password = [0u8; 16];
     rand::rng().fill_bytes(&mut password);
-    register(&srv1.base, "phlax", "phlax", &password).await;
+    let otp = seed_invitation(&db, tenant_id).await;
+    register(&srv1.base, "phlax", "phlax", &password, &otp).await;
     let bearer = login(&srv1.base, "phlax", "phlax", &password).await;
 
     let first = auth_check(&srv1.base, &bearer).await;
