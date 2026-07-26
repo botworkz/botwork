@@ -9,7 +9,7 @@
 //! | `InvalidLogin`         | 1    |
 //! | `UnknownTenant`        | 1    |
 //! | `AlreadyRegistered`    | 1    |
-//! | `InvalidInvitation`   | 1    |
+//! | `InvalidInvitation`    | 1    |
 //! | `NoLease`              | 1    |
 //! | `LeaseExpired`         | 1    |
 //! | `Config(_)`            | 1    |

@@ -785,11 +785,9 @@ mod tests {
             finish_body["registration_upload"],
             URL_SAFE_NO_PAD.encode(upload.serialize())
         );
-        assert_eq!(finish_body["otp"], serde_json::Value::Null);
 
         let finish_body =
             register_finish_body("phlax", "phlax@example.com", &upload, Some("OTP-123"));
-        assert_eq!(finish_body["otp"], "OTP-123");
         let finish_obj = finish_body.as_object().expect("json object");
         assert_eq!(
             finish_obj.get("otp"),
