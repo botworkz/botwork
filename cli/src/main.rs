@@ -79,6 +79,9 @@ enum Command {
         /// Read the password from stdin (no prompt, no confirm).
         #[arg(long)]
         password_stdin: bool,
+        /// Invitation OTP for invitation-gated tenant registration.
+        #[arg(long, value_name = "OTP")]
+        invitation: Option<String>,
     },
     /// Show the current lease state from the keyring. Offline.
     Status,
@@ -142,13 +145,17 @@ async fn dispatch(cli: Cli) -> Result<String, LoginError> {
             })
             .await
         }
-        Command::Register { password_stdin } => {
+        Command::Register {
+            password_stdin,
+            invitation,
+        } => {
             run_register(RegisterArgs {
                 tenant,
                 credential_identifier: cli.credential_identifier,
                 server: cli.server,
                 cacert,
                 password_stdin,
+                invitation,
                 ..RegisterArgs::default()
             })
             .await
@@ -332,6 +339,7 @@ mod tests {
             cacert: None,
             command: Some(Command::Register {
                 password_stdin: false,
+                invitation: None,
             }),
         }))
         .unwrap_err();
