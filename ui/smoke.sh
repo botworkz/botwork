@@ -18,7 +18,7 @@ set -euo pipefail
 #      `admin_ui` alias production uses (no postgres, no
 #      db-migrate — ui is a pure static-bundle server,
 #      it has no DB connection);
-#   2. curl /healthz from a sibling client container, assert
+#   2. curl /health from a sibling client container, assert
 #      the JSON contract field;
 #   3. curl /login from a sibling client container, assert
 #      we get an HTML body containing the trunk-stamped
@@ -61,11 +61,11 @@ if [[ "${ready}" -ne 1 ]]; then
   exit 1
 fi
 
-# 2. — /healthz.
+# 2. — /health.
 body="$(docker run --rm --network "${net}" curlimages/curl:8.10.1 \
   --fail --silent --show-error \
-  http://admin_ui:9500/healthz)"
-echo "healthz body: ${body}"
+  http://admin_ui:9500/health)"
+echo "health body: ${body}"
 echo "${body}" | grep -q '"status":"ok"'
 
 # 3. — /login should return the trunk-built shell, not 404.

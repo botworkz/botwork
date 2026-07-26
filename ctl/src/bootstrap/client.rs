@@ -62,7 +62,7 @@ use uuid::Uuid;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Short per-probe timeout for `GET /readyz` readiness checks. Kept
+/// Short per-probe timeout for `GET /health` readiness checks. Kept
 /// small so a hung api doesn't stall a whole poll interval; the main
 /// `HTTP_TIMEOUT` applies to operational write requests only.
 const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -74,7 +74,7 @@ const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub struct AdminClient {
     http: HttpClient,
-    /// Short-timeout client used exclusively for `/readyz` probes.
+    /// Short-timeout client used exclusively for `/health` probes.
     probe: HttpClient,
     endpoint: String,
     operator: String,
@@ -112,7 +112,7 @@ impl AdminClient {
         format!("{}/api/tenant/{tenant}{path}", self.endpoint)
     }
 
-    /// Poll `GET {endpoint}/readyz` until api returns HTTP 200 or
+    /// Poll `GET {endpoint}/health` until api returns HTTP 200 or
     /// `overall_timeout` elapses.
     ///
     /// Each probe uses [`READY_PROBE_TIMEOUT`] so a hung api doesn't
@@ -128,7 +128,7 @@ impl AdminClient {
         overall_timeout: Duration,
         poll_interval: Duration,
     ) -> Result<(), ReadyTimeout> {
-        let url = format!("{}/readyz", self.endpoint);
+        let url = format!("{}/health", self.endpoint);
         let deadline = Instant::now() + overall_timeout;
         loop {
             let is_ready = self
@@ -469,7 +469,7 @@ pub struct UpdateWorkspacePlugin {
 }
 
 /// Returned by [`AdminClient::wait_until_ready`] when the overall
-/// deadline elapses before api returns HTTP 200 from `/readyz`.
+/// deadline elapses before api returns HTTP 200 from `/health`.
 #[derive(Debug, Error)]
 #[error("api readiness timeout")]
 pub struct ReadyTimeout;
