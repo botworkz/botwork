@@ -365,10 +365,7 @@ fn register_status_error(
     if status == reqwest::StatusCode::CONFLICT {
         return Some(LoginError::AlreadyRegistered(tenant.to_string()));
     }
-    if status == reqwest::StatusCode::BAD_REQUEST
-        && is_register_finish_endpoint(url)
-        && is_invitation_bad_request(body)
-    {
+    if status == reqwest::StatusCode::BAD_REQUEST && is_register_finish_endpoint(url) {
         return Some(LoginError::InvalidInvitation(tenant.to_string()));
     }
     Some(LoginError::UnexpectedStatus {
@@ -387,15 +384,6 @@ fn is_register_finish_endpoint(url: &str) -> bool {
     Url::parse(url)
         .map(|parsed| parsed.path().trim_end_matches('/') == "/auth/register/finish")
         .unwrap_or(false)
-}
-
-fn is_invitation_bad_request(body: &[u8]) -> bool {
-    let body = String::from_utf8_lossy(body).to_ascii_lowercase();
-    (body.contains("invitation") && body.contains("otp"))
-        || body.contains("otp is required")
-        || body.contains("invalid otp")
-        || body.contains("otp expired")
-        || body.contains("already consumed")
 }
 
 fn truncate_body(mut body: String) -> String {
@@ -712,10 +700,10 @@ mod tests {
             register_status_error(
                 reqwest::StatusCode::BAD_REQUEST,
                 "http://x/auth/register/finish",
-                b"invalid registration payload",
+                b"some other 400 from finish",
                 "phlax"
             ),
-            Some(LoginError::UnexpectedStatus { status: 400, .. })
+            Some(LoginError::InvalidInvitation(ref tenant)) if tenant == "phlax"
         ));
         assert!(matches!(
             register_status_error(
