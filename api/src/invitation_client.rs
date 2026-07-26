@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_probe_does_not_call_operational_routes() {
+    async fn ready_calls_health_endpoint_and_does_not_call_operational_routes() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/health"))
