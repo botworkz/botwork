@@ -36,7 +36,7 @@ use botwork_bootstrap::{apply, BootstrapConfig, BootstrapConfigRaw};
 use botwork_entity::connection::connect;
 use botwork_migration::Migrator;
 use reqwest::StatusCode;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseBackend, DatabaseConnection, DbErr, MockDatabase};
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use testcontainers::runners::AsyncRunner;
@@ -238,6 +238,102 @@ async fn health_endpoint_reports_db_reachable() {
     assert_eq!(body["status"], "ok");
     assert_eq!(body["db"], "reachable");
     assert!(body.get("message").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn livez_endpoint_is_ok_when_invitation_probe_dependency_is_unreachable() {
+    let unreachable = InvitationClient::with_endpoint("http://127.0.0.1:1");
+    let Some(server) = spawn_server_with_invitation_client(unreachable).await else {
+        eprintln!(
+            "IGNORED livez_endpoint_is_ok_when_invitation_probe_dependency_is_unreachable: \
+             docker not reachable; full proof runs in ci.yml smoke"
+        );
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!("{}/livez", server.base))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readyz_endpoint_returns_ok_when_dependencies_are_disabled_or_reachable() {
+    let Some(server) = spawn_server().await else {
+        eprintln!(
+            "IGNORED readyz_endpoint_returns_ok_when_dependencies_are_disabled_or_reachable: \
+             docker not reachable; full proof runs in ci.yml smoke"
+        );
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!("{}/readyz", server.base))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["status"], "ready");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readyz_endpoint_reports_auth_broker_when_unreachable() {
+    let unreachable = InvitationClient::with_endpoint("http://127.0.0.1:1");
+    let Some(server) = spawn_server_with_invitation_client(unreachable).await else {
+        eprintln!(
+            "IGNORED readyz_endpoint_reports_auth_broker_when_unreachable: \
+             docker not reachable; full proof runs in ci.yml smoke"
+        );
+        return;
+    };
+    let resp = reqwest::Client::new()
+        .get(format!("{}/readyz", server.base))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["status"], "unready");
+    assert!(body["unready"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .any(|dep| dep == "auth-broker"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readyz_endpoint_reports_db_unready_when_probe_fails() {
+    let db = MockDatabase::new(DatabaseBackend::Postgres)
+        .append_exec_errors([DbErr::Custom("db down".to_string())])
+        .into_connection();
+    let db = Arc::new(db);
+    let state = AppState {
+        store: Arc::new(SeaOrmApiStore::new_shared(db.clone())),
+        db,
+        control_plane: ControlPlaneClient::disabled(),
+        secret_store: SecretStoreClient::disabled(),
+        session_broker: SessionBrokerClient::disabled(),
+        invitation_client: InvitationClient::disabled(),
+    };
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let _handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert!(body["unready"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .any(|dep| dep == "db"));
 }
 
 // ── read tests (carried from PR2) ───────────────────────────────────

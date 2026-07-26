@@ -34,6 +34,7 @@
 //! 400 rather than a silently-dropped field.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::header::HeaderMap;
@@ -57,6 +58,8 @@ use crate::store::ApiStore;
 use crate::{read, write};
 
 pub(crate) const PREFIX: &str = "[api]";
+const READYZ_DEP_TIMEOUT: Duration = Duration::from_secs(2);
+const READYZ_OVERALL_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Shared state injected into every handler.
 ///
@@ -561,6 +564,137 @@ mod tests {
         assert_eq!(unreachable_json["status"], "ok");
         assert_eq!(unreachable_json["db"], "unreachable");
     }
+
+    #[tokio::test]
+    async fn livez_is_always_ok_even_when_dependencies_are_unreachable() {
+        let state = AppState {
+            db: Arc::new(
+                MockDatabase::new(DatabaseBackend::Postgres)
+                    .append_exec_errors([DbErr::Custom("db down".to_string())])
+                    .into_connection(),
+            ),
+            store: Arc::new(MockApiStore::new()),
+            control_plane: crate::control_plane::ControlPlaneClient::with_endpoint(
+                "http://127.0.0.1:1",
+            ),
+            secret_store: crate::secret_store::SecretStoreClient::with_endpoint(
+                "http://127.0.0.1:1",
+            ),
+            session_broker: crate::session_broker::SessionBrokerClient::with_endpoint(
+                "http://127.0.0.1:1",
+            ),
+            invitation_client: crate::invitation_client::InvitationClient::with_endpoint(
+                "http://127.0.0.1:1",
+            ),
+        };
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/livez")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_ok_when_all_dependencies_are_ready_or_disabled() {
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }]),
+        );
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(json["status"], "ready");
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_503_when_auth_broker_is_unreachable() {
+        let mut state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres).append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }]),
+        );
+        state.invitation_client =
+            crate::invitation_client::InvitationClient::with_endpoint("http://127.0.0.1:1");
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert!(json["unready"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|dep| dep == "auth-broker"));
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_503_when_db_probe_fails() {
+        let state = crate::test_support::app_state_with_mock_db(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_exec_errors([DbErr::Custom("db down".to_string())]),
+        );
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body"),
+        )
+        .expect("json");
+        assert!(json["unready"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|dep| dep == "db"));
+    }
 }
 
 // ── helpers used by read + write handlers ──────────────────────────
@@ -712,6 +846,26 @@ struct HealthResponse {
     message: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct LivenessResponse {
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadinessDependency {
+    ready: bool,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    dependencies: serde_json::Map<String, serde_json::Value>,
+    unready: Vec<String>,
+}
+
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // SELECT 1 is the canonical "is this pool actually live" probe;
     // it round-trips the wire without touching any tables, which
@@ -737,8 +891,125 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(body))
 }
 
+async fn livez() -> impl IntoResponse {
+    (StatusCode::OK, Json(LivenessResponse { status: "alive" }))
+}
+
+async fn probe_db_ready(state: &AppState) -> Result<(), String> {
+    let backend = state.db.get_database_backend();
+    let stmt = Statement::from_string(backend, "SELECT 1".to_owned());
+    tokio::time::timeout(READYZ_DEP_TIMEOUT, state.db.execute(stmt))
+        .await
+        .map_err(|_| "timeout running SELECT 1".to_string())?
+        .map(|_| ())
+        .map_err(|err| format!("db probe failed: {err}"))
+}
+
+fn dependency_report(
+    name: &str,
+    disabled: bool,
+    result: Result<(), String>,
+) -> (String, serde_json::Value, Option<String>) {
+    let (entry, unready_name) = if disabled {
+        (
+            ReadinessDependency {
+                ready: true,
+                status: "disabled",
+                detail: None,
+            },
+            None,
+        )
+    } else {
+        match result {
+            Ok(()) => (
+                ReadinessDependency {
+                    ready: true,
+                    status: "ready",
+                    detail: None,
+                },
+                None,
+            ),
+            Err(detail) => (
+                ReadinessDependency {
+                    ready: false,
+                    status: "unready",
+                    detail: Some(detail),
+                },
+                Some(name.to_string()),
+            ),
+        }
+    };
+    (
+        name.to_string(),
+        serde_json::to_value(entry).expect("serialize readiness dependency"),
+        unready_name,
+    )
+}
+
+async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    let cp_disabled = state.control_plane.is_disabled();
+    let ss_disabled = state.secret_store.is_disabled();
+    let sb_disabled = state.session_broker.is_disabled();
+    let ab_disabled = state.invitation_client.is_disabled();
+
+    let probes = tokio::time::timeout(READYZ_OVERALL_TIMEOUT, async {
+        tokio::join!(
+            probe_db_ready(&state),
+            state.control_plane.ready(),
+            state.secret_store.ready(),
+            state.session_broker.ready(),
+            state.invitation_client.ready(),
+        )
+    })
+    .await;
+
+    let (db_result, cp_result, ss_result, sb_result, ab_result) = match probes {
+        Ok(results) => results,
+        Err(_) => (
+            Err("overall readiness timeout".to_string()),
+            Err("overall readiness timeout".to_string()),
+            Err("overall readiness timeout".to_string()),
+            Err("overall readiness timeout".to_string()),
+            Err("overall readiness timeout".to_string()),
+        ),
+    };
+
+    let mut dependencies = serde_json::Map::new();
+    let mut unready = Vec::new();
+    for (name, value, maybe_unready) in [
+        dependency_report("db", false, db_result),
+        dependency_report("control-plane", cp_disabled, cp_result),
+        dependency_report("secret-store", ss_disabled, ss_result),
+        dependency_report("session-broker", sb_disabled, sb_result),
+        dependency_report("auth-broker", ab_disabled, ab_result),
+    ] {
+        dependencies.insert(name, value);
+        if let Some(dep) = maybe_unready {
+            unready.push(dep);
+        }
+    }
+
+    let status = if unready.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = ReadinessResponse {
+        status: if unready.is_empty() {
+            "ready"
+        } else {
+            "unready"
+        },
+        dependencies,
+        unready,
+    };
+    (status, Json(body))
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/livez", get(livez))
+        .route("/readyz", get(readyz))
         // Unauthed liveness probe.
         .route("/api/health", get(health))
         .merge(read::router())
