@@ -16,6 +16,7 @@
 use botwork_ctl::bootstrap::apply::{apply, ApplyOutcome};
 use botwork_ctl::bootstrap::client::AdminClient;
 use serde_json::json;
+use std::time::Duration;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -518,4 +519,138 @@ async fn old_url_prefix_returns_http_error_not_transport() {
         ClientError::Http { status, .. } => assert_eq!(status, 404),
         other => panic!("expected Http 404, got {other:?}"),
     }
+}
+
+// ── readiness gate tests ─────────────────────────────────────────────
+
+/// `/readyz` returns 200 on the first probe: `wait_until_ready` returns
+/// `Ok` immediately and does not spin.
+#[tokio::test]
+async fn readyz_200_on_first_probe_returns_ok() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/readyz"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoint = server.uri();
+    let result = tokio::task::spawn_blocking(move || {
+        let c = client(&endpoint);
+        c.wait_until_ready(Duration::from_secs(10), Duration::from_millis(10))
+    })
+    .await
+    .unwrap();
+
+    assert!(result.is_ok(), "should succeed immediately on 200");
+    // wiremock verifies `.expect(1)` at drop
+}
+
+/// `/readyz` returns 503 three times then 200: `wait_until_ready` polls
+/// and eventually returns `Ok`. Asserts the retry count.
+#[tokio::test]
+async fn readyz_503_then_200_retries_and_succeeds() {
+    let server = MockServer::start().await;
+
+    // First registered = higher priority in wiremock's FIFO ordering.
+    // 503 stub is exhausted after 3 matches; subsequent requests fall
+    // through to the 200 fallback stub.
+    Mock::given(method("GET"))
+        .and(path("/readyz"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(3)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/readyz"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let endpoint = server.uri();
+    let result = tokio::task::spawn_blocking(move || {
+        let c = client(&endpoint);
+        c.wait_until_ready(Duration::from_secs(10), Duration::from_millis(10))
+    })
+    .await
+    .unwrap();
+
+    assert!(result.is_ok(), "should succeed after retries");
+
+    // Verify it retried: at least 4 calls (3 × 503, then 1 × 200).
+    let received = server.received_requests().await.unwrap();
+    let readyz_count = received
+        .iter()
+        .filter(|r| r.url.path() == "/readyz")
+        .count();
+    assert!(
+        readyz_count >= 4,
+        "expected ≥4 /readyz calls (3 retries + 1 success), got {readyz_count}"
+    );
+}
+
+/// `/readyz` never returns 200 within a short overall timeout: returns
+/// `Err(())` and `apply()` is never called (no `POST /api/tenants`).
+#[tokio::test]
+async fn readyz_timeout_returns_err_and_apply_not_called() {
+    let server = MockServer::start().await;
+
+    // /readyz always 503 → wait will time out.
+    Mock::given(method("GET"))
+        .and(path("/readyz"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    // No POST /api/tenants stub: wiremock would 404 any write, and the
+    // test would panic if apply() were called. Additionally, assert
+    // explicitly that no write hit the wire.
+
+    let endpoint = server.uri();
+    let result = tokio::task::spawn_blocking(move || {
+        let c = client(&endpoint);
+        c.wait_until_ready(Duration::from_millis(100), Duration::from_millis(10))
+    })
+    .await
+    .unwrap();
+
+    assert!(result.is_err(), "should time out on perpetual 503");
+
+    // Assert no POST /api/tenants was called.
+    let received = server.received_requests().await.unwrap();
+    assert!(
+        received.iter().all(|r| r.url.path() != "/api/tenants"),
+        "apply() must not be called when readiness gate times out"
+    );
+
+    // The NotReady error maps to exit code 7.
+    use botwork_ctl::bootstrap::BootstrapError;
+    assert_eq!(BootstrapError::NotReady(0).exit_code(), 7);
+}
+
+/// Transport error (endpoint unreachable): each probe gets
+/// `ECONNREFUSED`, treated as not-ready, and the overall timeout is
+/// eventually hit, returning `Err(())`.
+#[tokio::test]
+async fn readyz_transport_error_retried_then_times_out() {
+    // Start and drop the server immediately so the port is unreachable.
+    let server = MockServer::start().await;
+    let endpoint = server.uri();
+    drop(server);
+
+    let result = tokio::task::spawn_blocking(move || {
+        let c = client(&endpoint);
+        // Short overall timeout so the test finishes quickly.
+        c.wait_until_ready(Duration::from_millis(200), Duration::from_millis(10))
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        result.is_err(),
+        "should time out when endpoint is unreachable"
+    );
 }

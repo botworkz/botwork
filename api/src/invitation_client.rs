@@ -51,6 +51,7 @@ pub const DISABLED_OTP: &str = "DISABLED";
 /// Tenant creation is a rare admin-only path; 8s matches the other
 /// client timeouts in this crate.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Failure modes for invitation mint calls.
 #[derive(Debug)]
@@ -187,6 +188,28 @@ impl InvitationClient {
         self.disabled
     }
 
+    /// Side-effect-free readiness probe.
+    ///
+    /// GETs `/health` on the auth-broker endpoint. A `2xx` response means
+    /// the service is up; a transport error, timeout, or non-2xx means unready.
+    /// Disabled clients are immediately ready.
+    pub async fn ready(&self) -> Result<(), String> {
+        if self.disabled {
+            return Ok(());
+        }
+        let url = format!("{}/health", self.endpoint);
+        let resp = tokio::time::timeout(READINESS_TIMEOUT, self.http.get(&url).send())
+            .await
+            .map_err(|_| format!("timeout contacting {url}"))?
+            .map_err(|err| format!("transport error contacting {url}: {err}"))?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(format!("GET {url} returned {status}"))
+        }
+    }
+
     /// Mint an invitation OTP for `tenant_id`.
     ///
     /// Calls `POST {endpoint}/internal/invitations`, returns the
@@ -311,5 +334,74 @@ impl InvitationClient {
                 "auth-broker returned {status}: {text}"
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn ready_disabled_is_ready() {
+        let client = InvitationClient::disabled();
+        client.ready().await.expect("disabled is ready");
+    }
+
+    #[tokio::test]
+    async fn ready_unreachable_is_unready() {
+        let client = InvitationClient::with_endpoint("http://127.0.0.1:1");
+        let err = client.ready().await.expect_err("unready");
+        assert!(err.contains("transport error") || err.contains("timeout"));
+    }
+
+    #[tokio::test]
+    async fn ready_health_200_is_ready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = InvitationClient::with_endpoint(server.uri());
+        client.ready().await.expect("ready");
+    }
+
+    #[tokio::test]
+    async fn ready_health_non_2xx_is_unready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = InvitationClient::with_endpoint(server.uri());
+        let err = client.ready().await.expect_err("unready on 500");
+        assert!(err.contains("500"));
+    }
+
+    #[tokio::test]
+    async fn ready_calls_health_endpoint_and_does_not_call_operational_routes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/internal/invitations"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "otp": "otp",
+                "expires_at": chrono::Utc::now(),
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = InvitationClient::with_endpoint(server.uri());
+        client.ready().await.expect("ready");
     }
 }

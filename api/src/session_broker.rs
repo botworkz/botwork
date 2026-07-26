@@ -48,6 +48,7 @@ pub const DISABLE_ENV: &str = "BOTWORK_API_DISABLE_SESSION_BROKER_EVICT";
 
 /// Per-request timeout for the session-broker eviction call.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Lightweight HTTP client that signals session-broker to evict all live
 /// sessions for a given tenant.
@@ -117,6 +118,28 @@ impl SessionBrokerClient {
     /// `true` if the client is disabled.
     pub fn is_disabled(&self) -> bool {
         self.disabled
+    }
+
+    /// Side-effect-free readiness probe.
+    ///
+    /// GETs `/health` on the session-broker endpoint. A `2xx` response means
+    /// the service is up; a transport error, timeout, or non-2xx means unready.
+    /// Disabled clients are immediately ready.
+    pub async fn ready(&self) -> Result<(), String> {
+        if self.disabled {
+            return Ok(());
+        }
+        let url = format!("{}/health", self.endpoint);
+        let resp = tokio::time::timeout(READINESS_TIMEOUT, self.http.get(&url).send())
+            .await
+            .map_err(|_| format!("timeout contacting {url}"))?
+            .map_err(|err| format!("transport error contacting {url}: {err}"))?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(format!("GET {url} returned {status}"))
+        }
     }
 
     /// Signal session-broker to evict all live sessions for `tenant`.
@@ -255,5 +278,43 @@ mod tests {
     fn evict_error_display_is_prefixed_for_logs() {
         let err = EvictError("POST http://x returned 503: down".into());
         assert!(format!("{err}").starts_with("session-broker evict failed: "));
+    }
+
+    #[tokio::test]
+    async fn ready_disabled_is_ready() {
+        let client = SessionBrokerClient::disabled();
+        client.ready().await.expect("disabled is ready");
+    }
+
+    #[tokio::test]
+    async fn ready_unreachable_is_unready() {
+        let client = SessionBrokerClient::with_endpoint("http://127.0.0.1:1");
+        let err = client.ready().await.expect_err("unready");
+        assert!(err.contains("transport error") || err.contains("timeout"));
+    }
+
+    #[tokio::test]
+    async fn ready_health_200_is_ready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = SessionBrokerClient::with_endpoint(server.uri());
+        client.ready().await.expect("ready");
+    }
+
+    #[tokio::test]
+    async fn ready_health_non_2xx_is_unready() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = SessionBrokerClient::with_endpoint(server.uri());
+        let err = client.ready().await.expect_err("unready on 500");
+        assert!(err.contains("500"));
     }
 }
