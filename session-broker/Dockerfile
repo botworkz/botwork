@@ -69,7 +69,7 @@ RUN apt-get update \
 RUN --mount=type=cache,id=botwork-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=botwork-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=botwork-target,target=/build/target,sharing=locked \
-    cargo build --release --locked --package botwork-session-broker \
+    (cd session-broker && cargo build --release --locked --package botwork-session-broker) \
     && install -D /build/target/release/botwork-session-broker /out/botwork-session-broker
 
 # ── build-prebuilt ───────────────────────────────────────────────────────
