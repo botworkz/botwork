@@ -258,49 +258,43 @@ fn audit_event(op: &str, verb: &str, entity: &str, id: impl std::fmt::Display, e
 pub fn router() -> Router<AppState> {
     Router::new()
         // Admin-gated tenant CRUD.
-        .route("/api/tenants", post(create_tenant))
-        .route("/api/tenants/{id}", put(update_tenant))
-        .route("/api/tenants/{id}", delete(delete_tenant))
+        .route("/tenants", post(create_tenant))
+        .route("/tenants/{id}", put(update_tenant))
+        .route("/tenants/{id}", delete(delete_tenant))
         // Admin-gated invitation management (renew / revoke OTP for a tenant).
         .route(
-            "/api/tenant/{tenant}/invitation/renew",
+            "/tenant/{tenant}/invitation/renew",
             post(renew_tenant_invitation),
         )
         .route(
-            "/api/tenant/{tenant}/invitation/revoke",
+            "/tenant/{tenant}/invitation/revoke",
             post(revoke_tenant_invitation),
         )
         // Admin-gated plugin CRUD (plugins are globally shared resources).
-        .route("/api/plugins", post(create_plugin))
-        .route("/api/plugins/{id}", put(update_plugin))
-        .route("/api/plugins/{id}", delete(delete_plugin))
+        .route("/plugins", post(create_plugin))
+        .route("/plugins/{id}", put(update_plugin))
+        .route("/plugins/{id}", delete(delete_plugin))
         // Tenant-scoped workspace CRUD.
-        .route("/api/tenant/{tenant}/workspaces", post(create_workspace))
-        .route(
-            "/api/tenant/{tenant}/workspaces/{id}",
-            put(update_workspace),
-        )
-        .route(
-            "/api/tenant/{tenant}/workspaces/{id}",
-            delete(delete_workspace),
-        )
+        .route("/tenant/{tenant}/workspaces", post(create_workspace))
+        .route("/tenant/{tenant}/workspaces/{id}", put(update_workspace))
+        .route("/tenant/{tenant}/workspaces/{id}", delete(delete_workspace))
         // Tenant-scoped binding CRUD.
         .route(
-            "/api/tenant/{tenant}/workspace_plugins",
+            "/tenant/{tenant}/workspace_plugins",
             post(create_workspace_plugin),
         )
         .route(
-            "/api/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
+            "/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
             put(update_workspace_plugin),
         )
         .route(
-            "/api/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
+            "/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
             delete(delete_workspace_plugin),
         )
         // Tenant-scoped secrets.
-        .route("/api/tenant/{tenant}/secrets", post(create_secret))
+        .route("/tenant/{tenant}/secrets", post(create_secret))
         .route(
-            "/api/tenant/{tenant}/secrets/{service}/{name}",
+            "/tenant/{tenant}/secrets/{service}/{name}",
             delete(delete_secret),
         )
 }
@@ -320,7 +314,7 @@ struct TenantUpdate {
     if_unmodified_since: DateTime<Utc>,
 }
 
-/// Flat response for `POST /api/tenants` — all tenant fields plus the
+/// Flat response for `POST /tenants` — all tenant fields plus the
 /// one-time OTP claim credential.
 ///
 /// The OTP is returned exactly once and never persisted in plaintext.
@@ -386,7 +380,7 @@ async fn create_tenant(
         .into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/api/tenants/{created_id}")).expect("uuid is ascii"),
+        HeaderValue::from_str(&format!("/tenants/{created_id}")).expect("uuid is ascii"),
     );
     Ok(response)
 }
@@ -526,7 +520,7 @@ pub(crate) async fn db_delete_tenant(
 
 // ── invitation management ──────────────────────────────────────────
 
-/// Response for `POST /api/tenant/{tenant}/invitation/renew`.
+/// Response for `POST /tenant/{tenant}/invitation/renew`.
 ///
 /// The OTP is returned exactly once and never persisted in plaintext.
 /// The admin must relay it to the tenant out-of-band.
@@ -538,7 +532,7 @@ struct InvitationRenewedResponse {
     expires_at: DateTime<Utc>,
 }
 
-/// `POST /api/tenant/{tenant}/invitation/renew`
+/// `POST /tenant/{tenant}/invitation/renew`
 ///
 /// Admin-only. Atomically revokes any outstanding invitation for the tenant
 /// and mints a fresh one. Returns the new plaintext OTP once so it can be
@@ -583,7 +577,7 @@ async fn renew_tenant_invitation(
     ))
 }
 
-/// `POST /api/tenant/{tenant}/invitation/revoke`
+/// `POST /tenant/{tenant}/invitation/revoke`
 ///
 /// Admin-only. Revokes all outstanding invitations for the tenant without
 /// minting a replacement. Idempotent: succeeds even if there are none.
@@ -682,7 +676,7 @@ async fn create_workspace(
     let mut response = (StatusCode::CREATED, Json(row)).into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/api/tenant/{tenant_name}/workspaces/{id}"))
+        HeaderValue::from_str(&format!("/tenant/{tenant_name}/workspaces/{id}"))
             .expect("tenant_name and uuid are ascii-safe"),
     );
     Ok(response)
@@ -975,7 +969,7 @@ async fn create_plugin(
     let mut response = (StatusCode::CREATED, Json(row)).into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/api/plugins/{id}")).expect("uuid is ascii"),
+        HeaderValue::from_str(&format!("/plugins/{id}")).expect("uuid is ascii"),
     );
     Ok(response)
 }
@@ -1244,7 +1238,7 @@ async fn create_workspace_plugin(
     response.headers_mut().insert(
         LOCATION,
         HeaderValue::from_str(&format!(
-            "/api/tenant/{tenant_name}/workspace_plugins/{}/{}",
+            "/tenant/{tenant_name}/workspace_plugins/{}/{}",
             body.workspace_id, body.plugin_id
         ))
         .expect("tenant_name and uuid are ascii-safe"),
@@ -1480,7 +1474,7 @@ async fn create_secret(
     let mut response = (StatusCode::CREATED, Json(resp)).into_response();
     response.headers_mut().insert(
         LOCATION,
-        HeaderValue::from_str(&format!("/api/tenant/{tenant}/secrets/{service}/{name}"))
+        HeaderValue::from_str(&format!("/tenant/{tenant}/secrets/{service}/{name}"))
             .expect("tenant, service and name are ascii-safe"),
     );
     Ok(response)
@@ -1754,7 +1748,7 @@ mod tests {
         let response = app
             .oneshot(request(
                 "POST",
-                "/api/tenants",
+                "/tenants",
                 serde_json::json!({ "name": "phlax" }),
             ))
             .await
@@ -1772,7 +1766,7 @@ mod tests {
         let response = app
             .oneshot(request(
                 "POST",
-                "/api/tenant/phlax/workspaces",
+                "/tenant/phlax/workspaces",
                 serde_json::json!({ "name": "mcp" }),
             ))
             .await
@@ -1794,7 +1788,7 @@ mod tests {
             .clone()
             .oneshot(admin_request(
                 "POST",
-                "/api/tenants",
+                "/tenants",
                 serde_json::json!({ "name": "phlax", "extra": true }),
             ))
             .await
@@ -1808,7 +1802,7 @@ mod tests {
         let malformed_response = app
             .oneshot(admin_request(
                 "POST",
-                "/api/tenants",
+                "/tenants",
                 serde_json::json!({ "name": 7 }),
             ))
             .await
@@ -1826,7 +1820,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(admin_request("POST", "/api/tenants", serde_json::json!({})))
+            .oneshot(admin_request("POST", "/tenants", serde_json::json!({})))
             .await
             .expect("response");
 
@@ -1843,7 +1837,7 @@ mod tests {
             .clone()
             .oneshot(admin_request(
                 "POST",
-                "/api/tenants",
+                "/tenants",
                 serde_json::json!({ "name": "bad.name" }),
             ))
             .await
@@ -1857,7 +1851,7 @@ mod tests {
         let reserved_response = app
             .oneshot(admin_request(
                 "POST",
-                "/api/tenants",
+                "/tenants",
                 serde_json::json!({ "name": "admin" }),
             ))
             .await
@@ -1877,7 +1871,7 @@ mod tests {
         let response = app
             .oneshot(admin_request(
                 "POST",
-                "/api/plugins",
+                "/plugins",
                 serde_json::json!({
                     "name": "mcp-fetch",
                     "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -1903,7 +1897,7 @@ mod tests {
         let response = app
             .oneshot(admin_request(
                 "POST",
-                "/api/tenants",
+                "/tenants",
                 serde_json::json!({ "name": "phlax" }),
             ))
             .await
@@ -1922,7 +1916,7 @@ mod tests {
         let response = app
             .oneshot(admin_request(
                 "POST",
-                "/api/tenants",
+                "/tenants",
                 serde_json::json!({ "name": "phlax" }),
             ))
             .await
@@ -1939,7 +1933,7 @@ mod tests {
         let body = json_body(response).await;
         let id = Uuid::parse_str(body["id"].as_str().expect("id as str")).expect("uuid");
         assert_eq!(body["name"], "phlax");
-        assert_eq!(location, format!("/api/tenants/{id}"));
+        assert_eq!(location, format!("/tenants/{id}"));
         assert_eq!(store.drain_created_tenants().await, vec![id]);
     }
 
@@ -1952,7 +1946,7 @@ mod tests {
             .clone()
             .oneshot(admin_request(
                 "PUT",
-                "/api/tenants/not-a-uuid",
+                "/tenants/not-a-uuid",
                 serde_json::json!({
                     "name": "phlax",
                     "if_unmodified_since": fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
@@ -1966,7 +1960,7 @@ mod tests {
         let missing_lock = app
             .oneshot(admin_request(
                 "PUT",
-                &format!("/api/tenants/{}", Uuid::new_v4()),
+                &format!("/tenants/{}", Uuid::new_v4()),
                 serde_json::json!({ "name": "phlax" }),
             ))
             .await
@@ -1991,7 +1985,7 @@ mod tests {
         let response = app
             .oneshot(admin_request(
                 "PUT",
-                &format!("/api/tenants/{id}"),
+                &format!("/tenants/{id}"),
                 serde_json::json!({
                     "name": "phlax",
                     "if_unmodified_since": newer_timestamp.to_rfc3339_opts(SecondsFormat::Micros, true)
@@ -2015,7 +2009,7 @@ mod tests {
         let response = app
             .oneshot(admin_request(
                 "PUT",
-                &format!("/api/tenants/{id}"),
+                &format!("/tenants/{id}"),
                 serde_json::json!({
                     "name": "renamed",
                     "if_unmodified_since": updated_at.to_rfc3339_opts(SecondsFormat::Micros, true)
@@ -2038,7 +2032,7 @@ mod tests {
 
         let invalid_id = app
             .clone()
-            .oneshot(delete_request("/api/tenants/not-a-uuid"))
+            .oneshot(delete_request("/tenants/not-a-uuid"))
             .await
             .expect("response");
         assert_eq!(invalid_id.status(), StatusCode::BAD_REQUEST);
@@ -2046,7 +2040,7 @@ mod tests {
 
         let invalid_lock = app
             .oneshot(delete_request(&format!(
-                "/api/tenants/{}?if_unmodified_since=not-a-timestamp",
+                "/tenants/{}?if_unmodified_since=not-a-timestamp",
                 Uuid::new_v4()
             )))
             .await
@@ -2069,7 +2063,7 @@ mod tests {
 
         let response = app
             .oneshot(delete_request(&format!(
-                "/api/tenants/{id}?if_unmodified_since={lock}"
+                "/tenants/{id}?if_unmodified_since={lock}"
             )))
             .await
             .expect("response");
@@ -2089,7 +2083,7 @@ mod tests {
 
         let response = app
             .oneshot(delete_request(&format!(
-                "/api/tenants/{id}?if_unmodified_since={lock}"
+                "/tenants/{id}?if_unmodified_since={lock}"
             )))
             .await
             .expect("response");
@@ -2107,7 +2101,7 @@ mod tests {
             .clone()
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspaces",
+                "/tenant/phlax/workspaces",
                 "phlax",
                 serde_json::json!({ "name": "mcp", "extra": true }),
             ))
@@ -2122,7 +2116,7 @@ mod tests {
         let invalid_name = app
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspaces",
+                "/tenant/phlax/workspaces",
                 "phlax",
                 serde_json::json!({ "name": "bad.name" }),
             ))
@@ -2145,7 +2139,7 @@ mod tests {
             .clone()
             .oneshot(tenant_request(
                 "PUT",
-                "/api/tenant/phlax/workspaces/not-a-uuid",
+                "/tenant/phlax/workspaces/not-a-uuid",
                 "phlax",
                 serde_json::json!({
                     "name": "mcp",
@@ -2163,7 +2157,7 @@ mod tests {
         let delete_workspace = app
             .clone()
             .oneshot(tenant_delete_request(
-                "/api/tenant/phlax/workspaces/not-a-uuid",
+                "/tenant/phlax/workspaces/not-a-uuid",
                 "phlax",
             ))
             .await
@@ -2178,7 +2172,7 @@ mod tests {
             .clone()
             .oneshot(admin_request(
                 "PUT",
-                "/api/plugins/not-a-uuid",
+                "/plugins/not-a-uuid",
                 serde_json::json!({
                     "name": "mcp-fetch",
                     "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -2195,7 +2189,7 @@ mod tests {
         );
 
         let delete_plugin = app
-            .oneshot(delete_request("/api/plugins/not-a-uuid"))
+            .oneshot(delete_request("/plugins/not-a-uuid"))
             .await
             .expect("response");
         assert_eq!(delete_plugin.status(), StatusCode::BAD_REQUEST);
@@ -2213,7 +2207,7 @@ mod tests {
         let response = app
             .oneshot(admin_request(
                 "POST",
-                "/api/plugins",
+                "/plugins",
                 serde_json::json!({
                     "image": "ghcr.io/example/mcp-fetch:1.0",
                     "port": 8000
@@ -2235,7 +2229,7 @@ mod tests {
             .clone()
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/secrets",
+                "/tenant/phlax/secrets",
                 "phlax",
                 serde_json::json!({
                     "service": "../github",
@@ -2254,7 +2248,7 @@ mod tests {
 
         let delete_invalid = app
             .oneshot(tenant_delete_request(
-                "/api/tenant/phlax/secrets/github/.env",
+                "/tenant/phlax/secrets/github/.env",
                 "phlax",
             ))
             .await
@@ -2285,7 +2279,7 @@ mod tests {
         let create_response = crate::handler::build_router(create_state)
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspaces",
+                "/tenant/phlax/workspaces",
                 "phlax",
                 serde_json::json!({ "name": "mcp" }),
             ))
@@ -2300,7 +2294,7 @@ mod tests {
         assert!(create_location
             .as_deref()
             .expect("location")
-            .starts_with("/api/tenant/phlax/workspaces/"));
+            .starts_with("/tenant/phlax/workspaces/"));
         let _ = json_body(create_response).await;
 
         let create_taken_state = app_state_with_mock_store_db_and_clients(
@@ -2313,7 +2307,7 @@ mod tests {
         let create_taken = crate::handler::build_router(create_taken_state)
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspaces",
+                "/tenant/phlax/workspaces",
                 "phlax",
                 serde_json::json!({ "name": "mcp" }),
             ))
@@ -2335,7 +2329,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspaces",
+                "/tenant/phlax/workspaces",
                 "phlax",
                 serde_json::json!({ "name": "mcp" }),
             ))
@@ -2362,7 +2356,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "PUT",
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
                 serde_json::json!({
                     "name": "renamed",
@@ -2385,7 +2379,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "PUT",
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
                 serde_json::json!({
                     "name": "renamed",
@@ -2412,7 +2406,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "PUT",
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
                 serde_json::json!({
                     "name": "renamed",
@@ -2438,7 +2432,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "PUT",
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
                 serde_json::json!({
                     "name": "renamed",
@@ -2465,7 +2459,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "PUT",
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+            &format!("/tenant/phlax/workspaces/{workspace_id}"),
             "phlax",
             serde_json::json!({
                 "name": "renamed",
@@ -2512,7 +2506,7 @@ mod tests {
             SessionBrokerClient::disabled(),
         ))
         .oneshot(tenant_delete_request(
-            &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+            &format!("/tenant/phlax/workspaces/{workspace_id}"),
             "phlax",
         ))
         .await
@@ -2540,7 +2534,7 @@ mod tests {
                 SessionBrokerClient::disabled(),
             ))
             .oneshot(tenant_delete_request(
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
             ))
             .await
@@ -2557,7 +2551,7 @@ mod tests {
                 SessionBrokerClient::disabled(),
             ))
             .oneshot(tenant_delete_request(
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
             ))
             .await
@@ -2579,7 +2573,7 @@ mod tests {
                 SessionBrokerClient::disabled(),
             ))
             .oneshot(tenant_delete_request(
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
             ))
             .await
@@ -2602,7 +2596,7 @@ mod tests {
         ))
         .oneshot(admin_request(
             "POST",
-            "/api/plugins",
+            "/plugins",
             serde_json::json!({
                 "name": "mcp-fetch",
                 "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -2620,7 +2614,7 @@ mod tests {
         assert!(create_ok_location
             .as_deref()
             .expect("location")
-            .starts_with("/api/plugins/"));
+            .starts_with("/plugins/"));
         let _ = json_body(create_ok).await;
 
         let create_taken =
@@ -2630,7 +2624,7 @@ mod tests {
             ))
             .oneshot(admin_request(
                 "POST",
-                "/api/plugins",
+                "/plugins",
                 serde_json::json!({
                     "name": "mcp-fetch",
                     "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -2655,7 +2649,7 @@ mod tests {
         ))
         .oneshot(admin_request(
             "PUT",
-            &format!("/api/plugins/{plugin_id}"),
+            &format!("/plugins/{plugin_id}"),
             serde_json::json!({
                 "name": "renamed",
                 "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -2675,7 +2669,7 @@ mod tests {
             ))
             .oneshot(admin_request(
                 "PUT",
-                &format!("/api/plugins/{plugin_id}"),
+                &format!("/plugins/{plugin_id}"),
                 serde_json::json!({
                     "name": "renamed",
                     "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -2698,7 +2692,7 @@ mod tests {
             ))
             .oneshot(admin_request(
                 "PUT",
-                &format!("/api/plugins/{plugin_id}"),
+                &format!("/plugins/{plugin_id}"),
                 serde_json::json!({
                     "name": "renamed",
                     "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -2723,7 +2717,7 @@ mod tests {
             ))
             .oneshot(admin_request(
                 "PUT",
-                &format!("/api/plugins/{plugin_id}"),
+                &format!("/plugins/{plugin_id}"),
                 serde_json::json!({
                     "name": "renamed",
                     "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -2750,7 +2744,7 @@ mod tests {
                     rows_affected: 1,
                 }]),
         ))
-        .oneshot(delete_request(&format!("/api/plugins/{plugin_id}")))
+        .oneshot(delete_request(&format!("/plugins/{plugin_id}")))
         .await
         .expect("response");
         assert_eq!(delete_ok.status(), StatusCode::NO_CONTENT);
@@ -2769,7 +2763,7 @@ mod tests {
                         fixed_time(),
                     )]]),
             ))
-            .oneshot(delete_request(&format!("/api/plugins/{plugin_id}")))
+            .oneshot(delete_request(&format!("/plugins/{plugin_id}")))
             .await
             .expect("response");
         assert_eq!(delete_dependents.status(), StatusCode::CONFLICT);
@@ -2785,7 +2779,7 @@ mod tests {
                 MockDatabase::new(DatabaseBackend::Postgres)
                     .append_query_results([Vec::<plugin::Model>::new()]),
             ))
-            .oneshot(delete_request(&format!("/api/plugins/{plugin_id}")))
+            .oneshot(delete_request(&format!("/plugins/{plugin_id}")))
             .await
             .expect("response");
         assert_eq!(delete_missing.status(), StatusCode::NOT_FOUND);
@@ -2812,7 +2806,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "POST",
-            "/api/tenant/phlax/workspace_plugins",
+            "/tenant/phlax/workspace_plugins",
             "phlax",
             serde_json::json!({
                 "workspace_id": workspace_id,
@@ -2828,9 +2822,7 @@ mod tests {
                 .headers()
                 .get(LOCATION)
                 .and_then(|v| v.to_str().ok()),
-            Some(
-                format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}").as_str()
-            )
+            Some(format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}").as_str())
         );
 
         let create_existing =
@@ -2845,7 +2837,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspace_plugins",
+                "/tenant/phlax/workspace_plugins",
                 "phlax",
                 serde_json::json!({
                     "workspace_id": workspace_id,
@@ -2867,7 +2859,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspace_plugins",
+                "/tenant/phlax/workspace_plugins",
                 "phlax",
                 serde_json::json!({
                     "workspace_id": workspace_id,
@@ -2890,7 +2882,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspace_plugins",
+                "/tenant/phlax/workspace_plugins",
                 "phlax",
                 serde_json::json!({
                     "workspace_id": workspace_id,
@@ -2919,7 +2911,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspace_plugins",
+                "/tenant/phlax/workspace_plugins",
                 "phlax",
                 serde_json::json!({
                     "workspace_id": workspace_id,
@@ -2945,7 +2937,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspace_plugins",
+                "/tenant/phlax/workspace_plugins",
                 "phlax",
                 serde_json::json!({
                     "workspace_id": workspace_id,
@@ -2975,7 +2967,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "PUT",
-            &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+            &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
             "phlax",
             serde_json::json!({
                 "config": { "k": "next" },
@@ -2994,7 +2986,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "PUT",
-                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
                 "phlax",
                 serde_json::json!({
                     "config": { "k": "next" },
@@ -3016,7 +3008,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "PUT",
-                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
                 "phlax",
                 serde_json::json!({
                     "config": { "k": "next" },
@@ -3045,7 +3037,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "PUT",
-                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
                 "phlax",
                 serde_json::json!({
                     "config": null,
@@ -3067,7 +3059,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "PUT",
-            &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+            &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
             "phlax",
             serde_json::json!({
                 "config": { "k": "next" },
@@ -3093,7 +3085,7 @@ mod tests {
         ))
         .oneshot(tenant_delete_request(
             &format!(
-                "/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}?if_unmodified_since={}",
+                "/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}?if_unmodified_since={}",
                 fixed_time().to_rfc3339_opts(SecondsFormat::Micros, true)
             ),
             "phlax",
@@ -3108,7 +3100,7 @@ mod tests {
                     .append_query_results([Vec::<workspace_plugin::Model>::new()]),
             ))
             .oneshot(tenant_delete_request(
-                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
                 "phlax",
             ))
             .await
@@ -3128,7 +3120,7 @@ mod tests {
             SessionBrokerClient::disabled(),
         ))
         .oneshot(tenant_delete_request(
-            &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+            &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
             "phlax",
         ))
         .await
@@ -3309,7 +3301,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "POST",
-            "/api/tenant/phlax/secrets",
+            "/tenant/phlax/secrets",
             "phlax",
             serde_json::json!({
                 "service": "github",
@@ -3326,7 +3318,7 @@ mod tests {
                 .headers()
                 .get(LOCATION)
                 .and_then(|v| v.to_str().ok()),
-            Some("/api/tenant/phlax/secrets/github/pat")
+            Some("/tenant/phlax/secrets/github/pat")
         );
 
         let delete_ok = crate::handler::build_router(app_state_with_mock_db_and_clients(
@@ -3336,7 +3328,7 @@ mod tests {
             SessionBrokerClient::with_endpoint(session_broker.uri()),
         ))
         .oneshot(tenant_delete_request(
-            "/api/tenant/phlax/secrets/github/pat",
+            "/tenant/phlax/secrets/github/pat",
             "phlax",
         ))
         .await
@@ -3351,7 +3343,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "POST",
-            "/api/tenant/phlax/secrets",
+            "/tenant/phlax/secrets",
             "phlax",
             serde_json::json!({
                 "service": "github",
@@ -3382,7 +3374,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "POST",
-            "/api/tenant/phlax/secrets",
+            "/tenant/phlax/secrets",
             "phlax",
             serde_json::json!({
                 "service": "github",
@@ -3413,7 +3405,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "POST",
-            "/api/tenant/phlax/secrets",
+            "/tenant/phlax/secrets",
             "phlax",
             serde_json::json!({
                 "service": "github",
@@ -3438,7 +3430,7 @@ mod tests {
         ))
         .oneshot(tenant_request(
             "POST",
-            "/api/tenant/phlax/secrets",
+            "/tenant/phlax/secrets",
             "phlax",
             serde_json::json!({
                 "service": "github",
@@ -3462,7 +3454,7 @@ mod tests {
             SessionBrokerClient::disabled(),
         ))
         .oneshot(tenant_delete_request(
-            "/api/tenant/phlax/secrets/github/pat",
+            "/tenant/phlax/secrets/github/pat",
             "phlax",
         ))
         .await
@@ -3487,7 +3479,7 @@ mod tests {
             SessionBrokerClient::disabled(),
         ))
         .oneshot(tenant_delete_request(
-            "/api/tenant/phlax/secrets/github/pat",
+            "/tenant/phlax/secrets/github/pat",
             "phlax",
         ))
         .await
@@ -3512,7 +3504,7 @@ mod tests {
             SessionBrokerClient::disabled(),
         ))
         .oneshot(tenant_delete_request(
-            "/api/tenant/phlax/secrets/github/pat",
+            "/tenant/phlax/secrets/github/pat",
             "phlax",
         ))
         .await
@@ -3530,7 +3522,7 @@ mod tests {
             SessionBrokerClient::disabled(),
         ))
         .oneshot(tenant_delete_request(
-            "/api/tenant/phlax/secrets/github/pat",
+            "/tenant/phlax/secrets/github/pat",
             "phlax",
         ))
         .await
@@ -3568,7 +3560,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_delete_request(
-                &format!("/api/tenant/{path_tenant}/workspaces/{workspace_id}"),
+                &format!("/tenant/{path_tenant}/workspaces/{workspace_id}"),
                 path_tenant,
             ))
             .await
@@ -3594,7 +3586,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspace_plugins",
+                "/tenant/phlax/workspace_plugins",
                 "phlax",
                 serde_json::json!({
                     "workspace_id": workspace_id,
@@ -3627,7 +3619,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspace_plugins",
+                "/tenant/phlax/workspace_plugins",
                 "phlax",
                 serde_json::json!({
                     "workspace_id": workspace_id,
@@ -3660,7 +3652,7 @@ mod tests {
             ))
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/workspace_plugins",
+                "/tenant/phlax/workspace_plugins",
                 "phlax",
                 serde_json::json!({
                     "workspace_id": workspace_id,
@@ -3694,7 +3686,7 @@ mod tests {
         let response = app
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/secrets",
+                "/tenant/phlax/secrets",
                 "phlax",
                 serde_json::json!({
                     "service": "   ",   // whitespace-only → trimmed to ""
@@ -3724,7 +3716,7 @@ mod tests {
         let response = app
             .oneshot(tenant_request(
                 "POST",
-                "/api/tenant/phlax/secrets",
+                "/tenant/phlax/secrets",
                 "phlax",
                 serde_json::json!({
                     "service": long_name,
@@ -3751,7 +3743,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_delete_request(
-                &format!("/api/tenant/phlax/secrets/github/{long_name}"),
+                &format!("/tenant/phlax/secrets/github/{long_name}"),
                 "phlax",
             ))
             .await

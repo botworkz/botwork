@@ -13,7 +13,7 @@
 //! value is opaque at this layer and must never appear in CI output.
 //!
 //! Phase 2 reshape (botworkz/space#311): secrets endpoints moved from
-//! `/admin/api/v1/secrets[...]` to `/api/tenant/{tenant}/secrets[...]`.
+//! `/admin/api/v1/secrets[...]` to `/tenant/{tenant}/secrets[...]`.
 //! Tenant comes from the URL path; the `x-botwork-tenant` header must
 //! match the path tenant (auth-broker invariant). Missing/mismatched
 //! header → 403 `cross_tenant_forbidden`. Body schema is unchanged.
@@ -187,7 +187,7 @@ async fn create_secret_happy_path() {
         .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -214,7 +214,7 @@ async fn create_secret_happy_path() {
     assert_eq!(body["created"], true);
 
     // Phase 2: Location header carries the tenant in the URL path.
-    assert_eq!(location, "/api/tenant/phlax/secrets/github/pat");
+    assert_eq!(location, "/tenant/phlax/secrets/github/pat");
 
     // Verify wiremock saw a request with tenant in body (unchanged
     // wire contract between api and the secret-store backend).
@@ -243,7 +243,7 @@ async fn create_secret_missing_tenant_header() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         // deliberately no x-botwork-tenant header
         .json(&json!({
             "service": "github",
@@ -279,7 +279,7 @@ async fn create_secret_already_exists() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -313,7 +313,7 @@ async fn create_secret_backend_unavailable() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -353,7 +353,7 @@ async fn create_secret_backend_disabled() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -391,7 +391,7 @@ async fn create_secret_bad_service_name() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             // forward slash → path traversal class; require_secret_component rejects.
@@ -426,7 +426,7 @@ async fn create_secret_rejects_path_traversal_component() {
     };
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "../etc/passwd",
@@ -473,10 +473,7 @@ async fn delete_secret_happy_path() {
         .await;
 
     let resp = reqwest::Client::new()
-        .delete(format!(
-            "{}/api/tenant/phlax/secrets/github/pat",
-            server.base
-        ))
+        .delete(format!("{}/tenant/phlax/secrets/github/pat", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -507,10 +504,7 @@ async fn delete_secret_not_found() {
     };
 
     let resp = reqwest::Client::new()
-        .delete(format!(
-            "{}/api/tenant/phlax/secrets/github/pat",
-            server.base
-        ))
+        .delete(format!("{}/tenant/phlax/secrets/github/pat", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -534,10 +528,7 @@ async fn delete_secret_missing_tenant_header() {
     };
 
     let resp = reqwest::Client::new()
-        .delete(format!(
-            "{}/api/tenant/phlax/secrets/github/pat",
-            server.base
-        ))
+        .delete(format!("{}/tenant/phlax/secrets/github/pat", server.base))
         // deliberately no x-botwork-tenant header
         .send()
         .await
@@ -550,7 +541,7 @@ async fn delete_secret_missing_tenant_header() {
 
 // ── session-broker eviction signaling ──────────────────────────────
 
-/// After a successful `POST /api/tenant/{tenant}/secrets`, api must
+/// After a successful `POST /tenant/{tenant}/secrets`, api must
 /// signal session-broker to evict stale-credential containers for the
 /// tenant. Verify that the `POST /evict-tenant/{tenant}` call is made
 /// to session-broker's admin endpoint.
@@ -588,7 +579,7 @@ async fn create_secret_signals_session_broker_eviction() {
         .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",
@@ -607,7 +598,7 @@ async fn create_secret_signals_session_broker_eviction() {
     broker_mock.verify().await;
 }
 
-/// After a successful `DELETE /api/tenant/{tenant}/secrets/{service}/{name}`,
+/// After a successful `DELETE /tenant/{tenant}/secrets/{service}/{name}`,
 /// api must signal session-broker to evict stale-credential containers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_secret_signals_session_broker_eviction() {
@@ -638,10 +629,7 @@ async fn delete_secret_signals_session_broker_eviction() {
         .await;
 
     let resp = reqwest::Client::new()
-        .delete(format!(
-            "{}/api/tenant/phlax/secrets/github/pat",
-            server.base
-        ))
+        .delete(format!("{}/tenant/phlax/secrets/github/pat", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -679,7 +667,7 @@ async fn create_secret_succeeds_even_when_session_broker_unreachable() {
         .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/secrets", server.base))
+        .post(format!("{}/tenant/phlax/secrets", server.base))
         .header("x-botwork-tenant", "phlax")
         .json(&json!({
             "service": "github",

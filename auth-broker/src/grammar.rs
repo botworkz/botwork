@@ -65,6 +65,19 @@ fn validate_name(name: &str, reserved: bool) -> Result<(), NameError> {
     Ok(())
 }
 
+// NOTE — external `/api/*` vs internal `/*` path split:
+//
+// auth-broker's ext_authz filter runs on the ORIGINAL external request path
+// (carried in `x-envoy-original-path`) BEFORE envoy strips the `/api` prefix
+// and proxies to api's upstream. That means:
+//
+//   • auth-broker (here, in `parse_original_path`) sees `/api/tenant/phlax/…`
+//   • api itself sees bare `/tenant/phlax/…` (after envoy prefix-rewrite)
+//
+// This is intentional. Do NOT change the `/api/*` matching below to bare `/*`
+// — that would break tenant-identity extraction in ext_authz. Conversely, do
+// NOT add an `/api` prefix back to api's own route table in api/src/{read,write}.rs.
+// The two sides are correct as-is.
 pub(crate) fn parse_original_path(path: &str) -> Option<ParsedPath> {
     if path == "/api/auth/login" || path.starts_with("/api/auth/login/") {
         return Some(ParsedPath::ApiAuthLogin);

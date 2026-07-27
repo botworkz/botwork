@@ -305,7 +305,7 @@ async fn list_tenants_returns_seeded_row() {
         return;
     };
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!("{}/api/tenants", server.base))
+        .get(format!("{}/tenants", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -331,7 +331,7 @@ async fn get_tenant_by_id_round_trips() {
     };
     let client = reqwest::Client::new();
     let list: serde_json::Value = client
-        .get(format!("{}/api/tenants", server.base))
+        .get(format!("{}/tenants", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -342,7 +342,7 @@ async fn get_tenant_by_id_round_trips() {
         .expect("json");
     let id = list["items"][0]["id"].as_str().expect("id").to_owned();
     let single: serde_json::Value = client
-        .get(format!("{}/api/tenants/{id}", server.base))
+        .get(format!("{}/tenants/{id}", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -363,7 +363,7 @@ async fn get_tenant_unknown_id_is_404() {
     };
     let id = Uuid::new_v4();
     let resp = reqwest::Client::new()
-        .get(format!("{}/api/tenants/{id}", server.base))
+        .get(format!("{}/tenants/{id}", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -381,7 +381,7 @@ async fn get_tenant_invalid_uuid_is_400() {
         return;
     };
     let resp = reqwest::Client::new()
-        .get(format!("{}/api/tenants/not-a-uuid", server.base))
+        .get(format!("{}/tenants/not-a-uuid", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -401,7 +401,7 @@ async fn list_workspaces_returns_seeded_row() {
         return;
     };
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!("{}/api/tenant/phlax/workspaces", server.base))
+        .get(format!("{}/tenant/phlax/workspaces", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -425,7 +425,7 @@ async fn cross_tenant_request_is_403() {
     };
     // Path says `phlax` but header says `other` — mismatch → 403.
     let resp = reqwest::Client::new()
-        .get(format!("{}/api/tenant/phlax/workspaces", server.base))
+        .get(format!("{}/tenant/phlax/workspaces", server.base))
         .header("x-botwork-tenant", "other")
         .send()
         .await
@@ -443,7 +443,7 @@ async fn tenant_scoped_endpoint_without_header_returns_forbidden() {
         return;
     };
     let resp = reqwest::Client::new()
-        .get(format!("{}/api/tenant/phlax/workspaces", server.base))
+        .get(format!("{}/tenant/phlax/workspaces", server.base))
         // No x-botwork-tenant header → handler calls check_tenant_consistency
         // which returns 403 cross_tenant_forbidden.
         .send()
@@ -459,7 +459,7 @@ async fn tenant_scoped_endpoint_rejects_invalid_path_tenant_with_400() {
         return;
     };
     let resp = reqwest::Client::new()
-        .get(format!("{}/api/tenant/foo.bar/workspaces", server.base))
+        .get(format!("{}/tenant/foo.bar/workspaces", server.base))
         .header("x-botwork-tenant", "foo.bar")
         .send()
         .await
@@ -476,7 +476,7 @@ async fn tenant_scoped_endpoint_rejects_reserved_path_tenant_with_400() {
         return;
     };
     let resp = reqwest::Client::new()
-        .get(format!("{}/api/tenant/admin/workspaces", server.base))
+        .get(format!("{}/tenant/admin/workspaces", server.base))
         .header("x-botwork-tenant", "admin")
         .send()
         .await
@@ -495,7 +495,7 @@ async fn list_plugins_returns_seeded_rows() {
         return;
     };
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!("{}/api/plugins", server.base))
+        .get(format!("{}/plugins", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -532,7 +532,7 @@ async fn get_plugin_by_id_round_trips() {
     };
     let client = reqwest::Client::new();
     let list: serde_json::Value = client
-        .get(format!("{}/api/plugins", server.base))
+        .get(format!("{}/plugins", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -542,7 +542,7 @@ async fn get_plugin_by_id_round_trips() {
         .expect("json");
     let id = list["items"][0]["id"].as_str().expect("id").to_owned();
     let resp = client
-        .get(format!("{}/api/plugins/{id}", server.base))
+        .get(format!("{}/plugins/{id}", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -561,10 +561,7 @@ async fn list_workspace_plugins_returns_seeded_bindings() {
         return;
     };
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins",
-            server.base
-        ))
+        .get(format!("{}/tenant/phlax/workspace_plugins", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -591,7 +588,7 @@ async fn list_workspace_plugins_filters_by_plugin_id() {
     };
     let client = reqwest::Client::new();
     let plugins: serde_json::Value = client
-        .get(format!("{}/api/plugins", server.base))
+        .get(format!("{}/plugins", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -611,7 +608,7 @@ async fn list_workspace_plugins_filters_by_plugin_id() {
 
     let body: serde_json::Value = client
         .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins?plugin_id={bash_id}",
+            "{}/tenant/phlax/workspace_plugins?plugin_id={bash_id}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -633,10 +630,7 @@ async fn get_workspace_plugin_round_trips_composite_pk() {
     };
     let client = reqwest::Client::new();
     let list: serde_json::Value = client
-        .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins",
-            server.base
-        ))
+        .get(format!("{}/tenant/phlax/workspace_plugins", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -649,7 +643,7 @@ async fn get_workspace_plugin_round_trips_composite_pk() {
     let pid = entry["plugin_id"].as_str().expect("plugin_id");
     let resp = client
         .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins/{wid}/{pid}",
+            "{}/tenant/phlax/workspace_plugins/{wid}/{pid}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -672,7 +666,7 @@ async fn get_workspace_plugin_unknown_pair_is_404() {
     let pid = Uuid::new_v4();
     let resp = reqwest::Client::new()
         .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins/{wid}/{pid}",
+            "{}/tenant/phlax/workspace_plugins/{wid}/{pid}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -691,7 +685,7 @@ async fn create_tenant_returns_201_and_location() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenants", server.base))
+        .post(format!("{}/tenants", server.base))
         .json(&json!({"name": "ada"}))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
@@ -706,7 +700,7 @@ async fn create_tenant_returns_201_and_location() {
         .to_str()
         .expect("ascii");
     assert!(
-        location.starts_with("/api/tenants/"),
+        location.starts_with("/tenants/"),
         "unexpected Location: {location}"
     );
     let body: serde_json::Value = resp.json().await.expect("json");
@@ -722,7 +716,7 @@ async fn create_tenant_rejects_duplicate_with_409_already_exists() {
     };
     // phlax is in the seed.
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenants", server.base))
+        .post(format!("{}/tenants", server.base))
         .json(&json!({"name": "phlax"}))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
@@ -741,7 +735,7 @@ async fn create_tenant_rejects_unknown_field_with_400() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenants", server.base))
+        .post(format!("{}/tenants", server.base))
         .json(&json!({"name": "ada", "typo": "x"}))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
@@ -761,7 +755,7 @@ async fn create_tenant_rejects_invalid_name_with_400() {
     };
     // "Has Spaces" fails the name regex (^[A-Za-z0-9_-]{1,63}$).
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenants", server.base))
+        .post(format!("{}/tenants", server.base))
         .json(&json!({"name": "Has Spaces"}))
         .header("x-botwork-admin", "true")
         .send()
@@ -781,7 +775,7 @@ async fn create_tenant_rejects_reserved_name_with_400() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenants", server.base))
+        .post(format!("{}/tenants", server.base))
         .json(&json!({"name": "admin"}))
         .header("x-botwork-admin", "true")
         .send()
@@ -800,7 +794,7 @@ async fn update_tenant_round_trips_with_lock() {
     };
     let client = reqwest::Client::new();
     let list: serde_json::Value = client
-        .get(format!("{}/api/tenants", server.base))
+        .get(format!("{}/tenants", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -812,7 +806,7 @@ async fn update_tenant_round_trips_with_lock() {
     let id = list["items"][0]["id"].as_str().unwrap().to_owned();
     let token = list["items"][0]["updated_at"].as_str().unwrap().to_owned();
     let resp = client
-        .put(format!("{}/api/tenants/{id}", server.base))
+        .put(format!("{}/tenants/{id}", server.base))
         .json(&json!({"name": "phlax-renamed", "if_unmodified_since": token}))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
@@ -832,7 +826,7 @@ async fn update_tenant_rejects_stale_lock_with_409_stale_write() {
     };
     let client = reqwest::Client::new();
     let list: serde_json::Value = client
-        .get(format!("{}/api/tenants", server.base))
+        .get(format!("{}/tenants", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -844,7 +838,7 @@ async fn update_tenant_rejects_stale_lock_with_409_stale_write() {
     let id = list["items"][0]["id"].as_str().unwrap().to_owned();
     // Use a wrong-but-well-formed timestamp.
     let resp = client
-        .put(format!("{}/api/tenants/{id}", server.base))
+        .put(format!("{}/tenants/{id}", server.base))
         .json(&json!({
             "name": "phlax-renamed",
             "if_unmodified_since": "2000-01-01T00:00:00Z",
@@ -867,7 +861,7 @@ async fn delete_tenant_blocks_with_409_has_dependents_and_names_workspaces() {
     };
     let client = reqwest::Client::new();
     let list: serde_json::Value = client
-        .get(format!("{}/api/tenants", server.base))
+        .get(format!("{}/tenants", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -878,7 +872,7 @@ async fn delete_tenant_blocks_with_409_has_dependents_and_names_workspaces() {
         .expect("json");
     let id = list["items"][0]["id"].as_str().unwrap().to_owned();
     let resp = client
-        .delete(format!("{}/api/tenants/{id}", server.base))
+        .delete(format!("{}/tenants/{id}", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -903,7 +897,7 @@ async fn delete_tenant_succeeds_when_no_dependents() {
     let client = reqwest::Client::new();
     // Create a tenant with no workspaces, then delete it.
     let create: serde_json::Value = client
-        .post(format!("{}/api/tenants", server.base))
+        .post(format!("{}/tenants", server.base))
         .json(&json!({"name": "deletable"}))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
@@ -915,7 +909,7 @@ async fn delete_tenant_succeeds_when_no_dependents() {
         .expect("json");
     let id = create["id"].as_str().unwrap().to_owned();
     let resp = client
-        .delete(format!("{}/api/tenants/{id}", server.base))
+        .delete(format!("{}/tenants/{id}", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -924,7 +918,7 @@ async fn delete_tenant_succeeds_when_no_dependents() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     // Subsequent GET is 404.
     let resp = client
-        .get(format!("{}/api/tenants/{id}", server.base))
+        .get(format!("{}/tenants/{id}", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -943,7 +937,7 @@ async fn create_workspace_inserts_under_tenant() {
     };
     let client = reqwest::Client::new();
     let tenants: serde_json::Value = client
-        .get(format!("{}/api/tenants", server.base))
+        .get(format!("{}/tenants", server.base))
         .header("x-botwork-admin", "true")
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -954,7 +948,7 @@ async fn create_workspace_inserts_under_tenant() {
         .expect("json");
     let tenant_id = tenants["items"][0]["id"].as_str().unwrap();
     let resp = client
-        .post(format!("{}/api/tenant/phlax/workspaces", server.base))
+        .post(format!("{}/tenant/phlax/workspaces", server.base))
         .json(&json!({"name": "second"}))
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -976,7 +970,7 @@ async fn create_workspace_unknown_tenant_returns_404() {
     // the DB lookup in resolve_tenant_id returns 404.
     // The x-botwork-tenant header must match the path tenant.
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/nobody/workspaces", server.base))
+        .post(format!("{}/tenant/nobody/workspaces", server.base))
         .json(&json!({"name": "orphan"}))
         .header("x-botwork-tenant", "nobody")
         .send()
@@ -997,7 +991,7 @@ async fn delete_workspace_succeeds_when_control_plane_acks_empty_session_set() {
     // (logged but not blocked). End-state: 204.
     let client = reqwest::Client::new();
     let ws: serde_json::Value = client
-        .get(format!("{}/api/tenant/phlax/workspaces", server.base))
+        .get(format!("{}/tenant/phlax/workspaces", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1007,7 +1001,7 @@ async fn delete_workspace_succeeds_when_control_plane_acks_empty_session_set() {
         .expect("json");
     let id = ws["items"][0]["id"].as_str().unwrap().to_owned();
     let resp = client
-        .delete(format!("{}/api/tenant/phlax/workspaces/{id}", server.base))
+        .delete(format!("{}/tenant/phlax/workspaces/{id}", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1025,7 +1019,7 @@ async fn create_plugin_invokes_api_core_validator() {
     };
     // Missing required `egress` field -> api-core rejects.
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/plugins", server.base))
+        .post(format!("{}/plugins", server.base))
         .json(&json!({
             "name": "mcp-new",
             "image": "ghcr.io/example/p:1.0",
@@ -1053,7 +1047,7 @@ async fn create_plugin_happy_path() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/plugins", server.base))
+        .post(format!("{}/plugins", server.base))
         .json(&json!({
             "name": "mcp-new",
             "image": "ghcr.io/example/p:1.0",
@@ -1081,7 +1075,7 @@ async fn delete_plugin_blocks_with_409_and_names_bindings() {
     };
     let client = reqwest::Client::new();
     let plugins: serde_json::Value = client
-        .get(format!("{}/api/plugins", server.base))
+        .get(format!("{}/plugins", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -1091,7 +1085,7 @@ async fn delete_plugin_blocks_with_409_and_names_bindings() {
         .expect("json");
     let id = plugins["items"][0]["id"].as_str().unwrap().to_owned();
     let resp = client
-        .delete(format!("{}/api/plugins/{id}", server.base))
+        .delete(format!("{}/plugins/{id}", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -1150,7 +1144,7 @@ async fn delete_binding_terminates_live_sessions_then_succeeds() {
 
     let client = reqwest::Client::new();
     let plugins: serde_json::Value = client
-        .get(format!("{}/api/plugins?", server.base))
+        .get(format!("{}/plugins?", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -1169,7 +1163,7 @@ async fn delete_binding_terminates_live_sessions_then_succeeds() {
         .to_owned();
     let bindings: serde_json::Value = client
         .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins?plugin_id={plugin_id}",
+            "{}/tenant/phlax/workspace_plugins?plugin_id={plugin_id}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1184,7 +1178,7 @@ async fn delete_binding_terminates_live_sessions_then_succeeds() {
 
     let resp = client
         .delete(format!(
-            "{}/api/tenant/phlax/workspace_plugins/{wid}/{pid}",
+            "{}/tenant/phlax/workspace_plugins/{wid}/{pid}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1195,7 +1189,7 @@ async fn delete_binding_terminates_live_sessions_then_succeeds() {
     // Subsequent GET is 404.
     let resp = client
         .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins/{wid}/{pid}",
+            "{}/tenant/phlax/workspace_plugins/{wid}/{pid}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1219,10 +1213,7 @@ async fn delete_binding_rolls_back_when_control_plane_unavailable() {
     let client = reqwest::Client::new();
     // Look up an existing binding.
     let bindings: serde_json::Value = client
-        .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins",
-            server.base
-        ))
+        .get(format!("{}/tenant/phlax/workspace_plugins", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1235,7 +1226,7 @@ async fn delete_binding_rolls_back_when_control_plane_unavailable() {
 
     let resp = client
         .delete(format!(
-            "{}/api/tenant/phlax/workspace_plugins/{wid}/{pid}",
+            "{}/tenant/phlax/workspace_plugins/{wid}/{pid}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1249,7 +1240,7 @@ async fn delete_binding_rolls_back_when_control_plane_unavailable() {
     // The binding should still exist — rollback worked.
     let resp = client
         .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins/{wid}/{pid}",
+            "{}/tenant/phlax/workspace_plugins/{wid}/{pid}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1278,7 +1269,7 @@ async fn create_binding_happy_path_no_live_gate() {
     // Make a new workspace + bind one of the existing plugins.
     // (Path-borne tenant `phlax` is the authority; no need to look up its UUID.)
     let new_ws: serde_json::Value = client
-        .post(format!("{}/api/tenant/phlax/workspaces", server.base))
+        .post(format!("{}/tenant/phlax/workspaces", server.base))
         .json(&json!({"name": "fresh"}))
         .header("x-botwork-tenant", "phlax")
         .send()
@@ -1290,7 +1281,7 @@ async fn create_binding_happy_path_no_live_gate() {
     let new_wid = new_ws["id"].as_str().unwrap().to_owned();
 
     let plugins: serde_json::Value = client
-        .get(format!("{}/api/plugins", server.base))
+        .get(format!("{}/plugins", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -1301,10 +1292,7 @@ async fn create_binding_happy_path_no_live_gate() {
     let pid = plugins["items"][0]["id"].as_str().unwrap().to_owned();
 
     let resp = client
-        .post(format!(
-            "{}/api/tenant/phlax/workspace_plugins",
-            server.base
-        ))
+        .post(format!("{}/tenant/phlax/workspace_plugins", server.base))
         .json(&json!({
             "workspace_id": new_wid,
             "plugin_id": pid,
@@ -1331,10 +1319,7 @@ async fn delete_binding_disabled_gate_succeeds_without_control_plane() {
     // exercises the break-glass posture.
     let client = reqwest::Client::new();
     let bindings: serde_json::Value = client
-        .get(format!(
-            "{}/api/tenant/phlax/workspace_plugins",
-            server.base
-        ))
+        .get(format!("{}/tenant/phlax/workspace_plugins", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1346,7 +1331,7 @@ async fn delete_binding_disabled_gate_succeeds_without_control_plane() {
     let pid = bindings["items"][0]["plugin_id"].as_str().unwrap();
     let resp = client
         .delete(format!(
-            "{}/api/tenant/phlax/workspace_plugins/{wid}/{pid}",
+            "{}/tenant/phlax/workspace_plugins/{wid}/{pid}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1420,7 +1405,7 @@ async fn list_agent_sessions_returns_seeded_rows_sorted_by_last_active_desc() {
     };
     let ids = seed_agent_sessions(&server.db, &["active", "grace", "inactive"]).await;
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!("{}/api/tenant/phlax/agent_sessions", server.base))
+        .get(format!("{}/tenant/phlax/agent_sessions", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1456,7 +1441,7 @@ async fn list_agent_sessions_filters_by_state() {
     seed_agent_sessions(&server.db, &["active", "active", "grace", "inactive"]).await;
     let body: serde_json::Value = reqwest::Client::new()
         .get(format!(
-            "{}/api/tenant/phlax/agent_sessions?state=active",
+            "{}/tenant/phlax/agent_sessions?state=active",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1482,7 +1467,7 @@ async fn list_agent_sessions_returns_tenant_scoped_rows() {
     };
     seed_agent_sessions(&server.db, &["active"]).await;
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!("{}/api/tenant/phlax/agent_sessions", server.base))
+        .get(format!("{}/tenant/phlax/agent_sessions", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1501,7 +1486,7 @@ async fn agent_sessions_cross_tenant_is_403() {
         return;
     };
     let resp = reqwest::Client::new()
-        .get(format!("{}/api/tenant/phlax/agent_sessions", server.base))
+        .get(format!("{}/tenant/phlax/agent_sessions", server.base))
         .header("x-botwork-tenant", "other")
         .send()
         .await
@@ -1520,10 +1505,7 @@ async fn get_agent_session_round_trips() {
     let ids = seed_agent_sessions(&server.db, &["active"]).await;
     let id = ids[0];
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!(
-            "{}/api/tenant/phlax/agent_sessions/{id}",
-            server.base
-        ))
+        .get(format!("{}/tenant/phlax/agent_sessions/{id}", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1544,10 +1526,7 @@ async fn get_agent_session_unknown_id_is_404() {
     };
     let id = Uuid::new_v4();
     let resp = reqwest::Client::new()
-        .get(format!(
-            "{}/api/tenant/phlax/agent_sessions/{id}",
-            server.base
-        ))
+        .get(format!("{}/tenant/phlax/agent_sessions/{id}", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1563,7 +1542,7 @@ async fn get_agent_session_invalid_uuid_is_400() {
     };
     let resp = reqwest::Client::new()
         .get(format!(
-            "{}/api/tenant/phlax/agent_sessions/not-a-uuid",
+            "{}/tenant/phlax/agent_sessions/not-a-uuid",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1663,7 +1642,7 @@ async fn list_session_workers_returns_seeded_rows_sorted_by_spawned_desc() {
     )
     .await;
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!("{}/api/tenant/phlax/session_workers", server.base))
+        .get(format!("{}/tenant/phlax/session_workers", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1718,7 +1697,7 @@ async fn list_session_workers_filters_by_live_true_drops_reaped() {
     .await;
     let body: serde_json::Value = reqwest::Client::new()
         .get(format!(
-            "{}/api/tenant/phlax/session_workers?live=true",
+            "{}/tenant/phlax/session_workers?live=true",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1763,7 +1742,7 @@ async fn list_session_workers_filters_by_live_false_drops_live() {
     .await;
     let body: serde_json::Value = reqwest::Client::new()
         .get(format!(
-            "{}/api/tenant/phlax/session_workers?live=false",
+            "{}/tenant/phlax/session_workers?live=false",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1812,7 +1791,7 @@ async fn list_session_workers_filters_by_agent_session_id() {
     let target = session_ids[0];
     let body: serde_json::Value = reqwest::Client::new()
         .get(format!(
-            "{}/api/tenant/phlax/session_workers?agent_session_id={target}",
+            "{}/tenant/phlax/session_workers?agent_session_id={target}",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1834,7 +1813,7 @@ async fn list_session_workers_rejects_garbage_agent_session_id_filter() {
     };
     let resp = reqwest::Client::new()
         .get(format!(
-            "{}/api/tenant/phlax/session_workers?agent_session_id=not-a-uuid",
+            "{}/tenant/phlax/session_workers?agent_session_id=not-a-uuid",
             server.base
         ))
         .header("x-botwork-tenant", "phlax")
@@ -1861,10 +1840,7 @@ async fn get_session_worker_round_trips() {
     )
     .await;
     let body: serde_json::Value = reqwest::Client::new()
-        .get(format!(
-            "{}/api/tenant/phlax/session_workers/{id}",
-            server.base
-        ))
+        .get(format!("{}/tenant/phlax/session_workers/{id}", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1885,10 +1861,7 @@ async fn get_session_worker_unknown_id_is_404() {
     };
     let id = Uuid::new_v4();
     let resp = reqwest::Client::new()
-        .get(format!(
-            "{}/api/tenant/phlax/session_workers/{id}",
-            server.base
-        ))
+        .get(format!("{}/tenant/phlax/session_workers/{id}", server.base))
         .header("x-botwork-tenant", "phlax")
         .send()
         .await
@@ -1965,7 +1938,7 @@ async fn renew_invitation_disabled_client_returns_200_with_disabled_otp() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/invitation/renew", server.base))
+        .post(format!("{}/tenant/phlax/invitation/renew", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -1991,7 +1964,7 @@ async fn renew_invitation_requires_admin_header() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/invitation/renew", server.base))
+        .post(format!("{}/tenant/phlax/invitation/renew", server.base))
         // No x-botwork-admin header.
         .send()
         .await
@@ -2009,10 +1982,7 @@ async fn renew_invitation_unknown_tenant_is_404() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!(
-            "{}/api/tenant/nobody/invitation/renew",
-            server.base
-        ))
+        .post(format!("{}/tenant/nobody/invitation/renew", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -2036,7 +2006,7 @@ async fn renew_invitation_broker_unavailable_returns_500_internal() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/tenant/phlax/invitation/renew", server.base))
+        .post(format!("{}/tenant/phlax/invitation/renew", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -2056,10 +2026,7 @@ async fn revoke_invitation_disabled_client_returns_204() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!(
-            "{}/api/tenant/phlax/invitation/revoke",
-            server.base
-        ))
+        .post(format!("{}/tenant/phlax/invitation/revoke", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -2075,10 +2042,7 @@ async fn revoke_invitation_requires_admin_header() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!(
-            "{}/api/tenant/phlax/invitation/revoke",
-            server.base
-        ))
+        .post(format!("{}/tenant/phlax/invitation/revoke", server.base))
         // No x-botwork-admin header.
         .send()
         .await
@@ -2096,10 +2060,7 @@ async fn revoke_invitation_unknown_tenant_is_404() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!(
-            "{}/api/tenant/nobody/invitation/revoke",
-            server.base
-        ))
+        .post(format!("{}/tenant/nobody/invitation/revoke", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
@@ -2117,10 +2078,7 @@ async fn revoke_invitation_broker_unavailable_returns_500_internal() {
         return;
     };
     let resp = reqwest::Client::new()
-        .post(format!(
-            "{}/api/tenant/phlax/invitation/revoke",
-            server.base
-        ))
+        .post(format!("{}/tenant/phlax/invitation/revoke", server.base))
         .header("x-botwork-admin", "true")
         .send()
         .await
