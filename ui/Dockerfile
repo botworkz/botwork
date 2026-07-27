@@ -94,9 +94,9 @@ RUN --mount=type=cache,id=botwork-cargo-registry,target=/usr/local/cargo/registr
     --mount=type=cache,id=botwork-target,target=/build/target,sharing=locked \
     --mount=type=cache,id=botwork-trunk,target=/build/ui/wasm/target,sharing=locked \
     (cd ui/wasm && trunk build --release) \
-    && cargo build --release --locked \
+    && (cd ui/server && cargo build --release --locked \
         --package botwork-ui-server \
-        --bin botwork-ui-server \
+        --bin botwork-ui-server) \
     && install -D /build/target/release/botwork-ui-server /out/botwork-ui-server
 
 FROM scratch AS build-prebuilt

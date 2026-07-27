@@ -40,7 +40,7 @@ RUN apt-get update \
 RUN --mount=type=cache,id=botwork-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=botwork-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=botwork-target,target=/build/target,sharing=locked \
-    cargo build --release --locked --package botwork-control-plane \
+    (cd control-plane && cargo build --release --locked --package botwork-control-plane) \
     && install -D /build/target/release/botwork-control-plane /out/botwork-control-plane
 
 FROM scratch AS build-prebuilt

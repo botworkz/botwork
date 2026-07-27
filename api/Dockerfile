@@ -42,7 +42,7 @@ RUN apt-get update \
 RUN --mount=type=cache,id=botwork-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=botwork-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=botwork-target,target=/build/target,sharing=locked \
-    cargo build --release --locked --package botwork-api --bin botwork-api \
+    (cd api && cargo build --release --locked --package botwork-api --bin botwork-api) \
     && install -D /build/target/release/botwork-api /out/botwork-api
 
 FROM scratch AS build-prebuilt

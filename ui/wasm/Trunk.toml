@@ -50,6 +50,9 @@ port = 8080
 backend = "http://127.0.0.1:9400/api/"
 rewrite = "/api/"
 
+[tools]
+wasm_opt = "version_116"
+
 [[hooks]]
 stage = "pre_build"
 command = "tailwindcss"
