@@ -1,0 +1,22 @@
+# Disable bulk-memory WASM target features for the wasm32-unknown-unknown build.
+#
+# WHY: The workspace [profile.release] sets strip=true, lto=true, codegen-units=1
+# for size-optimised native service binaries. Those settings are inherited by this
+# crate when trunk builds it with --release. With LTO enabled, LLVM emits bulk-memory
+# operations (memory.copy / memory.fill) in the wasm output. Trunk then runs
+# wasm-opt -Oz WITHOUT --enable-bulk-memory, causing validation to fail:
+#
+#   [wasm-validator error] Bulk memory operations require bulk memory
+#   [--enable-bulk-memory], on (memory.copy ...)
+#
+# The fix is to instruct rustc not to emit bulk-memory ops for this target so
+# wasm-opt can validate and optimise the module without needing the flag.
+# The native service binaries are unaffected — this flag only applies when
+# compiling for wasm32-unknown-unknown.
+#
+# DO NOT remove this without also ensuring wasm-opt is invoked with
+# --enable-bulk-memory (which trunk does not currently do), or without
+# removing strip/lto/codegen-units=1 from the workspace [profile.release].
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=-bulk-memory,-reference-types"]
