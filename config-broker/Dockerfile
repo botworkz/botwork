@@ -45,7 +45,7 @@ RUN apt-get update \
 RUN --mount=type=cache,id=botwork-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=botwork-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=botwork-target,target=/build/target,sharing=locked \
-    cargo build --release --locked --package botwork-config-broker \
+    (cd config-broker && cargo build --release --locked --package botwork-config-broker) \
     && install -D /build/target/release/botwork-config-broker /out/botwork-config-broker
 
 FROM scratch AS build-prebuilt

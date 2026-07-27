@@ -263,7 +263,7 @@ jobs:
         BOTWORK_GIT_SHA: ${{ github.sha }}
       run: |
         set -euo pipefail
-        cargo build -p "${PACKAGE}" --release --locked
+        (cd "${CRATE}" && cargo build -p "${PACKAGE}" --release --locked)
 
     - name: Upload release binary artifact
       if: inputs.artifact == 'binary'
@@ -375,7 +375,11 @@ jobs:
               cargo test -p \${package} --locked \${FEATURES_FLAG}
             # Release build: clean env -- no RUSTFLAGS, no LLVM_PROFILE_FILE.
             # These are the bytes that will be staged and shipped.
-            cargo build -p \${package} --release --locked
+            release_crate="${CRATE}"
+            if [ "${SERVICE}" = "ui" ]; then
+              release_crate="ui/server"
+            fi
+            (cd "\${release_crate}" && cargo build -p \${package} --release --locked)
           "
 
     - name: Build per-crate coverage outputs

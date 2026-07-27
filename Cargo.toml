@@ -64,43 +64,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 [workspace.dependencies]
 serial_test = "3"
 
-# Release profile: size and optimisation settings for the shipped service
-# binaries.  All changes here are compile-time only — no runtime decompression
-# (deliberately NOT using UPX or similar; the services are long-lived daemons
-# and are glibc-dynamic, so self-extracting compression would hurt cold start
-# and increase RSS).
-#
-# panic = "abort"
-#   Removes the stack unwinder and its libgcc_s.so.1 dependency, so binaries
-#   run on distroless base-nossl-debian12 with no extra runtime libraries.
-#   Server daemons are expected to die on panic and be restarted by systemd /
-#   the container runtime.  Dev/debug builds keep the default unwind behaviour
-#   for better diagnostics.
-#
-# strip = true
-#   Strips debug symbols from the linked binary at link time.  Large, free size
-#   win with zero runtime cost.
-#
-# lto = true
-#   Enables full (fat) link-time optimisation across all codegen units.
-#   Reduces dead code and inlining boundaries between crates.  Combined with
-#   codegen-units = 1 this is the most effective compile-time size reduction
-#   available without touching opt-level.
-#
-# codegen-units = 1
-#   Compiles the whole crate graph as a single unit, giving LLVM the most
-#   visibility for optimisation and dead-code elimination.  Comes at the cost
-#   of build parallelism: release builds in CI (which share a cargo/target
-#   cache with sharing=locked across service Dockerfiles) will be noticeably
-#   slower.  That trade-off is accepted in exchange for smaller, better-
-#   optimised binaries.
-#
-# opt-level is deliberately kept at the default (3).  These are
-# latency-sensitive services (control-plane xDS streaming, brokers, launcher).
-# A size-oriented opt-level ("s" or "z") may be worth benchmarking per-crate
-# in the future, but is not enabled here to avoid throughput regressions.
+# Release profile baseline kept workspace-wide. Native binary size settings
+# live in each binary crate's `.cargo/config.toml` so `ui/wasm` release builds
+# stay on Cargo defaults and avoid LTO-triggered bulk-memory ops that trunk's
+# bundled `wasm-opt -Oz` rejects.
 [profile.release]
 panic = "abort"
-strip = true
-lto = true
-codegen-units = 1

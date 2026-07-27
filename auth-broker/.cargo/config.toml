@@ -1,0 +1,7 @@
+# Keep native-binary size/LTO settings crate-local so `ui/wasm` stays on the
+# default release profile: LTO there can emit bulk-memory ops that trunk's
+# bundled `wasm-opt -Oz` rejects.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
