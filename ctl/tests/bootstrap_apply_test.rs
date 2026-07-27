@@ -5,9 +5,9 @@
 //! methods it delegates to). Every test asserts both the correct URL
 //! shape and the correct auth headers for Phase 2 of space#311:
 //!
-//! * Admin-gated routes (`/api/tenants`, `/api/plugins`, …) must carry
+//! * Admin-gated routes (`/tenants`, `/plugins`, …) must carry
 //!   `x-botwork-admin: <operator>`.
-//! * Tenant-scoped routes (`/api/tenant/{tenant}/…`) must carry
+//! * Tenant-scoped routes (`/tenant/{tenant}/…`) must carry
 //!   `x-botwork-tenant: <tenant>`.
 //!
 //! The blocking `AdminClient` is driven from a `spawn_blocking` task so
@@ -60,19 +60,19 @@ fn client(endpoint: &str) -> AdminClient {
 
 // ── stub builders ───────────────────────────────────────────────────
 
-/// Stub: `GET /api/plugins` returns an empty list.
+/// Stub: `GET /plugins` returns an empty list.
 fn stub_list_plugins_empty() -> Mock {
     Mock::given(method("GET"))
-        .and(path("/api/plugins"))
+        .and(path("/plugins"))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[],"total":0})))
 }
 
-/// Stub: `GET /api/plugins` returns one existing plugin with the same
+/// Stub: `GET /plugins` returns one existing plugin with the same
 /// fields as `SAMPLE_YAML`, so the diff is a no-op.
 fn stub_list_plugins_existing() -> Mock {
     Mock::given(method("GET"))
-        .and(path("/api/plugins"))
+        .and(path("/plugins"))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [{
@@ -91,10 +91,10 @@ fn stub_list_plugins_existing() -> Mock {
         })))
 }
 
-/// Stub: `POST /api/plugins` creates the plugin and returns it.
+/// Stub: `POST /plugins` creates the plugin and returns it.
 fn stub_create_plugin() -> Mock {
     Mock::given(method("POST"))
-        .and(path("/api/plugins"))
+        .and(path("/plugins"))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": PLUGIN_ID,
@@ -110,18 +110,18 @@ fn stub_create_plugin() -> Mock {
         })))
 }
 
-/// Stub: `GET /api/tenants` returns an empty list.
+/// Stub: `GET /tenants` returns an empty list.
 fn stub_list_tenants_empty() -> Mock {
     Mock::given(method("GET"))
-        .and(path("/api/tenants"))
+        .and(path("/tenants"))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[],"total":0})))
 }
 
-/// Stub: `GET /api/tenants` returns one existing tenant.
+/// Stub: `GET /tenants` returns one existing tenant.
 fn stub_list_tenants_existing() -> Mock {
     Mock::given(method("GET"))
-        .and(path("/api/tenants"))
+        .and(path("/tenants"))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [{
@@ -133,10 +133,10 @@ fn stub_list_tenants_existing() -> Mock {
         })))
 }
 
-/// Stub: `POST /api/tenants` creates the tenant and returns it.
+/// Stub: `POST /tenants` creates the tenant and returns it.
 fn stub_create_tenant() -> Mock {
     Mock::given(method("POST"))
-        .and(path("/api/tenants"))
+        .and(path("/tenants"))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": TENANT_ID,
@@ -145,18 +145,18 @@ fn stub_create_tenant() -> Mock {
         })))
 }
 
-/// Stub: `GET /api/tenant/phlax/workspaces` returns an empty list.
+/// Stub: `GET /tenant/phlax/workspaces` returns an empty list.
 fn stub_list_workspaces_empty() -> Mock {
     Mock::given(method("GET"))
-        .and(path(format!("/api/tenant/{TENANT}/workspaces")))
+        .and(path(format!("/tenant/{TENANT}/workspaces")))
         .and(header("x-botwork-tenant", TENANT))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[],"total":0})))
 }
 
-/// Stub: `GET /api/tenant/phlax/workspaces` returns one existing workspace.
+/// Stub: `GET /tenant/phlax/workspaces` returns one existing workspace.
 fn stub_list_workspaces_existing() -> Mock {
     Mock::given(method("GET"))
-        .and(path(format!("/api/tenant/{TENANT}/workspaces")))
+        .and(path(format!("/tenant/{TENANT}/workspaces")))
         .and(header("x-botwork-tenant", TENANT))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [{
@@ -169,10 +169,10 @@ fn stub_list_workspaces_existing() -> Mock {
         })))
 }
 
-/// Stub: `POST /api/tenant/phlax/workspaces` creates workspace.
+/// Stub: `POST /tenant/phlax/workspaces` creates workspace.
 fn stub_create_workspace() -> Mock {
     Mock::given(method("POST"))
-        .and(path(format!("/api/tenant/{TENANT}/workspaces")))
+        .and(path(format!("/tenant/{TENANT}/workspaces")))
         .and(header("x-botwork-tenant", TENANT))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
@@ -183,18 +183,18 @@ fn stub_create_workspace() -> Mock {
         })))
 }
 
-/// Stub: `GET /api/tenant/phlax/workspace_plugins?workspace_id=...` returns empty.
+/// Stub: `GET /tenant/phlax/workspace_plugins?workspace_id=...` returns empty.
 fn stub_list_workspace_plugins_empty() -> Mock {
     Mock::given(method("GET"))
-        .and(path(format!("/api/tenant/{TENANT}/workspace_plugins")))
+        .and(path(format!("/tenant/{TENANT}/workspace_plugins")))
         .and(header("x-botwork-tenant", TENANT))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[],"total":0})))
 }
 
-/// Stub: `GET /api/tenant/phlax/workspace_plugins?workspace_id=...` returns one binding.
+/// Stub: `GET /tenant/phlax/workspace_plugins?workspace_id=...` returns one binding.
 fn stub_list_workspace_plugins_existing() -> Mock {
     Mock::given(method("GET"))
-        .and(path(format!("/api/tenant/{TENANT}/workspace_plugins")))
+        .and(path(format!("/tenant/{TENANT}/workspace_plugins")))
         .and(header("x-botwork-tenant", TENANT))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [{
@@ -207,10 +207,10 @@ fn stub_list_workspace_plugins_existing() -> Mock {
         })))
 }
 
-/// Stub: `POST /api/tenant/phlax/workspace_plugins` creates a binding.
+/// Stub: `POST /tenant/phlax/workspace_plugins` creates a binding.
 fn stub_create_workspace_plugin() -> Mock {
     Mock::given(method("POST"))
-        .and(path(format!("/api/tenant/{TENANT}/workspace_plugins")))
+        .and(path(format!("/tenant/{TENANT}/workspace_plugins")))
         .and(header("x-botwork-tenant", TENANT))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
@@ -331,14 +331,14 @@ async fn apply_dry_run_issues_no_writes() {
 
 // ── URL and header contract unit tests ──────────────────────────────
 
-/// `GET /api/plugins` carries `x-botwork-admin` and hits the Phase 2
+/// `GET /plugins` carries `x-botwork-admin` and hits the Phase 2
 /// URL, not the retired `/admin/api/v1/plugins`.
 #[tokio::test]
 async fn list_plugins_uses_admin_url_with_admin_header() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/api/plugins"))
+        .and(path("/plugins"))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[],"total":0})))
         .expect(1)
@@ -351,13 +351,13 @@ async fn list_plugins_uses_admin_url_with_admin_header() {
         .expect("join");
 }
 
-/// `GET /api/tenants` carries `x-botwork-admin`.
+/// `GET /tenants` carries `x-botwork-admin`.
 #[tokio::test]
 async fn list_tenants_uses_admin_url_with_admin_header() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/api/tenants"))
+        .and(path("/tenants"))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[],"total":0})))
         .expect(1)
@@ -370,14 +370,14 @@ async fn list_tenants_uses_admin_url_with_admin_header() {
         .expect("join");
 }
 
-/// `GET /api/tenant/{tenant}/workspaces` carries `x-botwork-tenant`
+/// `GET /tenant/{tenant}/workspaces` carries `x-botwork-tenant`
 /// matching the path segment.
 #[tokio::test]
 async fn list_workspaces_uses_tenant_url_with_tenant_header() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path(format!("/api/tenant/{TENANT}/workspaces")))
+        .and(path(format!("/tenant/{TENANT}/workspaces")))
         .and(header("x-botwork-tenant", TENANT))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[],"total":0})))
         .expect(1)
@@ -390,7 +390,7 @@ async fn list_workspaces_uses_tenant_url_with_tenant_header() {
         .expect("join");
 }
 
-/// `GET /api/tenant/{tenant}/workspace_plugins?workspace_id=…` carries
+/// `GET /tenant/{tenant}/workspace_plugins?workspace_id=…` carries
 /// `x-botwork-tenant` and includes the query param.
 #[tokio::test]
 async fn list_workspace_plugins_uses_tenant_url_with_query_param() {
@@ -399,7 +399,7 @@ async fn list_workspace_plugins_uses_tenant_url_with_query_param() {
     let workspace_uuid: uuid::Uuid = WORKSPACE_ID.parse().unwrap();
 
     Mock::given(method("GET"))
-        .and(path(format!("/api/tenant/{TENANT}/workspace_plugins")))
+        .and(path(format!("/tenant/{TENANT}/workspace_plugins")))
         .and(query_param("workspace_id", WORKSPACE_ID))
         .and(header("x-botwork-tenant", TENANT))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[],"total":0})))
@@ -417,7 +417,7 @@ async fn list_workspace_plugins_uses_tenant_url_with_query_param() {
     .expect("join");
 }
 
-/// `POST /api/tenant/{tenant}/workspaces` body no longer contains
+/// `POST /tenant/{tenant}/workspaces` body no longer contains
 /// `tenant_id` — the tenant is path-borne in Phase 2.
 #[tokio::test]
 async fn create_workspace_body_has_no_tenant_id_field() {
@@ -430,7 +430,7 @@ async fn create_workspace_body_has_no_tenant_id_field() {
     // `{"name":"mcp"}`; `body_partial_json` confirms `name` is there,
     // and the type system guarantees `tenant_id` can't appear.
     Mock::given(method("POST"))
-        .and(path(format!("/api/tenant/{TENANT}/workspaces")))
+        .and(path(format!("/tenant/{TENANT}/workspaces")))
         .and(header("x-botwork-tenant", TENANT))
         .and(header("x-botwork-admin", OPERATOR))
         .and(wiremock::matchers::body_partial_json(
@@ -457,7 +457,7 @@ async fn create_workspace_body_has_no_tenant_id_field() {
     .expect("join");
 }
 
-/// `POST /api/tenant/{tenant}/workspace_plugins` carries both
+/// `POST /tenant/{tenant}/workspace_plugins` carries both
 /// `x-botwork-tenant` and `x-botwork-admin` (the latter for audit log).
 #[tokio::test]
 async fn create_workspace_plugin_carries_both_headers() {
@@ -467,7 +467,7 @@ async fn create_workspace_plugin_carries_both_headers() {
     let plugin_uuid: uuid::Uuid = PLUGIN_ID.parse().unwrap();
 
     Mock::given(method("POST"))
-        .and(path(format!("/api/tenant/{TENANT}/workspace_plugins")))
+        .and(path(format!("/tenant/{TENANT}/workspace_plugins")))
         .and(header("x-botwork-tenant", TENANT))
         .and(header("x-botwork-admin", OPERATOR))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
@@ -593,7 +593,7 @@ async fn health_503_then_200_retries_and_succeeds() {
 }
 
 /// `/health` never returns 200 within a short overall timeout: returns
-/// `Err(())` and `apply()` is never called (no `POST /api/tenants`).
+/// `Err(())` and `apply()` is never called (no `POST /tenants`).
 #[tokio::test]
 async fn health_timeout_returns_err_and_apply_not_called() {
     let server = MockServer::start().await;
@@ -605,7 +605,7 @@ async fn health_timeout_returns_err_and_apply_not_called() {
         .mount(&server)
         .await;
 
-    // No POST /api/tenants stub: wiremock would 404 any write, and the
+    // No POST /tenants stub: wiremock would 404 any write, and the
     // test would panic if apply() were called. Additionally, assert
     // explicitly that no write hit the wire.
 
@@ -619,10 +619,10 @@ async fn health_timeout_returns_err_and_apply_not_called() {
 
     assert!(result.is_err(), "should time out on perpetual 503");
 
-    // Assert no POST /api/tenants was called.
+    // Assert no POST /tenants was called.
     let received = server.received_requests().await.unwrap();
     assert!(
-        received.iter().all(|r| r.url.path() != "/api/tenants"),
+        received.iter().all(|r| r.url.path() != "/tenants"),
         "apply() must not be called when readiness gate times out"
     );
 
