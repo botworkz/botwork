@@ -33,7 +33,7 @@
 //!
 //! # Routes (v0)
 //!
-//! * `GET /healthz` — liveness probe for goss + systemd. Returns
+//! * `GET /health` — liveness probe for goss + systemd. Returns
 //!   `{ "status": "ok" }`. No filesystem touch; literally a constant.
 //! * `GET /admin/` and `GET /admin/index.html` — serve the trunk
 //!   `index.html` (the SPA shell).

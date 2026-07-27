@@ -20,16 +20,16 @@ set -euo pipefail
 #      runs SELECT 1; it doesn't strictly need migrations, but
 #      production always has them — keep the test path honest),
 #   3. run api on the same network with the DB URL set,
-#   4. curl /api/health from a sibling client container on the
+#   4. curl /health from a sibling client container on the
 #      same network (the host has no published port — same
 #      trust-boundary posture as config-broker / control-plane),
 #      assert the response shape,
 #   5. confirm BOTWORK_DATABASE_URL unset surfaces a structured
 #      error and a non-zero exit (operator misconfig is fail-loud).
 #
-# Post-Phase-2 the public route is /api/health (unauthed liveness
-# probe). The old /admin/api/v1/health space was retired in the
-# space#311 cut and no compat shim ships.
+# Post-Phase-2 the public route is /health (unauthed aggregate
+# readiness probe). The old /admin/api/v1/health space was retired in
+# the space#311 cut and no compat shim ships.
 #
 # postgres pin must match db/migration/tests/migrate_smoke.rs and
 # the vm-baked shasset; drift between the three is exactly what
@@ -73,6 +73,10 @@ docker run --rm --network "${net}" \
 docker run -d --name "${api}" \
   --network "${net}" --network-alias admin_api \
   -e BOTWORK_DATABASE_URL="postgres://botwork:smoke@postgres/botwork" \
+  -e BOTWORK_API_DISABLE_LIVE_GATE=1 \
+  -e BOTWORK_API_DISABLE_SECRET_STORE=1 \
+  -e BOTWORK_API_DISABLE_SESSION_BROKER_EVICT=1 \
+  -e BOTWORK_AUTH_BROKER_INVITATIONS_DISABLE=1 \
   botwork/api:local >/dev/null
 
 # Wait for the listener to bind. The startup log line is
@@ -93,16 +97,17 @@ if [[ "${ready}" -ne 1 ]]; then
   exit 1
 fi
 
-# 4. — hit /api/health from a sibling curl container.
+# 4. — hit /health from a sibling curl container.
 # We pin curl by digest-less tag (CI-only, throwaway) and use
 # --fail so a non-2xx surfaces as a non-zero exit. The body is
-# tiny JSON; check the two contract fields.
+# tiny JSON; check key contract fields.
 body="$(docker run --rm --network "${net}" curlimages/curl:8.10.1 \
   --fail --silent --show-error \
-  http://admin_api:9400/api/health)"
+  http://admin_api:9400/health)"
 echo "health body: ${body}"
-echo "${body}" | grep -q '"status":"ok"'
-echo "${body}" | grep -q '"db":"reachable"'
+echo "${body}" | grep -q '"status":"ready"'
+echo "${body}" | grep -q '"dependencies"'
+echo "${body}" | grep -q '"unready":\[\]'
 
 # 5. — fail-loud on missing URL. Same shape as the other broker
 # smokes: capture exit, expect non-zero, expect the structured

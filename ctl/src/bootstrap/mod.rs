@@ -8,7 +8,7 @@
 //! exactly: idempotent upsert against `(tenant, workspace,
 //! plugin, workspace_plugin)`.
 //!
-//! Before issuing any writes the subcommand polls api's `/readyz`
+//! Before issuing any writes the subcommand polls api's `/health`
 //! until it returns 200 (bounded by `--ready-timeout`). This closes
 //! the boot race where `POST /api/tenants` fires before auth-broker
 //! is reachable. The gate is skipped when `--dry-run` or `--no-wait`
@@ -58,7 +58,7 @@
 //!   plan would be a no-op-on-failure. Skips the readiness gate.
 //! * `--ready-timeout <secs>` — overall readiness wait budget.
 //!   `BOTWORK_BOOTSTRAP_READY_TIMEOUT` or `120` seconds.
-//! * `--ready-interval <secs>` — poll interval between `/readyz`
+//! * `--ready-interval <secs>` — poll interval between `/health`
 //!   probes. `BOTWORK_BOOTSTRAP_READY_INTERVAL` or `2` seconds.
 //! * `--no-wait` — skip the readiness gate entirely. Useful when
 //!   running against an already-up api. Skipping means `apply()`
@@ -105,7 +105,7 @@ pub const READY_INTERVAL_ENV: &str = "BOTWORK_BOOTSTRAP_READY_INTERVAL";
 /// rather than hang forever.
 pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 120;
 
-/// Default interval between `/readyz` probes (seconds).
+/// Default interval between `/health` probes (seconds).
 pub const DEFAULT_READY_INTERVAL_SECS: u64 = 2;
 
 /// Parsed bootstrap-subcommand args.
@@ -115,15 +115,15 @@ pub struct Args {
     pub endpoint: String,
     pub operator: String,
     pub dry_run: bool,
-    /// Skip the `/readyz` readiness gate entirely (e.g. when api is
+    /// Skip the `/health` readiness gate entirely (e.g. when api is
     /// known-good or testing against a live cluster). When `true`,
     /// `apply()` fires immediately without polling.
     pub no_wait: bool,
     /// Overall budget (seconds) for the readiness gate. If api has not
-    /// responded 200 to `/readyz` within this window, bootstrap exits
+    /// responded 200 to `/health` within this window, bootstrap exits
     /// with code 7 without calling `apply()`.
     pub ready_timeout_secs: u64,
-    /// Pause (seconds) between successive `/readyz` probes.
+    /// Pause (seconds) between successive `/health` probes.
     pub ready_interval_secs: u64,
 }
 
@@ -263,7 +263,7 @@ pub fn help_text() -> &'static str {
      consumed; the only difference is the writer side talks HTTP+JSON to\n\
      api instead of sea-orm-writing the DB directly.\n\
      \n\
-     Before any writes, polls GET /readyz until 200 (bounded by\n\
+     Before any writes, polls GET /health until 200 (bounded by\n\
      --ready-timeout). Skipped when --dry-run or --no-wait is set.\n\
      \n\
      Defaults:\n\
@@ -282,7 +282,7 @@ pub fn run(argv: &[String]) -> Result<i32, BootstrapError> {
     let cfg = botwork_api_core::BootstrapConfig::load(&args.config_path)?;
     let client = AdminClient::new(&args.endpoint, &args.operator)?;
 
-    // Poll api's /readyz before issuing any writes so that transient
+    // Poll api's /health before issuing any writes so that transient
     // boot races (e.g. auth-broker not yet reachable) don't cause
     // apply() to fail. The gate is skipped in --dry-run mode (no
     // writes, so gating on live readiness is pointless and would break
@@ -338,7 +338,7 @@ pub enum BootstrapError {
     Client(#[from] client::ClientError),
     #[error(transparent)]
     Apply(#[from] apply::ApplyError),
-    /// api did not return 200 from `/readyz` within the configured
+    /// api did not return 200 from `/health` within the configured
     /// timeout. The u64 is the timeout in seconds for the error message.
     #[error("api did not become ready within {0}s; aborting bootstrap")]
     NotReady(u64),

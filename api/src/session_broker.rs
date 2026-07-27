@@ -208,6 +208,52 @@ mod tests {
 
     use super::*;
 
+    struct EnvGuard {
+        endpoint: Option<String>,
+        disabled: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var(ENDPOINT_ENV).ok(),
+                disabled: std::env::var(DISABLE_ENV).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(v) = &self.endpoint {
+                std::env::set_var(ENDPOINT_ENV, v);
+            } else {
+                std::env::remove_var(ENDPOINT_ENV);
+            }
+            if let Some(v) = &self.disabled {
+                std::env::set_var(DISABLE_ENV, v);
+            } else {
+                std::env::remove_var(DISABLE_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_honors_default_and_endpoint_override() {
+        let _guard = EnvGuard::capture();
+        std::env::remove_var(ENDPOINT_ENV);
+        std::env::remove_var(DISABLE_ENV);
+
+        let default_client = SessionBrokerClient::from_env();
+        assert_eq!(default_client.endpoint, ENDPOINT_DEFAULT);
+        assert!(!default_client.is_disabled());
+
+        std::env::set_var(ENDPOINT_ENV, "http://broker.example:9002");
+        std::env::set_var(DISABLE_ENV, "1");
+        let overridden = SessionBrokerClient::from_env();
+        assert_eq!(overridden.endpoint, "http://broker.example:9002");
+        assert!(overridden.is_disabled());
+    }
+
     #[test]
     fn from_env_honors_default_and_disable_flag() {
         let default_client = SessionBrokerClient::from_parts(None, None);

@@ -523,14 +523,14 @@ async fn old_url_prefix_returns_http_error_not_transport() {
 
 // ── readiness gate tests ─────────────────────────────────────────────
 
-/// `/readyz` returns 200 on the first probe: `wait_until_ready` returns
+/// `/health` returns 200 on the first probe: `wait_until_ready` returns
 /// `Ok` immediately and does not spin.
 #[tokio::test]
-async fn readyz_200_on_first_probe_returns_ok() {
+async fn health_200_on_first_probe_returns_ok() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/readyz"))
+        .and(path("/health"))
         .respond_with(ResponseTemplate::new(200))
         .expect(1)
         .mount(&server)
@@ -548,24 +548,24 @@ async fn readyz_200_on_first_probe_returns_ok() {
     // wiremock verifies `.expect(1)` at drop
 }
 
-/// `/readyz` returns 503 three times then 200: `wait_until_ready` polls
+/// `/health` returns 503 three times then 200: `wait_until_ready` polls
 /// and eventually returns `Ok`. Asserts the retry count.
 #[tokio::test]
-async fn readyz_503_then_200_retries_and_succeeds() {
+async fn health_503_then_200_retries_and_succeeds() {
     let server = MockServer::start().await;
 
     // First registered = higher priority in wiremock's FIFO ordering.
     // 503 stub is exhausted after 3 matches; subsequent requests fall
     // through to the 200 fallback stub.
     Mock::given(method("GET"))
-        .and(path("/readyz"))
+        .and(path("/health"))
         .respond_with(ResponseTemplate::new(503))
         .up_to_n_times(3)
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/readyz"))
+        .and(path("/health"))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
@@ -582,25 +582,25 @@ async fn readyz_503_then_200_retries_and_succeeds() {
 
     // Verify it retried: at least 4 calls (3 × 503, then 1 × 200).
     let received = server.received_requests().await.unwrap();
-    let readyz_count = received
+    let health_count = received
         .iter()
-        .filter(|r| r.url.path() == "/readyz")
+        .filter(|r| r.url.path() == "/health")
         .count();
     assert!(
-        readyz_count >= 4,
-        "expected ≥4 /readyz calls (3 retries + 1 success), got {readyz_count}"
+        health_count >= 4,
+        "expected ≥4 /health calls (3 retries + 1 success), got {health_count}"
     );
 }
 
-/// `/readyz` never returns 200 within a short overall timeout: returns
+/// `/health` never returns 200 within a short overall timeout: returns
 /// `Err(())` and `apply()` is never called (no `POST /api/tenants`).
 #[tokio::test]
-async fn readyz_timeout_returns_err_and_apply_not_called() {
+async fn health_timeout_returns_err_and_apply_not_called() {
     let server = MockServer::start().await;
 
-    // /readyz always 503 → wait will time out.
+    // /health always 503 → wait will time out.
     Mock::given(method("GET"))
-        .and(path("/readyz"))
+        .and(path("/health"))
         .respond_with(ResponseTemplate::new(503))
         .mount(&server)
         .await;
@@ -635,7 +635,7 @@ async fn readyz_timeout_returns_err_and_apply_not_called() {
 /// `ECONNREFUSED`, treated as not-ready, and the overall timeout is
 /// eventually hit, returning `Err(())`.
 #[tokio::test]
-async fn readyz_transport_error_retried_then_times_out() {
+async fn health_transport_error_retried_then_times_out() {
     // Start and drop the server immediately so the port is unreachable.
     let server = MockServer::start().await;
     let endpoint = server.uri();

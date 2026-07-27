@@ -37,8 +37,9 @@ use crate::handler::PREFIX;
 pub const ENDPOINT_ENV: &str = "BOTWORK_AUTH_BROKER_ENDPOINT";
 
 /// Default endpoint: the in-network alias on `botwork-internal` plus
-/// the auth-broker's HTTP port (9600).
-pub const ENDPOINT_DEFAULT: &str = "http://auth_broker:9600";
+/// the auth-broker listener that serves both `/health` and
+/// `/internal/invitations*` (9100).
+pub const ENDPOINT_DEFAULT: &str = "http://auth_broker:9100";
 
 /// Env var that flips the invitation client off. v0 break-glass only.
 pub const DISABLE_ENV: &str = "BOTWORK_AUTH_BROKER_INVITATIONS_DISABLE";
@@ -146,7 +147,7 @@ impl InvitationClient {
     /// Build a client from environment.
     ///
     /// Reads `BOTWORK_AUTH_BROKER_ENDPOINT` (default
-    /// `http://auth_broker:9600`) and
+    /// `http://auth_broker:9100`) and
     /// `BOTWORK_AUTH_BROKER_INVITATIONS_DISABLE` (truthy to disable).
     pub fn from_env() -> Self {
         Self::from_parts(
@@ -343,6 +344,72 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+
+    struct EnvGuard {
+        endpoint: Option<String>,
+        disabled: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var(ENDPOINT_ENV).ok(),
+                disabled: std::env::var(DISABLE_ENV).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(v) = &self.endpoint {
+                std::env::set_var(ENDPOINT_ENV, v);
+            } else {
+                std::env::remove_var(ENDPOINT_ENV);
+            }
+            if let Some(v) = &self.disabled {
+                std::env::set_var(DISABLE_ENV, v);
+            } else {
+                std::env::remove_var(DISABLE_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_honors_default_and_endpoint_override() {
+        let _guard = EnvGuard::capture();
+        std::env::remove_var(ENDPOINT_ENV);
+        std::env::remove_var(DISABLE_ENV);
+
+        let default_client = InvitationClient::from_env();
+        assert_eq!(default_client.endpoint, ENDPOINT_DEFAULT);
+        assert!(!default_client.is_disabled());
+
+        std::env::set_var(ENDPOINT_ENV, "http://inv.example:9100");
+        std::env::set_var(DISABLE_ENV, "1");
+        let overridden = InvitationClient::from_env();
+        assert_eq!(overridden.endpoint, "http://inv.example:9100");
+        assert!(overridden.is_disabled());
+    }
+
+    #[test]
+    fn from_parts_honors_default_and_disable_flag() {
+        let default_client = InvitationClient::from_parts(None, None);
+        assert_eq!(default_client.endpoint, ENDPOINT_DEFAULT);
+        assert!(!default_client.is_disabled());
+
+        let disabled_client = InvitationClient::from_parts(None, Some("yes".to_string()));
+        assert!(disabled_client.is_disabled());
+    }
+
+    #[test]
+    fn from_parts_honors_endpoint_override() {
+        let client = InvitationClient::from_parts(
+            Some("http://broker.example:9100".to_string()),
+            Some("TRUE".to_string()),
+        );
+        assert_eq!(client.endpoint, "http://broker.example:9100");
+        assert!(client.is_disabled());
+    }
 
     #[tokio::test]
     async fn ready_disabled_is_ready() {

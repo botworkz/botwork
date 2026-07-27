@@ -1464,4 +1464,47 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(body["status"], "ok");
     }
+
+    #[tokio::test]
+    async fn invitation_surface_serves_health_on_same_router() {
+        use crate::store::mock::{MockLeaseStore, MockPasswordFileStore, MockTenantStore};
+        use axum::body::Body;
+        use botwork_opaque_handshake::ServerSetup;
+        use http::Request;
+        use tower::ServiceExt;
+
+        let auth = crate::auth::AuthState::from_stores(
+            Arc::new(MockLeaseStore::new()),
+            Arc::new(MockTenantStore::new()),
+            Arc::new(MockPasswordFileStore::new()),
+            ServerSetup::generate(&mut rand::rng()),
+        );
+        let state = crate::cache::AppState::with_auth(std::env::temp_dir(), auth);
+        let app = build_router(state);
+
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let invitation = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/internal/invitations")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(invitation.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
 }
