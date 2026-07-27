@@ -610,7 +610,7 @@ async fn workspace_and_plugin_name_count_queries_cover_free_taken_and_error_via_
     ));
     let response = app
         .oneshot(tenant_post(
-            "/api/tenant/phlax/workspaces",
+            "/tenant/phlax/workspaces",
             "phlax",
             serde_json::json!({ "name": "mcp" }),
         ))
@@ -626,7 +626,7 @@ async fn workspace_and_plugin_name_count_queries_cover_free_taken_and_error_via_
     ));
     let response = app
         .oneshot(tenant_post(
-            "/api/tenant/phlax/workspaces",
+            "/tenant/phlax/workspaces",
             "phlax",
             serde_json::json!({ "name": "mcp" }),
         ))
@@ -642,7 +642,7 @@ async fn workspace_and_plugin_name_count_queries_cover_free_taken_and_error_via_
     ));
     let response = app
         .oneshot(tenant_post(
-            "/api/tenant/phlax/workspaces",
+            "/tenant/phlax/workspaces",
             "phlax",
             serde_json::json!({ "name": "mcp" }),
         ))
@@ -658,7 +658,7 @@ async fn workspace_and_plugin_name_count_queries_cover_free_taken_and_error_via_
     ));
     let response = app
         .oneshot(admin_post(
-            "/api/plugins",
+            "/plugins",
             serde_json::json!({
                 "name": "mcp-fetch",
                 "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -676,7 +676,7 @@ async fn workspace_and_plugin_name_count_queries_cover_free_taken_and_error_via_
     ));
     let response = app
         .oneshot(admin_post(
-            "/api/plugins",
+            "/plugins",
             serde_json::json!({
                 "name": "mcp-fetch",
                 "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -694,7 +694,7 @@ async fn workspace_and_plugin_name_count_queries_cover_free_taken_and_error_via_
     ));
     let response = app
         .oneshot(admin_post(
-            "/api/plugins",
+            "/plugins",
             serde_json::json!({
                 "name": "mcp-fetch",
                 "image": "ghcr.io/example/mcp-fetch:1.0",
@@ -714,7 +714,7 @@ async fn workspace_and_plugin_name_count_queries_cover_free_taken_and_error_via_
     ));
     let response = app
         .oneshot(tenant_post(
-            "/api/tenant/phlax/workspace_plugins",
+            "/tenant/phlax/workspace_plugins",
             "phlax",
             serde_json::json!({
                 "workspace_id": workspace_id,
@@ -743,7 +743,7 @@ async fn resolve_triple_query_body_covers_missing_and_error_paths_via_binding_cr
     ));
     let response = app
         .oneshot(tenant_post(
-            "/api/tenant/phlax/workspace_plugins",
+            "/tenant/phlax/workspace_plugins",
             "phlax",
             serde_json::json!({
                 "workspace_id": workspace_id,
@@ -762,7 +762,7 @@ async fn resolve_triple_query_body_covers_missing_and_error_paths_via_binding_cr
     ));
     let response = app
         .oneshot(tenant_post(
-            "/api/tenant/phlax/workspace_plugins",
+            "/tenant/phlax/workspace_plugins",
             "phlax",
             serde_json::json!({
                 "workspace_id": workspace_id,

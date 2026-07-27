@@ -2,12 +2,12 @@
 //!
 //! # Route table (Phase 2 reshape — botworkz/space#311)
 //!
-//! * **Admin-gated** — `GET /api/tenants`, `GET /api/tenants/{id}`,
-//!   `GET /api/plugins`, `GET /api/plugins/{id}`.
+//! * **Admin-gated** — `GET /tenants`, `GET /tenants/{id}`,
+//!   `GET /plugins`, `GET /plugins/{id}`.
 //!   Require `x-botwork-admin` header (injected by auth-broker);
 //!   absent = 403 `admin_required`.
 //!
-//! * **Tenant-scoped** — everything under `/api/tenant/{tenant}/…`.
+//! * **Tenant-scoped** — everything under `/tenant/{tenant}/…`.
 //!   The `{tenant}` path segment is the human-readable tenant name.
 //!   Handlers verify that `x-botwork-tenant` header == path tenant;
 //!   mismatch or absent header = 403 `cross_tenant_forbidden`.
@@ -70,36 +70,33 @@ impl<T> ListResponse<T> {
 pub fn router() -> Router<AppState> {
     Router::new()
         // Admin-gated: tenant list/detail and global plugin list/detail.
-        .route("/api/tenants", get(list_tenants))
-        .route("/api/tenants/{id}", get(get_tenant))
-        .route("/api/plugins", get(list_plugins))
-        .route("/api/plugins/{id}", get(get_plugin))
+        .route("/tenants", get(list_tenants))
+        .route("/tenants/{id}", get(get_tenant))
+        .route("/plugins", get(list_plugins))
+        .route("/plugins/{id}", get(get_plugin))
         // Tenant-scoped: path carries {tenant} name; consistency with
         // x-botwork-tenant header is checked in each handler.
-        .route("/api/tenant/{tenant}/workspaces", get(list_workspaces))
-        .route("/api/tenant/{tenant}/workspaces/{id}", get(get_workspace))
+        .route("/tenant/{tenant}/workspaces", get(list_workspaces))
+        .route("/tenant/{tenant}/workspaces/{id}", get(get_workspace))
         .route(
-            "/api/tenant/{tenant}/workspace_plugins",
+            "/tenant/{tenant}/workspace_plugins",
             get(list_workspace_plugins),
         )
         .route(
-            "/api/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
+            "/tenant/{tenant}/workspace_plugins/{workspace_id}/{plugin_id}",
             get(get_workspace_plugin),
         )
+        .route("/tenant/{tenant}/agent_sessions", get(list_agent_sessions))
         .route(
-            "/api/tenant/{tenant}/agent_sessions",
-            get(list_agent_sessions),
-        )
-        .route(
-            "/api/tenant/{tenant}/agent_sessions/{id}",
+            "/tenant/{tenant}/agent_sessions/{id}",
             get(get_agent_session),
         )
         .route(
-            "/api/tenant/{tenant}/session_workers",
+            "/tenant/{tenant}/session_workers",
             get(list_session_workers),
         )
         .route(
-            "/api/tenant/{tenant}/session_workers/{id}",
+            "/tenant/{tenant}/session_workers/{id}",
             get(get_session_worker),
         )
 }
@@ -760,10 +757,7 @@ mod tests {
         );
         let app = crate::handler::build_router(state);
 
-        let response = app
-            .oneshot(admin_get("/api/tenants"))
-            .await
-            .expect("response");
+        let response = app.oneshot(admin_get("/tenants")).await.expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
@@ -779,10 +773,7 @@ mod tests {
         let state = crate::test_support::app_state_with_mock_store(MockApiStore::new());
         let app = crate::handler::build_router(state);
 
-        let response = app
-            .oneshot(admin_get("/api/tenants"))
-            .await
-            .expect("response");
+        let response = app.oneshot(admin_get("/tenants")).await.expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = json_body(response).await;
@@ -796,10 +787,7 @@ mod tests {
             crate::test_support::app_state_with_mock_store(MockApiStore::always_error("boom"));
         let app = crate::handler::build_router(state);
 
-        let response = app
-            .oneshot(admin_get("/api/tenants"))
-            .await
-            .expect("response");
+        let response = app.oneshot(admin_get("/tenants")).await.expect("response");
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = to_bytes(response.into_body(), usize::MAX)
@@ -815,7 +803,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(anonymous_get("/api/tenants"))
+            .oneshot(anonymous_get("/tenants"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -829,7 +817,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(admin_get("/api/tenants/not-a-uuid"))
+            .oneshot(admin_get("/tenants/not-a-uuid"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -846,7 +834,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(admin_get(&format!("/api/tenants/{id}")))
+            .oneshot(admin_get(&format!("/tenants/{id}")))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -861,7 +849,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(admin_get(&format!("/api/tenants/{}", Uuid::new_v4())))
+            .oneshot(admin_get(&format!("/tenants/{}", Uuid::new_v4())))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -875,7 +863,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(anonymous_get("/api/tenant/phlax/workspaces"))
+            .oneshot(anonymous_get("/tenant/phlax/workspaces"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -893,7 +881,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                "/api/tenant/phlax/workspaces?workspace_id=not-a-uuid",
+                "/tenant/phlax/workspaces?workspace_id=not-a-uuid",
                 "phlax",
             ))
             .await
@@ -915,7 +903,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(tenant_get("/api/tenant/phlax/workspaces", "phlax"))
+            .oneshot(tenant_get("/tenant/phlax/workspaces", "phlax"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -938,7 +926,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
             ))
             .await
@@ -963,7 +951,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/workspaces/{workspace_id}"),
+                &format!("/tenant/phlax/workspaces/{workspace_id}"),
                 "phlax",
             ))
             .await
@@ -979,7 +967,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(anonymous_get("/api/plugins"))
+            .oneshot(anonymous_get("/plugins"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -996,7 +984,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(admin_get(&format!("/api/plugins/{plugin_id}")))
+            .oneshot(admin_get(&format!("/plugins/{plugin_id}")))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1012,7 +1000,7 @@ mod tests {
 
         let invalid_uuid = app
             .clone()
-            .oneshot(admin_get("/api/plugins/not-a-uuid"))
+            .oneshot(admin_get("/plugins/not-a-uuid"))
             .await
             .expect("response");
         assert_eq!(invalid_uuid.status(), StatusCode::BAD_REQUEST);
@@ -1022,7 +1010,7 @@ mod tests {
         );
 
         let missing = app
-            .oneshot(admin_get(&format!("/api/plugins/{}", Uuid::new_v4())))
+            .oneshot(admin_get(&format!("/plugins/{}", Uuid::new_v4())))
             .await
             .expect("response");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
@@ -1036,7 +1024,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                "/api/tenant/phlax/workspace_plugins?plugin_id=garbage",
+                "/tenant/phlax/workspace_plugins?plugin_id=garbage",
                 "phlax",
             ))
             .await
@@ -1055,7 +1043,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(tenant_get("/api/tenant/phlax/workspace_plugins", "phlax"))
+            .oneshot(tenant_get("/tenant/phlax/workspace_plugins", "phlax"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1084,7 +1072,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(tenant_get("/api/tenant/phlax/workspace_plugins", "phlax"))
+            .oneshot(tenant_get("/tenant/phlax/workspace_plugins", "phlax"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1108,7 +1096,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
                 "phlax",
             ))
             .await
@@ -1127,7 +1115,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                "/api/tenant/phlax/workspace_plugins/not-a-uuid/also-not-uuid",
+                "/tenant/phlax/workspace_plugins/not-a-uuid/also-not-uuid",
                 "phlax",
             ))
             .await
@@ -1144,7 +1132,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                "/api/tenant/phlax/agent_sessions?workspace_id=garbage",
+                "/tenant/phlax/agent_sessions?workspace_id=garbage",
                 "phlax",
             ))
             .await
@@ -1169,7 +1157,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/agent_sessions/{session_id}"),
+                &format!("/tenant/phlax/agent_sessions/{session_id}"),
                 "phlax",
             ))
             .await
@@ -1192,7 +1180,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(tenant_get("/api/tenant/phlax/agent_sessions", "phlax"))
+            .oneshot(tenant_get("/tenant/phlax/agent_sessions", "phlax"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1216,7 +1204,7 @@ mod tests {
         let invalid_uuid = app
             .clone()
             .oneshot(tenant_get(
-                "/api/tenant/phlax/agent_sessions/not-a-uuid",
+                "/tenant/phlax/agent_sessions/not-a-uuid",
                 "phlax",
             ))
             .await
@@ -1229,7 +1217,7 @@ mod tests {
 
         let success = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/agent_sessions/{session_id}"),
+                &format!("/tenant/phlax/agent_sessions/{session_id}"),
                 "phlax",
             ))
             .await
@@ -1245,7 +1233,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                "/api/tenant/phlax/session_workers?plugin_id=garbage",
+                "/tenant/phlax/session_workers?plugin_id=garbage",
                 "phlax",
             ))
             .await
@@ -1264,7 +1252,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(tenant_get("/api/tenant/phlax/session_workers", "phlax"))
+            .oneshot(tenant_get("/tenant/phlax/session_workers", "phlax"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1289,7 +1277,7 @@ mod tests {
         let app = crate::handler::build_router(state);
 
         let response = app
-            .oneshot(tenant_get("/api/tenant/phlax/session_workers", "phlax"))
+            .oneshot(tenant_get("/tenant/phlax/session_workers", "phlax"))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1317,7 +1305,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/session_workers/{worker_id}"),
+                &format!("/tenant/phlax/session_workers/{worker_id}"),
                 "phlax",
             ))
             .await
@@ -1336,7 +1324,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                "/api/tenant/phlax/workspaces/not-a-valid-uuid",
+                "/tenant/phlax/workspaces/not-a-valid-uuid",
                 "phlax",
             ))
             .await
@@ -1360,7 +1348,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/not-a-uuid"),
+                &format!("/tenant/phlax/workspace_plugins/{workspace_id}/not-a-uuid"),
                 "phlax",
             ))
             .await
@@ -1387,7 +1375,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
                 "phlax",
             ))
             .await
@@ -1403,7 +1391,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                "/api/tenant/phlax/session_workers?agent_session_id=garbage",
+                "/tenant/phlax/session_workers?agent_session_id=garbage",
                 "phlax",
             ))
             .await
@@ -1430,7 +1418,7 @@ mod tests {
 
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/session_workers/{worker_id}"),
+                &format!("/tenant/phlax/session_workers/{worker_id}"),
                 "phlax",
             ))
             .await
@@ -1454,7 +1442,7 @@ mod tests {
         let invalid_uuid = app
             .clone()
             .oneshot(tenant_get(
-                "/api/tenant/phlax/session_workers/not-a-uuid",
+                "/tenant/phlax/session_workers/not-a-uuid",
                 "phlax",
             ))
             .await
@@ -1467,7 +1455,7 @@ mod tests {
 
         let unbound = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/session_workers/{worker_id}"),
+                &format!("/tenant/phlax/session_workers/{worker_id}"),
                 "phlax",
             ))
             .await
@@ -1486,10 +1474,7 @@ mod tests {
             MockApiStore::new().with_plugin(plugin_row(plugin_id, "mcp-fetch")),
         );
         let app = crate::handler::build_router(state);
-        let response = app
-            .oneshot(admin_get("/api/plugins"))
-            .await
-            .expect("response");
+        let response = app.oneshot(admin_get("/plugins")).await.expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         let json = json_body(response).await;
         assert_eq!(json["total"], 1);
@@ -1513,7 +1498,7 @@ mod tests {
         let app = crate::handler::build_router(state);
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
+                &format!("/tenant/phlax/workspace_plugins/{workspace_id}/{plugin_id}"),
                 "phlax",
             ))
             .await
@@ -1544,7 +1529,7 @@ mod tests {
         let app = crate::handler::build_router(state);
         let response = app
             .oneshot(tenant_get(
-                &format!("/api/tenant/phlax/session_workers/{worker_id}"),
+                &format!("/tenant/phlax/session_workers/{worker_id}"),
                 "phlax",
             ))
             .await

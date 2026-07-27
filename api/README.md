@@ -16,53 +16,63 @@ tenant layout described below.
 GET /health                                              → { status, dependencies, unready } (unauthed)
 
 # Admin-gated (requires x-botwork-admin: true from auth-broker)
-GET  /api/tenants                                        → { items: [...], total }
-POST /api/tenants                                        → 201 Tenant + Location
-GET  /api/tenants/{id}                                   → Tenant
-PUT  /api/tenants/{id}                                   → 200 Tenant
-DELETE /api/tenants/{id}                                 → 204 / 409
+GET  /tenants                                            → { items: [...], total }
+POST /tenants                                            → 201 Tenant + Location
+GET  /tenants/{id}                                       → Tenant
+PUT  /tenants/{id}                                       → 200 Tenant
+DELETE /tenants/{id}                                     → 204 / 409
 
-GET  /api/plugins                                        → { items: [...], total }
-GET  /api/plugins/{id}                                   → Plugin
-POST /api/plugins                                        → 201 Plugin + Location
-PUT  /api/plugins/{id}                                   → 200 Plugin
-DELETE /api/plugins/{id}                                 → 204 / 409
+GET  /plugins                                            → { items: [...], total }
+GET  /plugins/{id}                                       → Plugin
+POST /plugins                                            → 201 Plugin + Location
+PUT  /plugins/{id}                                       → 200 Plugin
+DELETE /plugins/{id}                                     → 204 / 409
 
 # Tenant-scoped (path tenant must match x-botwork-tenant header from auth-broker)
-GET  /api/tenant/{tenant}/workspaces                     → { items: [...], total }
-POST /api/tenant/{tenant}/workspaces                     → 201 Workspace + Location
-GET  /api/tenant/{tenant}/workspaces/{id}                → Workspace
-PUT  /api/tenant/{tenant}/workspaces/{id}                → 200 Workspace
-DELETE /api/tenant/{tenant}/workspaces/{id}              → 204
+GET  /tenant/{tenant}/workspaces                         → { items: [...], total }
+POST /tenant/{tenant}/workspaces                         → 201 Workspace + Location
+GET  /tenant/{tenant}/workspaces/{id}                    → Workspace
+PUT  /tenant/{tenant}/workspaces/{id}                    → 200 Workspace
+DELETE /tenant/{tenant}/workspaces/{id}                  → 204
 
-GET  /api/tenant/{tenant}/workspace_plugins              → { items: [...], total }
+GET  /tenant/{tenant}/workspace_plugins                  → { items: [...], total }
     ?workspace_id=<uuid>&plugin_id=<uuid>                  (optional filters)
-GET  /api/tenant/{tenant}/workspace_plugins/{wid}/{pid}  → WorkspacePlugin
-POST /api/tenant/{tenant}/workspace_plugins              → 201 WorkspacePlugin
-PUT  /api/tenant/{tenant}/workspace_plugins/{wid}/{pid}  → 200 WorkspacePlugin
-DELETE /api/tenant/{tenant}/workspace_plugins/{wid}/{pid}→ 204
+GET  /tenant/{tenant}/workspace_plugins/{wid}/{pid}      → WorkspacePlugin
+POST /tenant/{tenant}/workspace_plugins                  → 201 WorkspacePlugin
+PUT  /tenant/{tenant}/workspace_plugins/{wid}/{pid}      → 200 WorkspacePlugin
+DELETE /tenant/{tenant}/workspace_plugins/{wid}/{pid}    → 204
 
-GET  /api/tenant/{tenant}/agent_sessions                 → { items: [...], total }
+GET  /tenant/{tenant}/agent_sessions                     → { items: [...], total }
     ?state=active|reaped&live=true|false                   (optional filters)
-GET  /api/tenant/{tenant}/agent_sessions/{id}            → AgentSession
+GET  /tenant/{tenant}/agent_sessions/{id}                → AgentSession
 
-GET  /api/tenant/{tenant}/session_workers                → { items: [...], total }
+GET  /tenant/{tenant}/session_workers                    → { items: [...], total }
     ?live=true|false&agent_session_id=<uuid>               (optional filters)
-GET  /api/tenant/{tenant}/session_workers/{id}           → SessionWorker
+GET  /tenant/{tenant}/session_workers/{id}               → SessionWorker
 
-POST /api/tenant/{tenant}/secrets                        → 201 { stored, created } + Location
-DELETE /api/tenant/{tenant}/secrets/{service}/{name}     → 204 / 404
+POST /tenant/{tenant}/secrets                            → 201 { stored, created } + Location
+DELETE /tenant/{tenant}/secrets/{service}/{name}         → 204 / 404
 ```
+
+> **Note — external vs internal namespace:** api serves all routes at bare `/*`
+> (as shown above). The `/api/*` prefix is an **external** namespacing concern
+> owned by the ingress (envoy in `botworkz/vm`, listener route table in
+> `botworkz/space`), which strips the prefix before proxying to api.
+> auth-broker's ext_authz filter sees the original external `/api/*` path and
+> matches on it accordingly — see `auth-broker/src/grammar.rs` for the
+> authoritative comment on this split.
 
 **Deleted in Phase 2:** the entire `/admin/api/v1/*` route space is gone. There
 is no compat shim. This is a "ships together or not at all" cut per [space#311].
 
 **Not handled here:** `/api/auth/{login,logout,whoami}` — these are proxied to
-`botwork-extra`'s auth-broker by envoy and never reach this service.
+`botwork-extra`'s auth-broker by envoy and never reach this service. (The
+`/api/auth/*` paths are part of the **external** namespace and are routed by
+envoy before any prefix-strip; they never arrive at api's upstream.)
 
 ## Path-borne tenant contract
 
-All tenant-scoped endpoints (`/api/tenant/{tenant}/*`) enforce:
+All tenant-scoped endpoints (`/tenant/{tenant}/*`) enforce:
 
 1. **`x-botwork-tenant` header must be present** — injected by auth-broker after
    validating the bearer/cookie. Absent = 403 `cross_tenant_forbidden`.
@@ -119,8 +129,8 @@ The canonical source of the regex and reserved list is
 
 ## Secret store coupling
 
-The secrets write endpoints (`POST /api/tenant/{tenant}/secrets`,
-`DELETE /api/tenant/{tenant}/secrets/{service}/{name}`) forward to the
+The secrets write endpoints (`POST /tenant/{tenant}/secrets`,
+`DELETE /tenant/{tenant}/secrets/{service}/{name}`) forward to the
 auth-broker internal secret-store API (`secret_store`, default port 9101).
 The tenant comes from the URL path (no `tenant` field in the request body —
 that was dropped in Phase 2).

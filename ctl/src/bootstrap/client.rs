@@ -17,37 +17,43 @@
 //!
 //! # Wire contract (matches api/src/{read,write}.rs — Phase 2, space#311)
 //!
+//! api serves all routes at the **bare `/*` namespace**. The external
+//! `/api/*` prefix is owned by the ingress (envoy in `botworkz/vm`,
+//! listener route table in `botworkz/space`), which strips the prefix
+//! before proxying to api. This client calls api **directly** on the
+//! internal network and must therefore use bare paths (no `/api` prefix).
+//!
 //! ```text
 //! # Admin-gated (x-botwork-admin: <operator> required)
-//! GET    /api/tenants                                   -> { items, total }
-//! POST   /api/tenants                                   {name}
-//! PUT    /api/tenants/{id}                              {name, if_unmodified_since}
+//! GET    /tenants                                       -> { items, total }
+//! POST   /tenants                                       {name}
+//! PUT    /tenants/{id}                                  {name, if_unmodified_since}
 //!
-//! GET    /api/plugins                                   -> { items, total }
-//! POST   /api/plugins                                   {name, image, port, …, egress}
-//! PUT    /api/plugins/{id}                              {name, image, …, if_unmodified_since}
+//! GET    /plugins                                       -> { items, total }
+//! POST   /plugins                                       {name, image, port, …, egress}
+//! PUT    /plugins/{id}                                  {name, image, …, if_unmodified_since}
 //!
 //! # Tenant-scoped (x-botwork-tenant: <name> required, must match path)
-//! GET    /api/tenant/{tenant}/workspaces                -> { items, total }
-//! POST   /api/tenant/{tenant}/workspaces                {name}
-//! PUT    /api/tenant/{tenant}/workspaces/{id}           {name, if_unmodified_since}
+//! GET    /tenant/{tenant}/workspaces                    -> { items, total }
+//! POST   /tenant/{tenant}/workspaces                    {name}
+//! PUT    /tenant/{tenant}/workspaces/{id}               {name, if_unmodified_since}
 //!
-//! GET    /api/tenant/{tenant}/workspace_plugins         -> { items, total }
+//! GET    /tenant/{tenant}/workspace_plugins             -> { items, total }
 //!        ?workspace_id=<uuid>&plugin_id=<uuid>
-//! POST   /api/tenant/{tenant}/workspace_plugins         {workspace_id, plugin_id, config?}
-//! PUT    /api/tenant/{tenant}/workspace_plugins/{wid}/{pid}
+//! POST   /tenant/{tenant}/workspace_plugins             {workspace_id, plugin_id, config?}
+//! PUT    /tenant/{tenant}/workspace_plugins/{wid}/{pid}
 //!                                                       {config?, if_unmodified_since}
 //! ```
 //!
 //! ## Header conventions
 //!
-//! * **Admin-gated routes** (`/api/tenants`, `/api/plugins` and their
+//! * **Admin-gated routes** (`/tenants`, `/plugins` and their
 //!   sub-paths): `x-botwork-admin: <operator>`. The API requires the
 //!   header to be present and non-empty; it also reads the value as
 //!   the operator identity for audit logs — sending the operator name
 //!   satisfies both the auth gate and the audit requirement in one
 //!   header.
-//! * **Tenant-scoped routes** (`/api/tenant/{tenant}/…`):
+//! * **Tenant-scoped routes** (`/tenant/{tenant}/…`):
 //!   `x-botwork-tenant: <tenant>` (must match the path segment).
 //!   `x-botwork-admin: <operator>` is also sent so the audit log
 //!   records the import operator rather than "anonymous" (the API
@@ -102,14 +108,14 @@ impl AdminClient {
         })
     }
 
-    /// URL for admin-gated routes: `{endpoint}/api{path}`.
+    /// URL for admin-gated routes: `{endpoint}{path}`.
     fn admin_url(&self, path: &str) -> String {
-        format!("{}/api{path}", self.endpoint)
+        format!("{}{path}", self.endpoint)
     }
 
-    /// URL for tenant-scoped routes: `{endpoint}/api/tenant/{tenant}{path}`.
+    /// URL for tenant-scoped routes: `{endpoint}/tenant/{tenant}{path}`.
     fn tenant_url(&self, tenant: &str, path: &str) -> String {
-        format!("{}/api/tenant/{tenant}{path}", self.endpoint)
+        format!("{}/tenant/{tenant}{path}", self.endpoint)
     }
 
     /// Poll `GET {endpoint}/health` until api returns HTTP 200 or

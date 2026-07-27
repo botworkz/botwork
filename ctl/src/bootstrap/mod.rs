@@ -10,7 +10,7 @@
 //!
 //! Before issuing any writes the subcommand polls api's `/health`
 //! until it returns 200 (bounded by `--ready-timeout`). This closes
-//! the boot race where `POST /api/tenants` fires before auth-broker
+//! the boot race where `POST /tenants` fires before auth-broker
 //! is reachable. The gate is skipped when `--dry-run` or `--no-wait`
 //! is set.
 //!
