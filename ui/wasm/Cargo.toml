@@ -69,3 +69,19 @@ leptos-shadcn-table = "=0.9.0"
 # the only knob we have. Hand-written `unsafe { }` blocks here are
 # still expected to be caught in review — `grep -n unsafe src/`
 # returns nothing today.
+
+[profile.release]
+# Keep the wasm crate on its own release profile instead of inheriting
+# the parent workspace's native-binary settings. `strip = true`,
+# `lto = true`, and `codegen-units = 1` in the shared root profile make
+# LLVM emit bulk-memory ops (`memory.copy` / `memory.fill`) that
+# trunk's bundled `wasm-opt -Oz` rejects unless it is given
+# `--enable-bulk-memory`. Building `ui/wasm` from this standalone
+# workspace preserves the native size optimisation on the service bins
+# while keeping the wasm release build on its pre-PR profile.
+panic = "abort"
+
+# Separate workspace declaration so the parent workspace does not try
+# to include this crate (the `members` list in the root Cargo.toml
+# does not contain `ui/wasm`).
+[workspace]

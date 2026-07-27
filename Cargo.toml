@@ -5,7 +5,6 @@ members = [
     "api-core",
     "auth-broker",
     "ui/server",
-    "ui/wasm",
     "bootstrap",
     "cli",
     "config-broker",
@@ -20,6 +19,17 @@ members = [
     "vault",
     "version",
 ]
+
+# `ui/wasm` is intentionally NOT a member of the parent workspace.
+# `trunk build --release` is run from `ui/wasm/` directly (see
+# `ui/Dockerfile`), and the root `[profile.release]` is tuned for the
+# native service binaries (`strip = true`, `lto = true`,
+# `codegen-units = 1`). When the wasm crate inherits that shared
+# profile, LLVM emits bulk-memory ops (`memory.copy` / `memory.fill`)
+# that trunk's bundled `wasm-opt -Oz` does not validate without
+# `--enable-bulk-memory`. Keep the wasm crate carved out with its own
+# local `[workspace]` + `[profile.release]` so the native size
+# optimisation remains intact without breaking the wasm bundle build.
 
 # Default set for bare `cargo build` / `cargo test` (no `--workspace`).
 # Excludes `ui/wasm` because that crate only links against the
