@@ -120,9 +120,10 @@ The canonical source of the regex and reserved list is
 ## Secret store coupling
 
 The secrets write endpoints (`POST /api/tenant/{tenant}/secrets`,
-`DELETE /api/tenant/{tenant}/secrets/{service}/{name}`) forward to a
-dedicated `secret_store` backend service. The tenant comes from the URL
-path (no `tenant` field in the request body — that was dropped in Phase 2).
+`DELETE /api/tenant/{tenant}/secrets/{service}/{name}`) forward to the
+auth-broker internal secret-store API (`secret_store`, default port 9101).
+The tenant comes from the URL path (no `tenant` field in the request body —
+that was dropped in Phase 2).
 
 The wire contract:
 
@@ -151,8 +152,16 @@ docker run --rm --name botwork-api \
 - `BOTWORK_API_BIND` (default: `0.0.0.0:9400`) — bind address (never published).
 - `BOTWORK_CONTROL_PLANE_ENDPOINT` (default: `http://control_plane:9300`) —
   live-state ack target. Break-glass: `BOTWORK_API_DISABLE_LIVE_GATE=1`.
-- `BOTWORK_SECRET_STORE_ENDPOINT` (default: `http://secret_store:9500`).
-- `BOTWORK_API_DISABLE_SECRET_STORE` — break-glass; secrets return 503.
+- `BOTWORK_SECRET_STORE_ENDPOINT` (default: `http://secret_store:9101`) —
+  auth-broker internal secret-store API target. Break-glass:
+  `BOTWORK_API_DISABLE_SECRET_STORE=1`.
+- `BOTWORK_SESSION_BROKER_EVICT_ENDPOINT` (default:
+  `http://session_broker:9002`) — session-broker admin target for eviction and
+  readiness. Break-glass: `BOTWORK_API_DISABLE_SESSION_BROKER_EVICT=1`.
+- `BOTWORK_AUTH_BROKER_ENDPOINT` (default: `http://auth_broker:9100`) —
+  auth-broker invitation target for invitation mint/renew/revoke and readiness.
+- `BOTWORK_AUTH_BROKER_INVITATIONS_DISABLE` — break-glass; invitation calls are
+  suppressed and placeholder values are returned.
 - `RUST_LOG` — tracing-subscriber filter; defaults to `info`.
 
 ## Exit codes

@@ -123,9 +123,19 @@
 //!   break-glass; bypasses control-plane coupling. Not for
 //!   production use.
 //! * `BOTWORK_SECRET_STORE_ENDPOINT` (default
-//!   `http://secret_store:9500`) — secret-store backend endpoint.
+//!   `http://secret_store:9101`) — secret-store backend endpoint.
 //! * `BOTWORK_API_DISABLE_SECRET_STORE` (default unset) —
 //!   break-glass; all secret writes return 503 immediately.
+//! * `BOTWORK_SESSION_BROKER_EVICT_ENDPOINT` (default
+//!   `http://session_broker:9002`) — session-broker admin endpoint
+//!   used for tenant eviction + readiness.
+//! * `BOTWORK_API_DISABLE_SESSION_BROKER_EVICT` (default unset) —
+//!   break-glass; suppresses eviction calls.
+//! * `BOTWORK_AUTH_BROKER_ENDPOINT` (default
+//!   `http://auth_broker:9100`) — auth-broker invitation endpoint
+//!   used for invitation mint/renew/revoke + readiness.
+//! * `BOTWORK_AUTH_BROKER_INVITATIONS_DISABLE` (default unset) —
+//!   break-glass; invitation operations return placeholder values.
 //! * `RUST_LOG` — standard `tracing-subscriber` filter; defaults to
 //!   `info`.
 

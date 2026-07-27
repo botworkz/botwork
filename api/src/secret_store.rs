@@ -3,10 +3,10 @@
 //! ## Why this exists
 //!
 //! `api` is the operator-facing write surface for secrets.
-//! Secrets themselves are NOT stored in postgres — they live in a
-//! separate secret-store service (`secret_store` on
-//! `botwork-internal`) that is responsible for persistence, access
-//! control at the storage layer, and eventual HSM/vault integration.
+//! Secrets themselves are NOT stored in postgres — they live behind
+//! auth-broker's internal user-API listener (`secret_store` alias on
+//! `botwork-internal`, default port 9101) that is responsible for
+//! persistence and access control at the storage layer.
 //! This module is the seam between api and that backend: a
 //! small, stable HTTP contract that lets api forward put and
 //! delete operations without knowing anything about how secrets are
@@ -30,9 +30,8 @@
 //! ## Configurability + escape hatch
 //!
 //! Endpoint comes from `BOTWORK_SECRET_STORE_ENDPOINT`
-//! (default `http://secret_store:9500`, following the workspace port
-//! convention: config-broker=9200, control-plane=9300,
-//! api=9400, secret-store=9500). Setting
+//! (default `http://secret_store:9101`, the auth-broker internal
+//! user-API listener consumed by api). Setting
 //! `BOTWORK_API_DISABLE_SECRET_STORE=1` short-circuits all
 //! calls: write handlers return 503 immediately with a clear
 //! break-glass message. v0 break-glass posture only; production sets
@@ -52,8 +51,8 @@ use crate::handler::PREFIX;
 pub const ENDPOINT_ENV: &str = "BOTWORK_SECRET_STORE_ENDPOINT";
 
 /// Default endpoint: the in-network alias on `botwork-internal` plus
-/// the secret-store's HTTP port (9500).
-pub const ENDPOINT_DEFAULT: &str = "http://secret_store:9500";
+/// the auth-broker internal secret-store listener (9101).
+pub const ENDPOINT_DEFAULT: &str = "http://secret_store:9101";
 
 /// Env var that flips the secret-store client off. v0 break-glass only.
 pub const DISABLE_ENV: &str = "BOTWORK_API_DISABLE_SECRET_STORE";
@@ -144,7 +143,7 @@ impl SecretStoreClient {
     /// Build a client from environment.
     ///
     /// Reads `BOTWORK_SECRET_STORE_ENDPOINT` (default
-    /// `http://secret_store:9500`) and
+    /// `http://secret_store:9101`) and
     /// `BOTWORK_API_DISABLE_SECRET_STORE` (truthy to disable).
     pub fn from_env() -> Self {
         Self::from_parts(
@@ -352,6 +351,35 @@ mod tests {
 
     use super::*;
 
+    struct EnvGuard {
+        endpoint: Option<String>,
+        disabled: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn capture() -> Self {
+            Self {
+                endpoint: std::env::var(ENDPOINT_ENV).ok(),
+                disabled: std::env::var(DISABLE_ENV).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(v) = &self.endpoint {
+                std::env::set_var(ENDPOINT_ENV, v);
+            } else {
+                std::env::remove_var(ENDPOINT_ENV);
+            }
+            if let Some(v) = &self.disabled {
+                std::env::set_var(DISABLE_ENV, v);
+            } else {
+                std::env::remove_var(DISABLE_ENV);
+            }
+        }
+    }
+
     fn sample_put() -> PutSecretRequest {
         PutSecretRequest {
             tenant: "phlax".to_string(),
@@ -376,6 +404,23 @@ mod tests {
     }
 
     #[test]
+    fn from_env_honors_default_and_endpoint_override() {
+        let _guard = EnvGuard::capture();
+        std::env::remove_var(ENDPOINT_ENV);
+        std::env::remove_var(DISABLE_ENV);
+
+        let default_client = SecretStoreClient::from_env();
+        assert_eq!(default_client.endpoint, ENDPOINT_DEFAULT);
+        assert!(!default_client.is_disabled());
+
+        std::env::set_var(ENDPOINT_ENV, "http://secret-store.example:9101");
+        std::env::set_var(DISABLE_ENV, "1");
+        let overridden = SecretStoreClient::from_env();
+        assert_eq!(overridden.endpoint, "http://secret-store.example:9101");
+        assert!(overridden.is_disabled());
+    }
+
+    #[test]
     fn from_parts_recognizes_all_truthy_disable_values() {
         for truthy in &["true", "TRUE", "yes", "YES"] {
             let client = SecretStoreClient::from_parts(None, Some((*truthy).to_string()));
@@ -390,6 +435,16 @@ mod tests {
             !not_disabled.is_disabled(),
             "expected disabled=false for DISABLE_ENV=0"
         );
+    }
+
+    #[test]
+    fn from_parts_honors_endpoint_override() {
+        let client = SecretStoreClient::from_parts(
+            Some("http://secret-store.example:9101".to_string()),
+            Some("true".to_string()),
+        );
+        assert_eq!(client.endpoint, "http://secret-store.example:9101");
+        assert!(client.is_disabled());
     }
 
     #[tokio::test]

@@ -374,6 +374,12 @@ mod tests {
         let disabled_client = ControlPlaneClient::from_env();
         assert!(disabled_client.is_disabled());
         assert_eq!(disabled_client.endpoint, ENDPOINT_DEFAULT);
+
+        std::env::set_var(ENDPOINT_ENV, "http://cp.example:9300");
+        std::env::remove_var(DISABLE_ENV);
+        let overridden = ControlPlaneClient::from_env();
+        assert_eq!(overridden.endpoint, "http://cp.example:9300");
+        assert!(!overridden.is_disabled());
     }
 
     #[tokio::test]

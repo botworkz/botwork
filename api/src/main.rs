@@ -89,7 +89,7 @@ async fn main() -> ExitCode {
 
     // Secret-store backend. SecretStoreClient reads
     // BOTWORK_SECRET_STORE_ENDPOINT (default
-    // http://secret_store:9500) and the break-glass
+    // http://secret_store:9101) and the break-glass
     // BOTWORK_API_DISABLE_SECRET_STORE flag.
     let secret_store = SecretStoreClient::from_env();
     let ss_endpoint = std::env::var(botwork_api::secret_store::ENDPOINT_ENV)
@@ -112,7 +112,7 @@ async fn main() -> ExitCode {
     );
 
     // Invitation minting client. InvitationClient reads
-    // BOTWORK_AUTH_BROKER_ENDPOINT (default http://auth_broker:9600) and the
+    // BOTWORK_AUTH_BROKER_ENDPOINT (default http://auth_broker:9100) and the
     // break-glass BOTWORK_AUTH_BROKER_INVITATIONS_DISABLE flag.
     let invitation_client = InvitationClient::from_env();
     let inv_endpoint = std::env::var(botwork_api::invitation_client::ENDPOINT_ENV)
