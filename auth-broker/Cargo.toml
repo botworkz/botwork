@@ -42,7 +42,7 @@ regex = "1"
 # `botworkz/botwork`. The runtime is rustls-tokio so we don't drag in
 # openssl; `with-uuid`, `with-chrono`, `with-json` match the column
 # types `lease` / `opaque_password_file` declare.
-sea-orm = { version = "1.1.20", default-features = false, features = [
+sea-orm = { version = "2.0.0", default-features = false, features = [
     "macros",
     "runtime-tokio-rustls",
     "sqlx-postgres",
@@ -206,7 +206,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # in dev-dependencies means the `mock` feature is compiled into tests but
 # NOT into the production binary (Cargo resolves dev-dependency features
 # separately from the main dependency graph).
-sea-orm = { version = "1.1.20", default-features = false, features = ["mock"] }
+sea-orm = { version = "2.0.0", default-features = false, features = ["mock"] }
 tempfile = "3"
 # Real postgres for the OPAQUE e2e + dummy-flow integration tests.
 # Same pin both the `botwork` admin-api + session-broker crates use,

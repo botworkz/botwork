@@ -13,7 +13,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 # SeaORM, no defaults: we don't need bigdecimal / rust_decimal / time, only the
 # narrow set of value types we expect to use in entities. Re-pick later if a
 # specific entity needs a wider value-type surface.
-sea-orm = { version = "1.1.20", default-features = false, features = [
+sea-orm = { version = "2.0.0", default-features = false, features = [
     "macros",
     "runtime-tokio-rustls",
     "sqlx-postgres",
