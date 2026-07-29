@@ -24,7 +24,7 @@ path = "src/bin/botwork_vault.rs"
 botwork-opaque-handshake = { path = "../opaque-handshake" }
 botwork-version = { path = "../version" }
 base64 = "0.23"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 # hkdf 0.13 is built against digest 0.11, matching sha2 0.11 below.
