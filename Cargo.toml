@@ -62,7 +62,7 @@ unsafe_code = "forbid"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 
 [workspace.dependencies]
-serial_test = "3"
+serial_test = "4"
 
 # Release profile baseline kept workspace-wide. Native binary size settings
 # live in each binary crate's `.cargo/config.toml` so `ui/wasm` release builds
