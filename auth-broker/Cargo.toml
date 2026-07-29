@@ -33,7 +33,7 @@ botwork-vault = { path = "../vault", features = ["test-support"] }
 # `botworkz/botwork` proper, this is a plain in-workspace path dep —
 # no git/tag indirection needed.
 botwork-entity = { path = "../db/entity" }
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 hkdf = "0.13"
 rand = "0.10"
