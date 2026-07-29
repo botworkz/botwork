@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 botwork-opaque-handshake = { path = "../opaque-handshake" }
 botwork-version = { path = "../version" }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
 # `humantime::parse_duration` for `--lease 7d` / `--lease 12h`.
