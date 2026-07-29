@@ -25,7 +25,7 @@ hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 prost = "0.14"
 prost-types = "0.14"
 regex = "1"
-sea-orm = { version = "1.1.20", default-features = false, features = [
+sea-orm = { version = "2.0.0", default-features = false, features = [
     "macros",
     "runtime-tokio-rustls",
     "sqlx-postgres",
@@ -49,7 +49,7 @@ botwork-migration = { path = "../db/migration" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 http = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-sea-orm = { version = "1.1.20", default-features = false, features = ["mock"] }
+sea-orm = { version = "2.0.0", default-features = false, features = ["mock"] }
 sea-orm-migration = { version = "1.1.20", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",

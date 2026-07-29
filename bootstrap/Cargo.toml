@@ -27,7 +27,7 @@ async-trait = "0.1"
 botwork-api-core = { path = "../api-core" }
 botwork-entity = { path = "../db/entity" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-sea-orm = { version = "1.1.20", default-features = false, features = [
+sea-orm = { version = "2.0.0", default-features = false, features = [
     "mock",
     "macros",
     "runtime-tokio-rustls",
@@ -52,7 +52,7 @@ tempfile = "3"
 # Re-declared here for the test_smoke harness; everywhere else in
 # this crate uses chrono::Utc from the main [dependencies] above.
 serde_yaml = "0.9"
-sea-orm = { version = "1.1.20", default-features = false, features = [
+sea-orm = { version = "2.0.0", default-features = false, features = [
     "mock",
     "macros",
     "runtime-tokio-rustls",
