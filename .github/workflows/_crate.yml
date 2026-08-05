@@ -162,7 +162,7 @@ jobs:
     - uses: actions/checkout@v7
     - name: Reclaim runner disk space
       if: steps.cache.outputs.cache-hit != 'true' || steps.should-test.outputs.run == 'true'
-      uses: envoyproxy/toolshed/actions/diskspace@4cca74db6587ee660235fbadaac5a4fc2a19cfa9
+      uses: envoyproxy/toolshed/actions/diskspace@6a376dc7f9b74ca79ef667f7a055b06c2ff9b99f
 
     - name: Validate artifact inputs
       run: |
